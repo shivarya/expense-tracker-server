@@ -1,0 +1,42 @@
+[19-Jan-2026 20:06:52 Asia/Kolkata] PHP Warning:  Undefined array key "account_id" in C:\Users\Ash\Documents\Projects\apps\expense-tracker\server\controllers\syncController.php on line 262
+[19-Jan-2026 20:06:52 Asia/Kolkata] PHP Warning:  Undefined array key "category_id" in C:\Users\Ash\Documents\Projects\apps\expense-tracker\server\controllers\syncController.php on line 263
+[19-Jan-2026 20:06:52 Asia/Kolkata] PHP Warning:  Undefined array key "transaction_date" in C:\Users\Ash\Documents\Projects\apps\expense-tracker\server\controllers\syncController.php on line 268
+[19-Jan-2026 20:06:52 Asia/Kolkata] PHP Warning:  Undefined array key "account_id" in C:\Users\Ash\Documents\Projects\apps\expense-tracker\server\controllers\syncController.php on line 262
+[19-Jan-2026 20:06:52 Asia/Kolkata] PHP Warning:  Undefined array key "category_id" in C:\Users\Ash\Documents\Projects\apps\expense-tracker\server\controllers\syncController.php on line 263
+[19-Jan-2026 20:06:52 Asia/Kolkata] PHP Warning:  Undefined array key "transaction_date" in C:\Users\Ash\Documents\Projects\apps\expense-tracker\server\controllers\syncController.php on line 268
+[19-Jan-2026 20:06:52 Asia/Kolkata] PHP Warning:  Undefined array key "account_id" in C:\Users\Ash\Documents\Projects\apps\expense-tracker\server\controllers\syncController.php on line 262
+[19-Jan-2026 20:06:52 Asia/Kolkata] PHP Warning:  Undefined array key "category_id" in C:\Users\Ash\Documents\Projects\apps\expense-tracker\server\controllers\syncController.php on line 263
+[19-Jan-2026 20:06:52 Asia/Kolkata] PHP Warning:  Undefined array key "transaction_date" in C:\Users\Ash\Documents\Projects\apps\expense-tracker\server\controllers\syncController.php on line 268
+[19-Jan-2026 20:06:52 Asia/Kolkata] PHP Warning:  Undefined array key "account_id" in C:\Users\Ash\Documents\Projects\apps\expense-tracker\server\controllers\syncController.php on line 262
+[19-Jan-2026 20:06:52 Asia/Kolkata] PHP Warning:  Undefined array key "category_id" in C:\Users\Ash\Documents\Projects\apps\expense-tracker\server\controllers\syncController.php on line 263
+[19-Jan-2026 20:06:52 Asia/Kolkata] PHP Warning:  Undefined array key "transaction_date" in C:\Users\Ash\Documents\Projects\apps\expense-tracker\server\controllers\syncController.php on line 268
+[19-Jan-2026 20:06:52 Asia/Kolkata] PHP Warning:  Undefined array key "account_id" in C:\Users\Ash\Documents\Projects\apps\expense-tracker\server\controllers\syncController.php on line 262
+[19-Jan-2026 20:06:52 Asia/Kolkata] PHP Warning:  Undefined array key "category_id" in C:\Users\Ash\Documents\Projects\apps\expense-tracker\server\controllers\syncController.php on line 263
+[19-Jan-2026 20:06:52 Asia/Kolkata] PHP Warning:  Undefined array key "transaction_date" in C:\Users\Ash\Documents\Projects\apps\expense-tracker\server\controllers\syncController.php on line 268
+[19-Jan-2026 20:06:52 Asia/Kolkata] PHP Warning:  Undefined array key "account_id" in C:\Users\Ash\Documents\Projects\apps\expense-tracker\server\controllers\syncController.php on line 262
+[19-Jan-2026 20:06:52 Asia/Kolkata] PHP Warning:  Undefined array key "category_id" in C:\Users\Ash\Documents\Projects\apps\expense-tracker\server\controllers\syncController.php on line 263
+[19-Jan-2026 20:06:52 Asia/Kolkata] PHP Warning:  Undefined array key "transaction_date" in C:\Users\Ash\Documents\Projects\apps\expense-tracker\server\controllers\syncController.php on line 268
+[19-Jan-2026 20:06:52 Asia/Kolkata] PHP Warning:  Undefined array key "account_id" in C:\Users\Ash\Documents\Projects\apps\expense-tracker\server\controllers\syncController.php on line 262
+[19-Jan-2026 20:06:52 Asia/Kolkata] PHP Warning:  Undefined array key "category_id" in C:\Users\Ash\Documents\Projects\apps\expense-tracker\server\controllers\syncController.php on line 263
+[19-Jan-2026 20:06:52 Asia/Kolkata] PHP Warning:  Undefined array key "transaction_date" in C:\Users\Ash\Documents\Projects\apps\expense-tracker\server\controllers\syncController.php on line 268
+[19-Jan-2026 20:06:52 Asia/Kolkata] PHP Warning:  Undefined array key "account_id" in C:\Users\Ash\Documents\Projects\apps\expense-tracker\server\controllers\syncController.php on line 262
+[19-Jan-2026 20:06:52 Asia/Kolkata] PHP Warning:  Undefined array key "category_id" in C:\Users\Ash\Documents\Projects\apps\expense-tracker\server\controllers\syncController.php on line 263
+[19-Jan-2026 20:06:52 Asia/Kolkata] PHP Warning:  Undefined array key "transaction_date" in C:\Users\Ash\Documents\Projects\apps\expense-tracker\server\controllers\syncController.php on line 268
+[19-Jan-2026 20:06:52 Asia/Kolkata] PHP Warning:  Undefined array key "account_id" in C:\Users\Ash\Documents\Projects\apps\expense-tracker\server\controllers\syncController.php on line 262
+[19-Jan-2026 20:06:52 Asia/Kolkata] PHP Warning:  Undefined array key "category_id" in C:\Users\Ash\Documents\Projects\apps\expense-tracker\server\controllers\syncController.php on line 263
+[19-Jan-2026 20:06:52 Asia/Kolkata] PHP Warning:  Undefined array key "transaction_date" in C:\Users\Ash\Documents\Projects\apps\expense-tracker\server\controllers\syncController.php on line 268
+[19-Jan-2026 20:06:52 Asia/Kolkata] PHP Warning:  Undefined array key "account_id" in C:\Users\Ash\Documents\Projects\apps\expense-tracker\server\controllers\syncController.php on line 262
+[19-Jan-2026 20:06:52 Asia/Kolkata] PHP Warning:  Undefined array key "category_id" in C:\Users\Ash\Documents\Projects\apps\expense-tracker\server\controllers\syncController.php on line 263
+[19-Jan-2026 20:06:52 Asia/Kolkata] PHP Warning:  Undefined array key "transaction_date" in C:\Users\Ash\Documents\Projects\apps\expense-tracker\server\controllers\syncController.php on line 268
+[20-Jan-2026 12:45:33 Asia/Kolkata] Exception: Call to private Database::__construct() from scope ExpenseAnalyticsController in C:\Users\Ash\Documents\Projects\apps\expense-tracker\server\controllers\expenseAnalyticsController.php on line 10
+[20-Jan-2026 12:48:27 Asia/Kolkata] Exception: Call to private Database::__construct() from scope ExpenseAnalyticsController in C:\Users\Ash\Documents\Projects\apps\expense-tracker\server\controllers\expenseAnalyticsController.php on line 10
+[20-Jan-2026 13:24:40 Asia/Kolkata] Exception: Call to private Database::__construct() from scope ExpenseAnalyticsController in C:\Users\Ash\Documents\Projects\apps\expense-tracker\server\controllers\expenseAnalyticsController.php on line 10
+[20-Jan-2026 13:24:52 Asia/Kolkata] Exception: Call to private Database::__construct() from scope ExpenseAnalyticsController in C:\Users\Ash\Documents\Projects\apps\expense-tracker\server\controllers\expenseAnalyticsController.php on line 10
+[20-Jan-2026 13:46:58 Asia/Kolkata] Exception: Call to private Database::__construct() from scope ExpenseAnalyticsController in C:\Users\Ash\Documents\Projects\apps\expense-tracker\server\controllers\expenseAnalyticsController.php on line 10
+[20-Jan-2026 13:48:52 Asia/Kolkata] Exception: Call to private Database::__construct() from scope ExpenseAnalyticsController in C:\Users\Ash\Documents\Projects\apps\expense-tracker\server\controllers\expenseAnalyticsController.php on line 10
+[20-Jan-2026 13:51:02 Asia/Kolkata] Exception: Call to private Database::__construct() from scope ExpenseAnalyticsController in C:\Users\Ash\Documents\Projects\apps\expense-tracker\server\controllers\expenseAnalyticsController.php on line 10
+[20-Jan-2026 13:52:00 Asia/Kolkata] Exception: Call to private Database::__construct() from scope ExpenseAnalyticsController in C:\Users\Ash\Documents\Projects\apps\expense-tracker\server\controllers\expenseAnalyticsController.php on line 10
+[20-Jan-2026 13:53:22 Asia/Kolkata] Exception: Call to undefined method Response::unauthorized() in C:\Users\Ash\Documents\Projects\apps\expense-tracker\server\controllers\expenseAnalyticsController.php on line 18
+[20-Jan-2026 13:56:17 Asia/Kolkata] Exception: Call to undefined method Database::prepare() in C:\Users\Ash\Documents\Projects\apps\expense-tracker\server\controllers\expenseAnalyticsController.php on line 25
+[20-Jan-2026 13:57:49 Asia/Kolkata] ExpenseAnalytics Error: SQLSTATE[42S22]: Column not found: 1054 Unknown column 'status' in 'where clause'
+[20-Jan-2026 13:58:34 Asia/Kolkata] ExpenseAnalytics Error: SQLSTATE[42S22]: Column not found: 1054 Unknown column 'c.category_name' in 'field list'
