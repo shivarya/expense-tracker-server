@@ -1,0 +1,46 @@
+# Composer
+/vendor/
+composer.phar
+composer.lock
+
+# Environment
+.env
+.env.local
+.env.production
+
+# Logs
+*.log
+php_errors.log
+error_log
+
+# OS
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# IDE
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# Database
+*.sql.gz
+*.sql.backup
+*.sqlite
+*.db
+
+# Cache
+cache/
+tmp/
+temp/
+
+# Uploads
+uploads/
+storage/
+
+# Config (if contains sensitive data)
+config/config.php
+config/database.php
