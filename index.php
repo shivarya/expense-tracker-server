@@ -33,10 +33,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 $requestUri = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
 $requestMethod = $_SERVER['REQUEST_METHOD'];
 
-// Remove base path if API is in a subdirectory
-$basePath = '/api';
-if (strpos($requestUri, $basePath) === 0) {
-  $requestUri = substr($requestUri, strlen($basePath));
+// Remove base path if API is in a subdirectory (e.g., /expense_tracker/)
+// This handles both /expense_tracker/health and /expense_tracker/api/...
+$scriptDir = dirname($_SERVER['SCRIPT_NAME']);
+if ($scriptDir !== '/' && strpos($requestUri, $scriptDir) === 0) {
+  $requestUri = substr($requestUri, strlen($scriptDir));
+}
+
+// Also remove /api prefix if present (for backwards compatibility)
+if (strpos($requestUri, '/api') === 0) {
+  $requestUri = substr($requestUri, 4);
 }
 
 // Remove trailing slash
