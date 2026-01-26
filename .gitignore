@@ -41,6 +41,6 @@ temp/
 uploads/
 storage/
 
-# Config (if contains sensitive data)
-config/config.php
-config/database.php
+# Config files are safe to commit - they only read from .env
+# config/config.php
+# config/database.php
