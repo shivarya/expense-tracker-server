@@ -27,7 +27,7 @@ class EmailParserController {
         $credentialsJson = $input['credentials'] ?? null;
 
         if (!$credentialsJson) {
-            sendError('Provide Google OAuth2 credentials JSON', 400);
+            Response::error('Provide Google OAuth2 credentials JSON', 400);
             return;
         }
 
@@ -41,7 +41,7 @@ class EmailParserController {
         // Generate authorization URL
         $authUrl = $client->createAuthUrl();
 
-        sendSuccess([
+        Response::success([
             'message' => 'Gmail OAuth setup initiated',
             'auth_url' => $authUrl,
             'instructions' => 'Visit the auth_url and authorize. Then call /api/parse/email/callback with the code.'
@@ -61,7 +61,7 @@ class EmailParserController {
         $authCode = $input['code'] ?? null;
 
         if (!$authCode) {
-            sendError('Provide authorization code', 400);
+            Response::error('Provide authorization code', 400);
             return;
         }
 
@@ -71,7 +71,7 @@ class EmailParserController {
             $accessToken = $client->fetchAccessTokenWithAuthCode($authCode);
             
             if (isset($accessToken['error'])) {
-                sendError('Failed to get access token: ' . $accessToken['error'], 400);
+                Response::error('Failed to get access token: ' . $accessToken['error'], 400);
                 return;
             }
 
@@ -79,12 +79,12 @@ class EmailParserController {
             $tokenPath = __DIR__ . "/../data/gmail_token_$userId.json";
             file_put_contents($tokenPath, json_encode($accessToken));
 
-            sendSuccess([
+            Response::success([
                 'message' => 'Gmail OAuth completed successfully',
                 'authenticated' => true
             ]);
         } catch (Exception $e) {
-            sendError('OAuth callback error: ' . $e->getMessage(), 500);
+            Response::error('OAuth callback error: ' . $e->getMessage(), 500);
         }
     }
 
@@ -107,7 +107,7 @@ class EmailParserController {
             // Check if authenticated
             $tokenPath = __DIR__ . "/../data/gmail_token_$userId.json";
             if (!file_exists($tokenPath)) {
-                sendError('Gmail not authenticated. Call /api/parse/email/setup first.', 401);
+                Response::error('Gmail not authenticated. Call /api/parse/email/setup first.', 401);
                 return;
             }
 
@@ -161,7 +161,7 @@ class EmailParserController {
                 }
             }
 
-            sendSuccess([
+            Response::success([
                 'message' => 'Emails fetched and parsed',
                 'total_emails' => count($messages),
                 'parsed_count' => count($parsedData),
@@ -169,7 +169,7 @@ class EmailParserController {
             ]);
 
         } catch (Exception $e) {
-            sendError('Email fetch error: ' . $e->getMessage(), 500);
+            Response::error('Email fetch error: ' . $e->getMessage(), 500);
         }
     }
 
@@ -184,7 +184,7 @@ class EmailParserController {
         $input = json_decode(file_get_contents('php://input'), true);
         
         if (!isset($input['message']['data'])) {
-            sendError('Invalid webhook payload', 400);
+            Response::error('Invalid webhook payload', 400);
             return;
         }
 
@@ -197,7 +197,7 @@ class EmailParserController {
         // TODO: Fetch new messages using historyId and process them
         // For now, just acknowledge the webhook
         
-        sendSuccess([
+        Response::success([
             'message' => 'Webhook received',
             'processed' => true
         ]);
@@ -308,7 +308,7 @@ class EmailParserController {
         $tokenPath = __DIR__ . "/../data/gmail_token_$userId.json";
         $authorized = file_exists($tokenPath);
 
-        sendSuccess([
+        Response::success([
             'authorized' => $authorized,
             'user_id' => $userId
         ]);
@@ -326,12 +326,12 @@ class EmailParserController {
             $client = $this->getGmailClient($userId);
             $authUrl = $client->createAuthUrl();
 
-            sendSuccess([
+            Response::success([
                 'authUrl' => $authUrl,
                 'message' => 'Please visit this URL to authorize Gmail access'
             ]);
         } catch (Exception $e) {
-            sendError('Failed to generate auth URL: ' . $e->getMessage(), 500);
+            Response::error('Failed to generate auth URL: ' . $e->getMessage(), 500);
         }
     }
 
@@ -395,13 +395,13 @@ class EmailParserController {
                 }
             }
 
-            sendSuccess([
+            Response::success([
                 'emailsProcessed' => $emailsProcessed,
                 'transactionsSaved' => $transactionsSaved,
                 'message' => "Processed $emailsProcessed emails, saved $transactionsSaved transactions"
             ]);
         } catch (Exception $e) {
-            sendError('Failed to fetch Gmail emails: ' . $e->getMessage(), 500);
+            Response::error('Failed to fetch Gmail emails: ' . $e->getMessage(), 500);
         }
     }
 
@@ -426,3 +426,4 @@ class EmailParserController {
 function base64_url_decode($input): string {
     return base64_decode(strtr($input, '-_', '+/'));
 }
+
