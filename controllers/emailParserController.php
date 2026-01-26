@@ -323,7 +323,24 @@ class EmailParserController {
         $userId = $tokenData['userId'];
 
         try {
-            $client = $this->getGmailClient($userId);
+            // Use environment variables for initial setup
+            $clientId = $_ENV['GMAIL_CLIENT_ID'] ?? null;
+            $clientSecret = $_ENV['GMAIL_CLIENT_SECRET'] ?? null;
+            $redirectUri = $_ENV['GMAIL_REDIRECT_URI'] ?? 'http://localhost:3000/oauth2callback';
+
+            if (!$clientId || !$clientSecret) {
+                Response::error('Gmail OAuth not configured. Set GMAIL_CLIENT_ID and GMAIL_CLIENT_SECRET in .env', 500);
+                return;
+            }
+
+            $client = new \Google_Client();
+            $client->setClientId($clientId);
+            $client->setClientSecret($clientSecret);
+            $client->setRedirectUri($redirectUri);
+            $client->addScope(\Google_Service_Gmail::GMAIL_READONLY);
+            $client->setAccessType('offline');
+            $client->setPrompt('consent');
+
             $authUrl = $client->createAuthUrl();
 
             Response::success([
