@@ -164,6 +164,12 @@ try {
       $controller->fetchEmails();
     } elseif ($requestUri === '/parse/email/webhook' && $requestMethod === 'POST') {
       $controller->gmailWebhook();
+    } elseif ($requestUri === '/parse/email/gmail/status' && $requestMethod === 'GET') {
+      $controller->getGmailStatus();
+    } elseif ($requestUri === '/parse/email/gmail/setup' && $requestMethod === 'GET') {
+      $controller->getGmailAuthUrl();
+    } elseif ($requestUri === '/parse/email/gmail/fetch' && $requestMethod === 'POST') {
+      $controller->fetchGmailEmails();
     } else {
       Response::error('Invalid email parser route', 404);
     }

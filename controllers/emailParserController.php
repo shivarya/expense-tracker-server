@@ -296,6 +296,131 @@ class EmailParserController {
             }
         }
     }
+
+    /**
+     * GET /api/parse/email/gmail/status
+     * Check Gmail authorization status
+     */
+    public function getGmailStatus(): void {
+        $tokenData = JWTHandler::requireAuth();
+        $userId = $tokenData['userId'];
+
+        $tokenPath = __DIR__ . "/../data/gmail_token_$userId.json";
+        $authorized = file_exists($tokenPath);
+
+        sendSuccess([
+            'authorized' => $authorized,
+            'user_id' => $userId
+        ]);
+    }
+
+    /**
+     * GET /api/parse/email/gmail/setup
+     * Get Gmail OAuth authorization URL
+     */
+    public function getGmailAuthUrl(): void {
+        $tokenData = JWTHandler::requireAuth();
+        $userId = $tokenData['userId'];
+
+        try {
+            $client = $this->getGmailClient($userId);
+            $authUrl = $client->createAuthUrl();
+
+            sendSuccess([
+                'authUrl' => $authUrl,
+                'message' => 'Please visit this URL to authorize Gmail access'
+            ]);
+        } catch (Exception $e) {
+            sendError('Failed to generate auth URL: ' . $e->getMessage(), 500);
+        }
+    }
+
+    /**
+     * POST /api/parse/email/gmail/fetch
+     * Fetch and parse Gmail emails
+     */
+    public function fetchGmailEmails(): void {
+        $tokenData = JWTHandler::requireAuth();
+        $userId = $tokenData['userId'];
+
+        $input = json_decode(file_get_contents('php://input'), true);
+        $maxResults = $input['maxResults'] ?? 10;
+        $query = $input['query'] ?? 'from:(camsonline.com OR kfintech.com)';
+
+        try {
+            $client = $this->getGmailClient($userId);
+            $service = new \Google_Service_Gmail($client);
+
+            $messages = $service->users_messages->listUsersMessages('me', [
+                'q' => $query,
+                'maxResults' => $maxResults
+            ]);
+
+            $emailsProcessed = 0;
+            $transactionsSaved = 0;
+
+            foreach ($messages->getMessages() as $message) {
+                $msg = $service->users_messages->get('me', $message->getId());
+                $emailsProcessed++;
+
+                // Process email (simplified - you can expand this)
+                $subject = '';
+                $body = '';
+                
+                foreach ($msg->getPayload()->getHeaders() as $header) {
+                    if ($header->getName() === 'Subject') {
+                        $subject = $header->getValue();
+                    }
+                }
+
+                if ($msg->getPayload()->getBody()->getData()) {
+                    $body = base64_url_decode($msg->getPayload()->getBody()->getData());
+                } elseif ($msg->getPayload()->getParts()) {
+                    foreach ($msg->getPayload()->getParts() as $part) {
+                        if ($part->getBody()->getData()) {
+                            $body .= base64_url_decode($part->getBody()->getData());
+                        }
+                    }
+                }
+
+                // Parse email content using AI
+                $parsedData = $this->ai->parseEmail($subject, $body);
+                
+                if ($parsedData && isset($parsedData['transactions'])) {
+                    foreach ($parsedData['transactions'] as $transaction) {
+                        // Save to database
+                        $this->saveTransaction($userId, $transaction);
+                        $transactionsSaved++;
+                    }
+                }
+            }
+
+            sendSuccess([
+                'emailsProcessed' => $emailsProcessed,
+                'transactionsSaved' => $transactionsSaved,
+                'message' => "Processed $emailsProcessed emails, saved $transactionsSaved transactions"
+            ]);
+        } catch (Exception $e) {
+            sendError('Failed to fetch Gmail emails: ' . $e->getMessage(), 500);
+        }
+    }
+
+    private function saveTransaction($userId, $transaction): void {
+        $query = "INSERT INTO transactions (
+            user_id, type, amount, category, description, 
+            transaction_date, account_id, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, NOW())";
+
+        $this->db->execute($query, [
+            $userId,
+            $transaction['type'] ?? 'expense',
+            $transaction['amount'] ?? 0,
+            $transaction['category'] ?? 'Other',
+            $transaction['description'] ?? '',
+            $transaction['date'] ?? date('Y-m-d'),
+            $transaction['account_id'] ?? null
+        ]);
+    }
 }
 
 function base64_url_decode($input): string {
