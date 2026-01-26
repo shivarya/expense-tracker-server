@@ -11,7 +11,7 @@ class EmailParserController {
     private ?\Google_Client $gmailClient = null;
 
     public function __construct() {
-        $this->db = new Database();
+        $this->db = Database::getInstance();
         $this->ai = new AzureOpenAI();
     }
 
