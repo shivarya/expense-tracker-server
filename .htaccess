@@ -1,0 +1,51 @@
+# Enable Rewrite Engine
+RewriteEngine On
+
+# Set base for subfolder routing
+RewriteBase /expense_tracker/
+
+# Block access to debug and test files
+<FilesMatch "^(debug|test)\.php$">
+    Order allow,deny
+    Deny from all
+</FilesMatch>
+
+# HTTPS Redirect (optional, recommended)
+RewriteCond %{HTTPS} off
+RewriteRule ^(.*)$ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]
+
+# CORS Headers
+<IfModule mod_headers.c>
+    Header set Access-Control-Allow-Origin "*"
+    Header set Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS"
+    Header set Access-Control-Allow-Headers "Authorization, Content-Type, X-Requested-With"
+    Header set Access-Control-Allow-Credentials "true"
+    
+    # Security Headers
+    Header set X-Frame-Options "SAMEORIGIN"
+    Header set X-Content-Type-Options "nosniff"
+    Header set X-XSS-Protection "1; mode=block"
+</IfModule>
+
+# Handle OPTIONS Requests
+RewriteCond %{REQUEST_METHOD} OPTIONS
+RewriteRule ^(.*)$ $1 [R=204,L]
+
+# Route all requests to index.php (subfolder aware)
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule ^(.*)$ /expense_tracker/index.php [QSA,L]
+
+# Protect sensitive files
+<Files ".env">
+    Order allow,deny
+    Deny from all
+</Files>
+
+<FilesMatch "^\.">
+    Order allow,deny
+    Deny from all
+</FilesMatch>
+
+# Disable directory listing
+Options -Indexes
