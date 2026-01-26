@@ -2,8 +2,9 @@
 
 function handleDashboardRoutes($uri, $method)
 {
-  // For now, using user_id = 1 (single user). Later will use JWT auth.
-  $userId = 1;
+  // Require authentication
+  $tokenData = JWTHandler::requireAuth();
+  $userId = $tokenData['userId'];
 
   if ($uri === '/dashboard' && $method === 'GET') {
     getDashboardSummary($userId);

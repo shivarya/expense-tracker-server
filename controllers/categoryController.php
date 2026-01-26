@@ -2,7 +2,9 @@
 
 function handleCategoryRoutes($uri, $method)
 {
-  $userId = 1;
+  // Require authentication
+  $tokenData = JWTHandler::requireAuth();
+  $userId = $tokenData['userId'];
 
   if ($uri === '/categories' && $method === 'GET') {
     getCategories($userId);

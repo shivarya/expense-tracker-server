@@ -44,12 +44,32 @@ function getJsonInput()
 // Helper function to get authorization header
 function getBearerToken()
 {
+  // Try getallheaders first
   $headers = getallheaders();
+  
   if (isset($headers['Authorization'])) {
     if (preg_match('/Bearer\s+(.*)$/i', $headers['Authorization'], $matches)) {
       return $matches[1];
     }
   }
+  
+  // Fallback: try $_SERVER variables
+  if (isset($_SERVER['HTTP_AUTHORIZATION'])) {
+    if (preg_match('/Bearer\s+(.*)$/i', $_SERVER['HTTP_AUTHORIZATION'], $matches)) {
+      return $matches[1];
+    }
+  }
+  
+  // Apache specific
+  if (function_exists('apache_request_headers')) {
+    $headers = apache_request_headers();
+    if (isset($headers['Authorization'])) {
+      if (preg_match('/Bearer\s+(.*)$/i', $headers['Authorization'], $matches)) {
+        return $matches[1];
+      }
+    }
+  }
+  
   return null;
 }
 

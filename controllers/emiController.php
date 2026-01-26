@@ -2,7 +2,9 @@
 
 function handleEmiRoutes($uri, $method)
 {
-  $userId = 1;
+  // Require authentication
+  $tokenData = JWTHandler::requireAuth();
+  $userId = $tokenData['userId'];
 
   if ($uri === '/emis' && $method === 'GET') {
     getEmis($userId);

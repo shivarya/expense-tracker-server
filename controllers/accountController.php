@@ -2,7 +2,9 @@
 
 function handleAccountRoutes($uri, $method)
 {
-  $userId = 1;
+  // Require authentication
+  $tokenData = JWTHandler::requireAuth();
+  $userId = $tokenData['userId'];
 
   if ($uri === '/accounts' && $method === 'GET') {
     getAccounts($userId);

@@ -101,7 +101,9 @@ function getOrCreateCategory($db, $userId, $categoryName, $transactionType) {
 
 function handleSyncRoutes($uri, $method)
 {
-  $userId = 1;
+  // Require authentication
+  $tokenData = JWTHandler::requireAuth();
+  $userId = $tokenData['userId'];
 
   // POST /sync/stocks - Receive scraped stock data
   if ($uri === '/sync/stocks' && $method === 'POST') {

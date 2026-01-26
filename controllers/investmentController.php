@@ -2,7 +2,9 @@
 
 function handleInvestmentRoutes($uri, $method)
 {
-  $userId = 1; // Single user for now
+  // Require authentication
+  $tokenData = JWTHandler::requireAuth();
+  $userId = $tokenData['userId']; // Single user for now
 
   // Parse URI
   $parts = explode('/', trim($uri, '/'));

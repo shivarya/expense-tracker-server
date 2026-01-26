@@ -1,9 +1,9 @@
 <?php return array(
     'root' => array(
         'name' => 'expense-tracker/server',
-        'pretty_version' => '1.0.0+no-version-set',
-        'version' => '1.0.0.0',
-        'reference' => null,
+        'pretty_version' => 'dev-master',
+        'version' => 'dev-master',
+        'reference' => '63eff4b013467207180a0082585f713610fea1db',
         'type' => 'project',
         'install_path' => __DIR__ . '/../../',
         'aliases' => array(),
@@ -11,9 +11,9 @@
     ),
     'versions' => array(
         'expense-tracker/server' => array(
-            'pretty_version' => '1.0.0+no-version-set',
-            'version' => '1.0.0.0',
-            'reference' => null,
+            'pretty_version' => 'dev-master',
+            'version' => 'dev-master',
+            'reference' => '63eff4b013467207180a0082585f713610fea1db',
             'type' => 'project',
             'install_path' => __DIR__ . '/../../',
             'aliases' => array(),

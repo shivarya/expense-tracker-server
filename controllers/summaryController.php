@@ -2,7 +2,9 @@
 
 function handleSummaryRoutes($uri, $method)
 {
-  $userId = 1;
+  // Require authentication
+  $tokenData = JWTHandler::requireAuth();
+  $userId = $tokenData['userId'];
 
   // GET /summary/balance - Get portfolio balance
   if ($uri === '/summary/balance' && $method === 'GET') {

@@ -130,6 +130,40 @@ try {
     exit;
   }
 
+  // SMS parsing endpoints
+  if (strpos($requestUri, '/parse/sms') === 0) {
+    require_once __DIR__ . '/controllers/smsParserController.php';
+    $controller = new SMSParserController();
+    
+    if ($requestUri === '/parse/sms' && $requestMethod === 'POST') {
+      $controller->parseSMS();
+    } elseif ($requestUri === '/parse/sms/webhook' && $requestMethod === 'POST') {
+      $controller->smsWebhook();
+    } else {
+      Response::error('Invalid SMS parser route', 404);
+    }
+    exit;
+  }
+
+  // Email parsing endpoints
+  if (strpos($requestUri, '/parse/email') === 0) {
+    require_once __DIR__ . '/controllers/emailParserController.php';
+    $controller = new EmailParserController();
+    
+    if ($requestUri === '/parse/email/setup' && $requestMethod === 'POST') {
+      $controller->setupGmail();
+    } elseif ($requestUri === '/parse/email/callback' && $requestMethod === 'POST') {
+      $controller->gmailCallback();
+    } elseif ($requestUri === '/parse/email/fetch' && $requestMethod === 'POST') {
+      $controller->fetchEmails();
+    } elseif ($requestUri === '/parse/email/webhook' && $requestMethod === 'POST') {
+      $controller->gmailWebhook();
+    } else {
+      Response::error('Invalid email parser route', 404);
+    }
+    exit;
+  }
+
   // If no route matched
   Response::error('Route not found: ' . $requestUri, 404);
 } catch (Exception $e) {

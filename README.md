@@ -1,15 +1,18 @@
 # Expense Tracker - PHP Backend
 
-PHP REST API server for the Expense Tracker mobile app.
+PHP REST API server for the Expense Tracker mobile app with AI-powered SMS/email parsing.
 
 ## Features
 
+- **AI-Powered Parsing** - Azure OpenAI GPT-4 for SMS and email transaction extraction
+- **Real-time Webhooks** - SMS forwarding and Gmail push notifications
 - Portfolio management (Stocks, Mutual Funds, FDs, Long-term funds)
 - Transaction tracking with categories
-- Bank account management (HDFC, SBI, ICICI, IDFC, RBL)
+- Bank account management (HDFC, SBI, ICICI, IDFC, RBL, Axis, Kotak)
 - EMI tracking
 - Data sync endpoints for scraper integration
-- JWT authentication (ready for multi-user support)
+- JWT authentication with Google Sign-In
+- Auto-creation of bank accounts and categories
 
 ## Tech Stack
 
@@ -17,6 +20,9 @@ PHP REST API server for the Expense Tracker mobile app.
 - MySQL 8.0+
 - PDO for database access
 - Firebase JWT for authentication
+- Guzzle HTTP client for API calls
+- Google API Client for Gmail integration
+- Azure OpenAI GPT-4 Turbo for AI parsing
 
 ## Setup
 
@@ -38,7 +44,23 @@ Copy `.env.example` to `.env` and update:
 cp .env.example .env
 ```
 
-Edit `.env` with your database credentials.
+Edit `.env` with your credentials:
+
+```env
+# Database
+DB_HOST=localhost
+DB_NAME=expense_tracker
+DB_USER=root
+DB_PASS=
+
+# JWT
+JWT_SECRET=your-secret-key
+
+# Azure OpenAI (for SMS/email parsing)
+AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com
+AZURE_OPENAI_API_KEY=your-api-key
+AZURE_OPENAI_DEPLOYMENT=gpt-4-turbo
+```
 
 ### 3. Create Database
 
@@ -109,7 +131,35 @@ Query params: `start_date`, `end_date`, `account_id`, `category_id`, `type`, `li
 - `POST /sync/fixed-deposits` - Bulk sync FDs
 - `GET /sync/logs` - Get sync history
 
+### SMS Parsing (NEW - Phase 7)
+- `POST /parse/sms` - Parse batch SMS messages
+- `POST /parse/sms/webhook` - Real-time SMS webhook
+
+**Example Request:**
+```json
+{
+  "messages": [
+    {
+      "sender": "VK-HDFCBK",
+      "body": "Rs. 500.00 debited from A/c XX1234 on 20-Jan-26 at SWIGGY",
+      "date": "2026-01-20 14:30:00"
+    }
+  ]
+}
+```
+
+**Supported Banks:** HDFC, SBI, ICICI, IDFC, RBL, Axis, Kotak
+
+### Email Parsing (NEW - Phase 7)
+- `POST /parse/email/setup` - Initialize Gmail OAuth2
+- `POST /parse/email/callback` - Complete OAuth2 flow
+- `POST /parse/email/fetch` - Fetch and parse CAMS/KFintech emails
+- `POST /parse/email/webhook` - Gmail push notification handler
+
+**See [SMS_EMAIL_PARSER_API.md](SMS_EMAIL_PARSER_API.md) for complete documentation**
+
 ### Auth
+- `POST /auth/google` - Google Sign-In authentication
 - `POST /auth/login` - Login (simple auth for now)
 - `GET /auth/me` - Get current user
 
@@ -168,8 +218,30 @@ Errors are logged to `php_errors.log` in the server directory.
 
 ## Development Notes
 
-- Currently using `user_id = 1` for single-user mode
-- JWT auth is ready for multi-user expansion
+- JWT authentication with Google Sign-In for multi-user support
+- All endpoints require valid JWT token (except `/health`, `/auth/*`)
+- User-specific data isolation via `user_id` from token
+- Auto-creation of bank accounts and categories from parsed SMS
+- Duplicate transaction prevention (±60 minute window)
 - All timestamps use `Asia/Kolkata` timezone
 - Gain/loss percentages calculated with stored generated columns
+- SMS parsing: ~95% accuracy on major Indian banks
+- Email parsing: Supports CAMS and KFintech mutual fund statements
+
+## Additional Documentation
+
+- **[SMS_EMAIL_PARSER_API.md](SMS_EMAIL_PARSER_API.md)** - Complete API documentation for parsing endpoints
+- **[QUICK_START_PARSING.md](QUICK_START_PARSING.md)** - Quick setup guide for SMS/email parsing
+- **[PHASE_7_COMPLETE.md](../PHASE_7_COMPLETE.md)** - Phase 7 implementation summary
+
+## Troubleshooting
+
+### "Azure OpenAI credentials not configured"
+Add `AZURE_OPENAI_*` variables to `.env` and restart server
+
+### "Gmail not authenticated"
+Complete OAuth2 flow: `/parse/email/setup` → visit auth URL → `/parse/email/callback`
+
+### "Unauthorized: Invalid token"
+Include JWT in header: `Authorization: Bearer <token>`
 

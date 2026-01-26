@@ -10,9 +10,9 @@ class ExpenseAnalyticsController {
      */
     public function getSummary() {
         try {
-            // TODO: Add JWT verification when auth is implemented
-            // For now, use user_id from query param or default to 1
-            $userId = $_GET['user_id'] ?? 1;
+            // Require authentication
+            $tokenData = JWTHandler::requireAuth();
+            $userId = $tokenData['userId'];
             $period = $_GET['period'] ?? '6m';
 
             // Calculate date range
