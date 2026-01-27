@@ -50,7 +50,15 @@ class AzureOpenAI {
         }
 
         $result = json_decode($response, true);
-        return $result['choices'][0]['message']['content'] ?? null;
+        $content = $result['choices'][0]['message']['content'] ?? null;
+        
+        if ($content === null) {
+            return null;
+        }
+        
+        // Parse the JSON content and return as array
+        $parsed = json_decode($content, true);
+        return $parsed ?? null;
     }
 
     public function parseBankSMS(array $smsMessages): array {
@@ -84,13 +92,12 @@ class AzureOpenAI {
             ];
 
             $response = $this->chatCompletion($messages, 0.1, true);
-            error_log("Azure OpenAI raw response: " . substr($response ?? 'null', 0, 500));
+            error_log("Azure OpenAI parsed response: " . json_encode($response));
             
-            if ($response) {
-                $parsed = json_decode($response, true);
-                error_log("Parsed JSON structure: " . json_encode(array_keys($parsed ?? [])));
-                if (isset($parsed['transactions']) && is_array($parsed['transactions'])) {
-                    foreach ($parsed['transactions'] as $transaction) {
+            if ($response && is_array($response)) {
+                error_log("Response keys: " . json_encode(array_keys($response)));
+                if (isset($response['transactions']) && is_array($response['transactions'])) {
+                    foreach ($response['transactions'] as $transaction) {
                         $transaction['source'] = 'sms';
                         $transaction['parsed_at'] = date('Y-m-d H:i:s');
                         $transactions[] = $transaction;
