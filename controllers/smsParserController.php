@@ -66,26 +66,53 @@ class SMSParserController {
         $skippedCount = 0;
 
         foreach ($transactions as $transaction) {
-            // Check for duplicates (same bank, account, amount, date within 1 hour)
-            $existingQuery = "
-                SELECT id FROM transactions 
-                WHERE user_id = ? 
-                AND account_id IN (SELECT id FROM bank_accounts WHERE account_number LIKE ?)
-                AND amount = ?
-                AND ABS(TIMESTAMPDIFF(MINUTE, transaction_date, ?)) < 60
-                LIMIT 1
-            ";
+            // Check for duplicates using multiple strategies for robustness
+            // Strategy 1: Check by reference number (most reliable if available)
+            $isDuplicate = false;
             
-            $accountPattern = '%' . ($transaction['account_number'] ?? '0000');
-            $existing = $this->db->fetchAll($existingQuery, [
-                $userId,
-                $accountPattern,
-                $transaction['amount'],
-                $transaction['date'] ?? date('Y-m-d H:i:s')
-            ]);
+            if (!empty($transaction['reference_number'])) {
+                $refCheckQuery = "
+                    SELECT id FROM transactions 
+                    WHERE user_id = ? AND reference_number = ?
+                    LIMIT 1
+                ";
+                $refCheck = $this->db->fetchAll($refCheckQuery, [
+                    $userId,
+                    $transaction['reference_number']
+                ]);
+                
+                if (count($refCheck) > 0) {
+                    $isDuplicate = true;
+                    error_log("Skipping duplicate (ref number): {$transaction['reference_number']}");
+                }
+            }
+            
+            // Strategy 2: Check by account, amount, and date (fallback for transactions without ref numbers)
+            if (!$isDuplicate) {
+                $existingQuery = "
+                    SELECT id FROM transactions 
+                    WHERE user_id = ? 
+                    AND account_id IN (SELECT id FROM bank_accounts WHERE account_number LIKE ?)
+                    AND amount = ?
+                    AND ABS(TIMESTAMPDIFF(MINUTE, transaction_date, ?)) < 60
+                    LIMIT 1
+                ";
+                
+                $accountPattern = '%' . ($transaction['account_number'] ?? '0000');
+                $existing = $this->db->fetchAll($existingQuery, [
+                    $userId,
+                    $accountPattern,
+                    $transaction['amount'],
+                    $transaction['date'] ?? date('Y-m-d H:i:s')
+                ]);
 
-            if (count($existing) > 0) {
-                error_log("Skipping duplicate transaction: " . json_encode($transaction));
+                if (count($existing) > 0) {
+                    $isDuplicate = true;
+                    error_log("Skipping duplicate (amount+date): " . json_encode($transaction));
+                }
+            }
+
+            if ($isDuplicate) {
                 $skippedCount++;
                 continue; // Skip duplicate
             }
