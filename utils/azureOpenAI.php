@@ -13,7 +13,7 @@ class AzureOpenAI {
         $this->apiVersion = '2024-02-15-preview';
     }
 
-    public function chatCompletion(array $messages, float $temperature = 0.1, bool $jsonMode = true): ?array {
+    public function chatCompletion(array $messages, float $temperature = 0.1, bool $jsonMode = true, int $maxRetries = 3): ?array {
         if (empty($this->endpoint) || empty($this->apiKey)) {
             error_log('Azure OpenAI credentials not configured');
             return null;
@@ -31,34 +31,69 @@ class AzureOpenAI {
             $payload['response_format'] = ['type' => 'json_object'];
         }
 
-        $ch = curl_init($url);
-        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-        curl_setopt($ch, CURLOPT_POST, true);
-        curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($payload));
-        curl_setopt($ch, CURLOPT_HTTPHEADER, [
-            'Content-Type: application/json',
-            'api-key: ' . $this->apiKey
-        ]);
+        $attempt = 0;
+        $waitTime = 1; // Start with 1 second
 
-        $response = curl_exec($ch);
-        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        curl_close($ch);
+        while ($attempt < $maxRetries) {
+            $ch = curl_init($url);
+            curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+            curl_setopt($ch, CURLOPT_POST, true);
+            curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($payload));
+            curl_setopt($ch, CURLOPT_HTTPHEADER, [
+                'Content-Type: application/json',
+                'api-key: ' . $this->apiKey
+            ]);
 
-        if ($httpCode !== 200) {
+            $response = curl_exec($ch);
+            $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            curl_close($ch);
+
+            if ($httpCode === 200) {
+                $result = json_decode($response, true);
+                $content = $result['choices'][0]['message']['content'] ?? null;
+                
+                if ($content === null) {
+                    return null;
+                }
+                
+                // Parse the JSON content and return as array
+                $parsed = json_decode($content, true);
+                return $parsed ?? null;
+            }
+
+            // Handle rate limit (429)
+            if ($httpCode === 429) {
+                $errorData = json_decode($response, true);
+                $retryAfter = $this->extractRetryAfter($errorData);
+                
+                $attempt++;
+                if ($attempt >= $maxRetries) {
+                    error_log("Azure OpenAI rate limit exceeded after $maxRetries attempts");
+                    return null;
+                }
+
+                $sleepTime = $retryAfter > 0 ? $retryAfter : $waitTime;
+                error_log("Rate limit hit. Retrying in $sleepTime seconds (attempt $attempt/$maxRetries)");
+                sleep($sleepTime);
+                $waitTime *= 2; // Exponential backoff
+                continue;
+            }
+
+            // Other errors
             error_log("Azure OpenAI API error (HTTP $httpCode): $response");
             return null;
         }
 
-        $result = json_decode($response, true);
-        $content = $result['choices'][0]['message']['content'] ?? null;
-        
-        if ($content === null) {
-            return null;
+        return null;
+    }
+
+    private function extractRetryAfter(array $errorData): int {
+        // Extract retry time from error message
+        $message = $errorData['error']['message'] ?? '';
+        if (preg_match('/retry after (\d+) seconds/', $message, $matches)) {
+            return (int)$matches[1];
         }
-        
-        // Parse the JSON content and return as array
-        $parsed = json_decode($content, true);
-        return $parsed ?? null;
+        return 0;
     }
 
     /**

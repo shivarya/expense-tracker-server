@@ -303,6 +303,13 @@ class EmailParserController {
         return $client;
     }
 
+    /**
+     * Public method for background workers to get Gmail client
+     */
+    public function getGmailClientForBackground(int $userId): \Google_Client {
+        return $this->getGmailClient($userId);
+    }
+
     private function getEmailBody($payload): string {
         $body = '';
 
@@ -444,7 +451,7 @@ class EmailParserController {
 
     /**
      * POST /api/parse/email/gmail/fetch
-     * Fetch and parse Gmail emails
+     * Start background Gmail sync job
      */
     public function fetchGmailEmails(): void {
         $tokenData = JWTHandler::requireAuth();
@@ -454,80 +461,30 @@ class EmailParserController {
         $maxResults = $input['maxResults'] ?? 10;
         $query = $input['query'] ?? 'from:(camsonline.com OR kfintech.com)';
 
-        try {
-            $client = $this->getGmailClient($userId);
-            $service = new \Google_Service_Gmail($client);
+        // Create sync job
+        $jobQuery = "INSERT INTO sync_jobs (user_id, type, status, created_at) VALUES (?, 'gmail', 'pending', NOW())";
+        $this->db->execute($jobQuery, [$userId]);
+        $jobId = $this->db->getLastInsertId();
 
-            $messagesList = $service->users_messages->listUsersMessages('me', [
-                'q' => $query,
-                'maxResults' => $maxResults
-            ]);
+        // Start background processing
+        $phpPath = 'php'; // or '/usr/bin/php' depending on server
+        $scriptPath = __DIR__ . '/background_gmail_sync.php';
+        $cmd = sprintf(
+            '%s %s %d %d %d %s > /dev/null 2>&1 &',
+            $phpPath,
+            escapeshellarg($scriptPath),
+            $jobId,
+            $userId,
+            $maxResults,
+            escapeshellarg($query)
+        );
+        exec($cmd);
 
-            $emailsProcessed = 0;
-            $mutualFundsSaved = 0;
-            $errors = [];
-
-            $messages = $messagesList->getMessages();
-            if (empty($messages)) {
-                Response::success([
-                    'emailsProcessed' => 0,
-                    'mutualFundsSaved' => 0,
-                    'message' => 'No emails found matching the query'
-                ]);
-                return;
-            }
-
-            foreach ($messages as $message) {
-                try {
-                    $msg = $service->users_messages->get('me', $message->getId());
-                    $emailsProcessed++;
-
-                    // Extract subject and body
-                    $subject = '';
-                    $body = '';
-                    
-                    foreach ($msg->getPayload()->getHeaders() as $header) {
-                        if ($header->getName() === 'Subject') {
-                            $subject = $header->getValue();
-                        }
-                    }
-
-                    // Decode email body
-                    if ($msg->getPayload()->getBody()->getData()) {
-                        $body = $this->decodeBase64Url($msg->getPayload()->getBody()->getData());
-                    } elseif ($msg->getPayload()->getParts()) {
-                        foreach ($msg->getPayload()->getParts() as $part) {
-                            if ($part->getBody()->getData()) {
-                                $body .= $this->decodeBase64Url($part->getBody()->getData());
-                            }
-                        }
-                    }
-
-                    // Parse email content using AI
-                    $parsedData = $this->ai->parseEmailContent($body, $subject);
-                    
-                    if ($parsedData && isset($parsedData['holdings']) && is_array($parsedData['holdings'])) {
-                        // Save mutual funds from CAMS/KFintech statement
-                        foreach ($parsedData['holdings'] as $holding) {
-                            $this->saveMutualFund($userId, $holding, $parsedData);
-                            $mutualFundsSaved++;
-                        }
-                    }
-                } catch (Exception $e) {
-                    error_log("Error processing email {$message->getId()}: " . $e->getMessage());
-                    $errors[] = $e->getMessage();
-                }
-            }
-
-            Response::success([
-                'emailsProcessed' => $emailsProcessed,
-                'mutualFundsSaved' => $mutualFundsSaved,
-                'errors' => count($errors),
-                'message' => "Processed $emailsProcessed emails, saved $mutualFundsSaved mutual funds"
-            ]);
-        } catch (Exception $e) {
-            Response::error('Failed to fetch Gmail emails: ' . $e->getMessage(), 500);
-        }
+        Response::success([
+            'jobId' => $jobId,
+            'status' => 'pending',
+            'message' => 'Gmail sync started in background. Poll /api/sync/status/' . $jobId . ' for progress'
+        ]);
     }
 
     private function saveMutualFund(int $userId, array $holding, array $statementData): void {

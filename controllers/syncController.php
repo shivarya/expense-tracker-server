@@ -105,8 +105,16 @@ function handleSyncRoutes($uri, $method)
   $tokenData = JWTHandler::requireAuth();
   $userId = $tokenData['userId'];
 
+  // GET /sync/status/{jobId} - Get sync job status
+  if (preg_match('/^\/sync\/status\/(\d+)$/', $uri, $matches) && $method === 'GET') {
+    getSyncJobStatus($matches[1]);
+  }
+  // GET /sync/latest - Get latest sync job
+  elseif ($uri === '/sync/latest' && $method === 'GET') {
+    getLatestSyncJob();
+  }
   // POST /sync/stocks - Receive scraped stock data
-  if ($uri === '/sync/stocks' && $method === 'POST') {
+  elseif ($uri === '/sync/stocks' && $method === 'POST') {
     syncStocks($userId);
   }
   // POST /sync/mutual-funds - Receive parsed CAMS data
@@ -512,3 +520,78 @@ function getSyncLogs($userId)
   }
 }
 
+/**
+ * GET /api/sync/status/{jobId}
+ * Get sync job status
+ */
+function getSyncJobStatus($jobId) {
+  try {
+    $tokenData = JWTHandler::requireAuth();
+    $userId = $tokenData['userId'];
+    $db = getDB();
+
+    $query = "SELECT * FROM sync_jobs WHERE id = ? AND user_id = ?";
+    $result = $db->fetchAll($query, [$jobId, $userId]);
+
+    if (empty($result)) {
+      Response::error('Sync job not found', 404);
+      return;
+    }
+
+    $job = $result[0];
+    Response::success([
+      'id' => $job['id'],
+      'type' => $job['type'],
+      'status' => $job['status'],
+      'progress' => $job['progress'],
+      'totalItems' => $job['total_items'],
+      'processedItems' => $job['processed_items'],
+      'savedItems' => $job['saved_items'],
+      'skippedItems' => $job['skipped_items'],
+      'errorMessage' => $job['error_message'],
+      'startedAt' => $job['started_at'],
+      'completedAt' => $job['completed_at'],
+      'createdAt' => $job['created_at']
+    ]);
+  } catch (Exception $e) {
+    Response::error('Failed to fetch sync status: ' . $e->getMessage(), 500);
+  }
+}
+
+/**
+ * GET /api/sync/latest
+ * Get latest sync job for user
+ */
+function getLatestSyncJob() {
+  try {
+    $tokenData = JWTHandler::requireAuth();
+    $userId = $tokenData['userId'];
+    $db = getDB();
+
+    $query = "SELECT * FROM sync_jobs WHERE user_id = ? ORDER BY created_at DESC LIMIT 1";
+    $result = $db->fetchAll($query, [$userId]);
+
+    if (empty($result)) {
+      Response::success(['job' => null]);
+      return;
+    }
+
+    $job = $result[0];
+    Response::success([
+      'id' => $job['id'],
+      'type' => $job['type'],
+      'status' => $job['status'],
+      'progress' => $job['progress'],
+      'totalItems' => $job['total_items'],
+      'processedItems' => $job['processed_items'],
+      'savedItems' => $job['saved_items'],
+      'skippedItems' => $job['skipped_items'],
+      'errorMessage' => $job['error_message'],
+      'startedAt' => $job['started_at'],
+      'completedAt' => $job['completed_at'],
+      'createdAt' => $job['created_at']
+    ]);
+  } catch (Exception $e) {
+    Response::error('Failed to fetch latest sync: ' . $e->getMessage(), 500);
+  }
+}
