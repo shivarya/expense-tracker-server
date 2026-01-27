@@ -127,8 +127,12 @@ function decodeBase64Url(string $input): string {
 }
 
 function saveMutualFund(Database $db, int $userId, array $holding, array $statementData): void {
-    $checkQuery = "SELECT id FROM mutual_funds WHERE user_id = ? AND fund_name = ?";
-    $existing = $db->fetchAll($checkQuery, [$userId, $holding['name']]);
+    $folioNumber = $statementData['account_number'] ?? 'Unknown';
+    $fundName = $holding['name'];
+    
+    // Check if fund already exists (by folio + fund name for better accuracy)
+    $checkQuery = "SELECT id FROM mutual_funds WHERE user_id = ? AND folio_number = ? AND fund_name = ?";
+    $existing = $db->fetchAll($checkQuery, [$userId, $folioNumber, $fundName]);
 
     $investedAmount = $holding['purchase_value'] ?? 0;
     $currentValue = $holding['current_value'] ?? 0;
@@ -143,9 +147,9 @@ function saveMutualFund(Database $db, int $userId, array $holding, array $statem
 
         $db->execute($insertQuery, [
             $userId,
-            $holding['name'],
-            $statementData['account_number'] ?? 'Unknown',
-            extractAMC($holding['name']),
+            $fundName,
+            $folioNumber,
+            extractAMC($fundName),
             $units,
             $nav,
             $investedAmount,

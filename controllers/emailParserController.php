@@ -487,9 +487,12 @@ class EmailParserController {
     }
 
     private function saveMutualFund(int $userId, array $holding, array $statementData): void {
-        // Check if fund already exists
-        $checkQuery = "SELECT id FROM mutual_funds WHERE user_id = ? AND fund_name = ?";
-        $existing = $this->db->fetchAll($checkQuery, [$userId, $holding['name']]);
+        $folioNumber = $statementData['account_number'] ?? 'Unknown';
+        $fundName = $holding['name'];
+        
+        // Check if fund already exists (by folio + fund name for better accuracy)
+        $checkQuery = "SELECT id FROM mutual_funds WHERE user_id = ? AND folio_number = ? AND fund_name = ?";
+        $existing = $this->db->fetchAll($checkQuery, [$userId, $folioNumber, $fundName]);
 
         $investedAmount = $holding['purchase_value'] ?? 0;
         $currentValue = $holding['current_value'] ?? 0;
@@ -505,9 +508,9 @@ class EmailParserController {
 
             $this->db->execute($insertQuery, [
                 $userId,
-                $holding['name'],
-                $statementData['account_number'] ?? 'Unknown',
-                $this->extractAMC($holding['name']),
+                $fundName,
+                $folioNumber,
+                $this->extractAMC($fundName),
                 $units,
                 $nav,
                 $investedAmount,
