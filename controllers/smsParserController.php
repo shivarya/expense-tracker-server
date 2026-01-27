@@ -221,12 +221,31 @@ class SMSParserController {
     }
 
     private function getOrCreateBankAccount(int $userId, array $transaction): int {
-        $bankName = $transaction['bank'] ?? 'Unknown';
+        $bankName = strtolower($transaction['bank'] ?? 'other');
         $accountNumber = $transaction['account_number'] ?? '0000';
 
+        // Map bank names to enum values
+        $bankMap = [
+            'hdfc bank' => 'hdfc',
+            'hdfc' => 'hdfc',
+            'icici bank' => 'icici',
+            'icici' => 'icici',
+            'sbi' => 'sbi',
+            'state bank' => 'sbi',
+            'idfc' => 'idfc',
+            'rbl bank' => 'rbl',
+            'rbl' => 'rbl',
+            'axis bank' => 'axis',
+            'axis' => 'axis',
+            'kotak' => 'kotak',
+            'kotak mahindra' => 'kotak'
+        ];
+        
+        $bank = $bankMap[$bankName] ?? 'other';
+
         // Check if account exists
-        $query = "SELECT id FROM bank_accounts WHERE user_id = ? AND bank_name = ? AND account_number LIKE ?";
-        $existing = $this->db->query($query, [$userId, $bankName, "%$accountNumber%"]);
+        $query = "SELECT id FROM bank_accounts WHERE user_id = ? AND bank = ? AND account_number LIKE ?";
+        $existing = $this->db->fetchAll($query, [$userId, $bank, "%$accountNumber%"]);
 
         if (!empty($existing)) {
             return $existing[0]['id'];
@@ -234,20 +253,20 @@ class SMSParserController {
 
         // Create new account
         $insertQuery = "
-            INSERT INTO bank_accounts (user_id, bank_name, account_number, account_type, balance)
+            INSERT INTO bank_accounts (user_id, bank, account_number, account_type, balance)
             VALUES (?, ?, ?, 'savings', 0)
         ";
         
         $fullAccountNumber = 'XXXX' . str_pad($accountNumber, 4, '0', STR_PAD_LEFT);
-        return $this->db->insert($insertQuery, [$userId, $bankName, $fullAccountNumber]);
+        return $this->db->insert($insertQuery, [$userId, $bank, $fullAccountNumber]);
     }
 
     private function getOrCreateCategory(int $userId, array $transaction): int {
         $categoryName = $transaction['category'] ?? 'Other';
 
-        // Check if category exists
-        $query = "SELECT id FROM categories WHERE user_id = ? AND name = ?";
-        $existing = $this->db->query($query, [$userId, $categoryName]);
+        // Check if category exists (system categories or user's custom)
+        $query = "SELECT id FROM categories WHERE (user_id = ? OR user_id IS NULL) AND name = ? LIMIT 1";
+        $existing = $this->db->fetchAll($query, [$userId, $categoryName]);
 
         if (!empty($existing)) {
             return $existing[0]['id'];
@@ -255,8 +274,8 @@ class SMSParserController {
 
         // Create new category
         $insertQuery = "
-            INSERT INTO categories (user_id, name, budget_limit, category_type)
-            VALUES (?, ?, 0, 'expense')
+            INSERT INTO categories (user_id, name, type, monthly_budget, icon, color)
+            VALUES (?, ?, 'expense', 0, 'card-outline', '#9C27B0')
         ";
         
         return $this->db->insert($insertQuery, [$userId, $categoryName]);
