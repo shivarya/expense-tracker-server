@@ -24,6 +24,7 @@ try {
 
     $db = Database::getInstance();
     $ai = new AzureOpenAI();
+    $pdfParser = new \Smalot\PdfParser\Parser();
 
     // Update job status to processing
     $db->execute("UPDATE sync_jobs SET status = 'processing', started_at = NOW() WHERE id = ?", [$jobId]);
@@ -82,8 +83,17 @@ try {
                 }
             }
 
+            // Extract password from email body (common patterns)
+            $password = extractPasswordFromEmail($body, $subject);
+            
+            // Check for PDF attachments
+            $pdfText = extractPDFContent($msg, $service, $password, $pdfParser);
+            
+            // Combine PDF text with email body for parsing
+            $contentToParse = !empty($pdfText) ? $pdfText : $body;
+            
             // Parse email content using AI (with retry logic)
-            $parsedData = $ai->parseEmailContent($body, $subject);
+            $parsedData = $ai->parseEmailContent($contentToParse, $subject);
             
             if ($parsedData && isset($parsedData['holdings']) && is_array($parsedData['holdings'])) {
                 foreach ($parsedData['holdings'] as $holding) {
@@ -227,4 +237,108 @@ function extractAMC(string $fundName): string {
     }
 
     return 'Other';
+}
+
+function extractPasswordFromEmail(string $body, string $subject): ?string {
+    // Common password patterns in CAMS/KFintech emails
+    $patterns = [
+        '/password[:\s]+([A-Za-z0-9]+)/i',
+        '/pwd[:\s]+([A-Za-z0-9]+)/i',
+        '/pass[:\s]+([A-Za-z0-9]+)/i',
+        '/protected with[:\s]+([A-Za-z0-9]+)/i',
+        '/open with[:\s]+([A-Za-z0-9]+)/i',
+        '/Date of Birth/i' // Common: password is DOB in DDMMYYYY format
+    ];
+
+    foreach ($patterns as $pattern) {
+        if (preg_match($pattern, $body, $matches)) {
+            if (isset($matches[1])) {
+                return trim($matches[1]);
+            }
+        }
+    }
+
+    // Check subject line too
+    foreach ($patterns as $pattern) {
+        if (preg_match($pattern, $subject, $matches)) {
+            if (isset($matches[1])) {
+                return trim($matches[1]);
+            }
+        }
+    }
+
+    return null;
+}
+
+function extractPDFContent($msg, $service, ?string $password, $pdfParser): string {
+    $pdfText = '';
+    $parts = $msg->getPayload()->getParts() ?? [];
+
+    foreach ($parts as $part) {
+        $filename = $part->getFilename();
+        
+        // Check if it's a PDF attachment
+        if (stripos($filename, '.pdf') !== false) {
+            try {
+                $attachmentId = null;
+                
+                // Get attachment ID
+                if ($part->getBody()->getAttachmentId()) {
+                    $attachmentId = $part->getBody()->getAttachmentId();
+                } elseif ($part->getParts()) {
+                    foreach ($part->getParts() as $subPart) {
+                        if ($subPart->getBody()->getAttachmentId()) {
+                            $attachmentId = $subPart->getBody()->getAttachmentId();
+                            break;
+                        }
+                    }
+                }
+
+                if ($attachmentId) {
+                    $attachment = $service->users_messages_attachments->get('me', $msg->getId(), $attachmentId);
+                    $data = $attachment->getData();
+                    $decodedData = base64_decode(strtr($data, '-_', '+/'));
+
+                    // Save temporarily
+                    $tempFile = sys_get_temp_dir() . '/email_attachment_' . uniqid() . '.pdf';
+                    file_put_contents($tempFile, $decodedData);
+
+                    try {
+                        // Try to parse PDF (will work if not password-protected)
+                        $pdf = $pdfParser->parseFile($tempFile);
+                        $pdfText .= $pdf->getText();
+                        error_log("Successfully parsed PDF: $filename");
+                    } catch (Exception $e) {
+                        error_log("PDF parse failed (might be encrypted): " . $e->getMessage());
+                        
+                        // Try with qpdf to decrypt if password available
+                        if ($password && function_exists('shell_exec')) {
+                            $decryptedFile = sys_get_temp_dir() . '/decrypted_' . uniqid() . '.pdf';
+                            $command = "qpdf --password=$password --decrypt $tempFile $decryptedFile 2>&1";
+                            $output = shell_exec($command);
+                            
+                            if (file_exists($decryptedFile) && filesize($decryptedFile) > 0) {
+                                try {
+                                    $pdf = $pdfParser->parseFile($decryptedFile);
+                                    $pdfText .= $pdf->getText();
+                                    error_log("Successfully decrypted and parsed PDF: $filename");
+                                } catch (Exception $e2) {
+                                    error_log("Failed to parse decrypted PDF: " . $e2->getMessage());
+                                }
+                                @unlink($decryptedFile);
+                            } else {
+                                error_log("qpdf decryption failed or not available");
+                            }
+                        }
+                    }
+
+                    @unlink($tempFile);
+                }
+            } catch (Exception $e) {
+                error_log("Error processing PDF attachment: " . $e->getMessage());
+            }
+        }
+    }
+
+    return $pdfText;
 }
