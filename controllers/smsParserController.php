@@ -58,6 +58,8 @@ class SMSParserController {
 
         // Parse using Azure OpenAI
         $transactions = $this->ai->parseBankSMS($bankSMS);
+        error_log("AI parsing complete. Extracted " . count($transactions) . " transactions");
+        error_log("Transactions JSON: " . json_encode($transactions));
 
         // Save transactions to database
         $savedCount = 0;
@@ -83,12 +85,14 @@ class SMSParserController {
             ]);
 
             if (count($existing) > 0) {
+                error_log("Skipping duplicate transaction: " . json_encode($transaction));
                 $skippedCount++;
                 continue; // Skip duplicate
             }
 
             // Get or create bank account
             $accountId = $this->getOrCreateBankAccount($userId, $transaction);
+            error_log("Bank account ID: $accountId");
             
             // Get or create category
             $categoryId = $this->getOrCreateCategory($userId, $transaction);
@@ -114,10 +118,21 @@ class SMSParserController {
                     $transaction['reference_number'] ?? null
                 ]);
                 $savedCount++;
+                error_log("Transaction saved successfully: Amount={$transaction['amount']}, Merchant=" . ($transaction['merchant'] ?? 'N/A'));
             } catch (Exception $e) {
                 error_log("Failed to save transaction: " . $e->getMessage());
             }
         }
+
+        // Log success summary
+        error_log("=== SMS PARSING COMPLETE ===");
+        error_log("Total messages received: " . count($messages));
+        error_log("Bank SMS filtered: " . count($bankSMS));
+        error_log("Transactions parsed by AI: " . count($transactions));
+        error_log("Transactions saved to DB: $savedCount");
+        error_log("Duplicates skipped: $skippedCount");
+        error_log("User ID: $userId");
+        error_log("===========================");
 
         Response::success([
             'message' => 'SMS parsing complete',

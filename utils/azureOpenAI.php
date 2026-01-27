@@ -84,9 +84,11 @@ class AzureOpenAI {
             ];
 
             $response = $this->chatCompletion($messages, 0.1, true);
+            error_log("Azure OpenAI raw response: " . substr($response ?? 'null', 0, 500));
             
             if ($response) {
                 $parsed = json_decode($response, true);
+                error_log("Parsed JSON structure: " . json_encode(array_keys($parsed ?? [])));
                 if (isset($parsed['transactions']) && is_array($parsed['transactions'])) {
                     foreach ($parsed['transactions'] as $transaction) {
                         $transaction['source'] = 'sms';
