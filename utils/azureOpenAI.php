@@ -24,7 +24,7 @@ class AzureOpenAI {
         $payload = [
             'messages' => $messages,
             'temperature' => $temperature,
-            'max_tokens' => 2000
+            'max_completion_tokens' => 2000
         ];
 
         if ($jsonMode) {
