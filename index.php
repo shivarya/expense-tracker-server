@@ -158,7 +158,7 @@ try {
     
     if ($requestUri === '/parse/email/setup' && $requestMethod === 'POST') {
       $controller->setupGmail();
-    } elseif ($requestUri === '/parse/email/callback' && $requestMethod === 'POST') {
+    } elseif ($requestUri === '/parse/email/callback' && $requestMethod === 'GET') {
       $controller->gmailCallback();
     } elseif ($requestUri === '/parse/email/fetch' && $requestMethod === 'POST') {
       $controller->fetchEmails();

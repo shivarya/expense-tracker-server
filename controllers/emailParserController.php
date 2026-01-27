@@ -49,20 +49,41 @@ class EmailParserController {
     }
 
     /**
-     * POST /api/parse/email/callback
-     * Handle OAuth2 callback and save refresh token
-     * Body: { "code": "authorization_code_from_google" }
+     * GET /api/parse/email/callback
+     * Handle OAuth2 callback from Google redirect
+     * Query params: ?code=authorization_code_from_google&state=user_id
      */
     public function gmailCallback(): void {
-        $tokenData = JWTHandler::requireAuth();
-        $userId = $tokenData['userId'];
-
-        $input = json_decode(file_get_contents('php://input'), true);
-        $authCode = $input['code'] ?? null;
-
+        // Get code from query parameter (OAuth redirect)
+        $authCode = $_GET['code'] ?? null;
+        $state = $_GET['state'] ?? null; // Should contain user_id
+        
         if (!$authCode) {
-            Response::error('Provide authorization code', 400);
+            // Display user-friendly error page
+            http_response_code(400);
+            echo '<html><body style="font-family: Arial; padding: 50px; text-align: center;">
+                <h1>❌ Authorization Failed</h1>
+                <p>No authorization code received from Google.</p>
+                <p>Please try authorizing again from the app.</p>
+                </body></html>';
             return;
+        }
+
+        // Try to get userId from state or from JWT in cookie
+        $userId = $state;
+        if (!$userId) {
+            // Try to extract from Authorization header if available
+            try {
+                $tokenData = JWTHandler::requireAuth();
+                $userId = $tokenData['userId'];
+            } catch (Exception $e) {
+                http_response_code(401);
+                echo '<html><body style="font-family: Arial; padding: 50px; text-align: center;">
+                    <h1>❌ Authentication Required</h1>
+                    <p>Could not identify user. Please try authorizing from the app again.</p>
+                    </body></html>';
+                return;
+            }
         }
 
         $client = $this->getGmailClient($userId);
@@ -71,20 +92,40 @@ class EmailParserController {
             $accessToken = $client->fetchAccessTokenWithAuthCode($authCode);
             
             if (isset($accessToken['error'])) {
-                Response::error('Failed to get access token: ' . $accessToken['error'], 400);
+                http_response_code(400);
+                echo '<html><body style="font-family: Arial; padding: 50px; text-align: center;">
+                    <h1>❌ Authorization Failed</h1>
+                    <p>Error: ' . htmlspecialchars($accessToken['error']) . '</p>
+                    <p>Please try authorizing again from the app.</p>
+                    </body></html>';
                 return;
             }
 
-            // Save token to user-specific file
+            // Save token to database
+            $updateQuery = "UPDATE users SET gmail_token = ?, gmail_authorized_at = NOW() WHERE id = ?";
+            $this->db->execute($updateQuery, [json_encode($accessToken), $userId]);
+
+            // Also save to file as backup
             $tokenPath = __DIR__ . "/../data/gmail_token_$userId.json";
+            @mkdir(__DIR__ . '/../data', 0755, true);
             file_put_contents($tokenPath, json_encode($accessToken));
 
-            Response::success([
-                'message' => 'Gmail OAuth completed successfully',
-                'authenticated' => true
-            ]);
+            // Display success page
+            http_response_code(200);
+            echo '<html><body style="font-family: Arial; padding: 50px; text-align: center;">
+                <h1>✅ Gmail Authorization Successful!</h1>
+                <p>You can now sync mutual fund statements from Gmail.</p>
+                <p><strong>You can close this window and return to the app.</strong></p>
+                </body></html>';
+                
         } catch (Exception $e) {
-            Response::error('OAuth callback error: ' . $e->getMessage(), 500);
+            error_log('Gmail OAuth callback error: ' . $e->getMessage());
+            http_response_code(500);
+            echo '<html><body style="font-family: Arial; padding: 50px; text-align: center;">
+                <h1>❌ Server Error</h1>
+                <p>Failed to complete authorization. Please try again.</p>
+                <p>Error: ' . htmlspecialchars($e->getMessage()) . '</p>
+                </body></html>';
         }
     }
 
@@ -340,6 +381,7 @@ class EmailParserController {
             $client->addScope(\Google_Service_Gmail::GMAIL_READONLY);
             $client->setAccessType('offline');
             $client->setPrompt('consent');
+            $client->setState((string)$userId); // Pass user ID in state parameter
 
             $authUrl = $client->createAuthUrl();
 
