@@ -77,7 +77,7 @@ class SMSParserController {
             ";
             
             $accountPattern = '%' . ($transaction['account_number'] ?? '0000');
-            $existing = $this->db->query($existingQuery, [
+            $existing = $this->db->fetchAll($existingQuery, [
                 $userId,
                 $accountPattern,
                 $transaction['amount'],
