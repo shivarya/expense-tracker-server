@@ -15,6 +15,8 @@ CREATE TABLE IF NOT EXISTS users (
     google_id VARCHAR(255) UNIQUE,
     phone VARCHAR(20),
     profile_picture TEXT,
+    gmail_token JSON COMMENT 'Gmail OAuth access token and refresh token',
+    gmail_authorized_at TIMESTAMP NULL COMMENT 'When user authorized Gmail access',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     INDEX idx_email (email),
