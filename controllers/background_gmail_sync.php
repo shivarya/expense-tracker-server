@@ -4,26 +4,27 @@
  * Usage: php background_gmail_sync.php {jobId} {userId} {maxResults} {query}
  */
 
-require_once __DIR__ . '/../vendor/autoload.php';
-require_once __DIR__ . '/../config/config.php';
-require_once __DIR__ . '/../utils/Database.php';
-require_once __DIR__ . '/../utils/azureOpenAI.php';
-
-// Get arguments
+// Get arguments first
 $jobId = $argv[1] ?? null;
 $userId = $argv[2] ?? null;
 $maxResults = $argv[3] ?? 10;
 $query = $argv[4] ?? 'from:(camsonline.com OR kfintech.com)';
 
-if (!$jobId || !$userId) {
-    error_log("Background sync failed: Missing jobId or userId");
-    exit(1);
-}
-
-$db = Database::getInstance();
-$ai = new AzureOpenAI();
+$db = null;
 
 try {
+    if (!$jobId || !$userId) {
+        throw new Exception("Missing jobId or userId");
+    }
+
+    require_once __DIR__ . '/../vendor/autoload.php';
+    require_once __DIR__ . '/../config/config.php';
+    require_once __DIR__ . '/../config/database.php';
+    require_once __DIR__ . '/../utils/azureOpenAI.php';
+
+    $db = Database::getInstance();
+    $ai = new AzureOpenAI();
+
     // Update job status to processing
     $db->execute("UPDATE sync_jobs SET status = 'processing', started_at = NOW() WHERE id = ?", [$jobId]);
 
@@ -115,10 +116,45 @@ try {
 
 } catch (Exception $e) {
     error_log("Background Gmail sync failed: " . $e->getMessage());
-    $db->execute(
-        "UPDATE sync_jobs SET status = 'failed', completed_at = NOW(), error_message = ? WHERE id = ?",
-        [$e->getMessage(), $jobId]
-    );
+    
+    // Try to update database even if something went wrong
+    try {
+        if ($db !== null) {
+            $db->execute(
+                "UPDATE sync_jobs SET status = 'failed', completed_at = NOW(), error_message = ? WHERE id = ?",
+                [substr($e->getMessage(), 0, 500), $jobId]
+            );
+        } else {
+            // Database not initialized, try to initialize it just for error logging
+            require_once __DIR__ . '/../vendor/autoload.php';
+            require_once __DIR__ . '/../config/config.php';
+            require_once __DIR__ . '/../config/database.php';
+            $db = Database::getInstance();
+            $db->execute(
+                "UPDATE sync_jobs SET status = 'failed', completed_at = NOW(), error_message = ? WHERE id = ?",
+                [substr($e->getMessage(), 0, 500), $jobId]
+            );
+        }
+    } catch (Exception $dbError) {
+        error_log("Failed to update database with error status: " . $dbError->getMessage());
+    }
+    
+    exit(1);
+} catch (Throwable $e) {
+    // Catch any fatal errors (PHP 7+)
+    error_log("Background Gmail sync fatal error: " . $e->getMessage());
+    
+    try {
+        if ($db !== null) {
+            $db->execute(
+                "UPDATE sync_jobs SET status = 'failed', completed_at = NOW(), error_message = ? WHERE id = ?",
+                [substr("Fatal: " . $e->getMessage(), 0, 500), $jobId]
+            );
+        }
+    } catch (Exception $dbError) {
+        error_log("Failed to update database with fatal error status: " . $dbError->getMessage());
+    }
+    
     exit(1);
 }
 
