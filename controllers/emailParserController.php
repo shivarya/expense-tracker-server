@@ -351,12 +351,22 @@ class EmailParserController {
         $tokenData = JWTHandler::requireAuth();
         $userId = $tokenData['userId'];
 
-        $tokenPath = __DIR__ . "/../data/gmail_token_$userId.json";
-        $authorized = file_exists($tokenPath);
+        // Check database for gmail_token
+        $query = "SELECT gmail_token, gmail_authorized_at FROM users WHERE id = ?";
+        $result = $this->db->fetchAll($query, [$userId]);
+        
+        $authorized = false;
+        $authorizedAt = null;
+        
+        if (!empty($result) && !empty($result[0]['gmail_token'])) {
+            $authorized = true;
+            $authorizedAt = $result[0]['gmail_authorized_at'];
+        }
 
         Response::success([
             'authorized' => $authorized,
-            'user_id' => $userId
+            'user_id' => $userId,
+            'authorized_at' => $authorizedAt
         ]);
     }
 
