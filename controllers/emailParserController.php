@@ -272,6 +272,33 @@ class EmailParserController {
         $client->setAccessType('offline');
         $client->setPrompt('consent');
 
+        // Load saved access token from database
+        $query = "SELECT gmail_token FROM users WHERE id = ?";
+        $result = $this->db->fetchAll($query, [$userId]);
+        
+        if (!empty($result) && !empty($result[0]['gmail_token'])) {
+            $tokenJson = $result[0]['gmail_token'];
+            $accessToken = json_decode($tokenJson, true);
+            
+            if ($accessToken) {
+                $client->setAccessToken($accessToken);
+                
+                // Check if token is expired and refresh if needed
+                if ($client->isAccessTokenExpired()) {
+                    $refreshToken = $client->getRefreshToken();
+                    if ($refreshToken) {
+                        $newToken = $client->fetchAccessTokenWithRefreshToken($refreshToken);
+                        
+                        // Save refreshed token back to database
+                        $updateQuery = "UPDATE users SET gmail_token = ? WHERE id = ?";
+                        $this->db->execute($updateQuery, [json_encode($newToken), $userId]);
+                        
+                        error_log("Gmail token refreshed for user $userId");
+                    }
+                }
+            }
+        }
+
         $this->gmailClient = $client;
         return $client;
     }
