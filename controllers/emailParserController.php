@@ -54,6 +54,9 @@ class EmailParserController {
      * Query params: ?code=authorization_code_from_google&state=user_id
      */
     public function gmailCallback(): void {
+        // Set HTML content type
+        header('Content-Type: text/html; charset=utf-8');
+        
         // Get code from query parameter (OAuth redirect)
         $authCode = $_GET['code'] ?? null;
         $state = $_GET['state'] ?? null; // Should contain user_id
@@ -102,13 +105,16 @@ class EmailParserController {
             }
 
             // Save token to database
+            $tokenJson = json_encode($accessToken);
             $updateQuery = "UPDATE users SET gmail_token = ?, gmail_authorized_at = NOW() WHERE id = ?";
-            $this->db->execute($updateQuery, [json_encode($accessToken), $userId]);
+            $updated = $this->db->execute($updateQuery, [$tokenJson, $userId]);
+            
+            error_log("Gmail token saved for user $userId. Updated rows: " . ($updated ? 'success' : 'failed'));
 
             // Also save to file as backup
             $tokenPath = __DIR__ . "/../data/gmail_token_$userId.json";
             @mkdir(__DIR__ . '/../data', 0755, true);
-            file_put_contents($tokenPath, json_encode($accessToken));
+            file_put_contents($tokenPath, $tokenJson);
 
             // Display success page
             http_response_code(200);
