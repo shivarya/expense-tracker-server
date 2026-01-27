@@ -10,7 +10,7 @@ class SMSParserController {
     private AzureOpenAI $ai;
 
     public function __construct() {
-        $this->db = new Database();
+        $this->db = Database::getInstance();
         $this->ai = new AzureOpenAI();
     }
 
@@ -27,7 +27,7 @@ class SMSParserController {
         $input = json_decode(file_get_contents('php://input'), true);
         
         if (!isset($input['messages']) || !is_array($input['messages'])) {
-            sendError('Invalid input. Provide "messages" array.', 400);
+            Response::error('Invalid input. Provide "messages" array.', 400);
             return;
         }
 
@@ -46,7 +46,7 @@ class SMSParserController {
         });
 
         if (empty($bankSMS)) {
-            sendSuccess([
+            Response::success([
                 'message' => 'No bank SMS found',
                 'parsed_count' => 0,
                 'transactions' => []
@@ -119,7 +119,7 @@ class SMSParserController {
             }
         }
 
-        sendSuccess([
+        Response::success([
             'message' => 'SMS parsing complete',
             'total_sms' => count($bankSMS),
             'parsed_transactions' => count($transactions),
@@ -154,7 +154,7 @@ class SMSParserController {
                   str_contains($senderLower, 'kotak');
 
         if (!$isBank) {
-            sendSuccess([
+            Response::success([
                 'message' => 'Not a bank SMS',
                 'processed' => false
             ]);
@@ -167,7 +167,7 @@ class SMSParserController {
         ]);
 
         if (empty($transactions)) {
-            sendSuccess([
+            Response::success([
                 'message' => 'No transaction found in SMS',
                 'processed' => false
             ]);
@@ -198,7 +198,7 @@ class SMSParserController {
             $transaction['reference_number'] ?? null
         ]);
 
-        sendSuccess([
+        Response::success([
             'message' => 'SMS processed successfully',
             'processed' => true,
             'transaction' => $transaction
