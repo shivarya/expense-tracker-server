@@ -463,8 +463,7 @@ class EmailParserController {
 
         // Create sync job
         $jobQuery = "INSERT INTO sync_jobs (user_id, type, status, created_at) VALUES (?, 'gmail', 'pending', NOW())";
-        $this->db->execute($jobQuery, [$userId]);
-        $jobId = $this->db->getLastInsertId();
+        $jobId = $this->db->insert($jobQuery, [$userId]);
 
         // Start background processing
         $phpPath = 'php'; // or '/usr/bin/php' depending on server
