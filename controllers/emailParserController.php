@@ -458,79 +458,146 @@ class EmailParserController {
             $client = $this->getGmailClient($userId);
             $service = new \Google_Service_Gmail($client);
 
-            $messages = $service->users_messages->listUsersMessages('me', [
+            $messagesList = $service->users_messages->listUsersMessages('me', [
                 'q' => $query,
                 'maxResults' => $maxResults
             ]);
 
             $emailsProcessed = 0;
-            $transactionsSaved = 0;
+            $mutualFundsSaved = 0;
+            $errors = [];
 
-            foreach ($messages->getMessages() as $message) {
-                $msg = $service->users_messages->get('me', $message->getId());
-                $emailsProcessed++;
+            $messages = $messagesList->getMessages();
+            if (empty($messages)) {
+                Response::success([
+                    'emailsProcessed' => 0,
+                    'mutualFundsSaved' => 0,
+                    'message' => 'No emails found matching the query'
+                ]);
+                return;
+            }
 
-                // Process email (simplified - you can expand this)
-                $subject = '';
-                $body = '';
-                
-                foreach ($msg->getPayload()->getHeaders() as $header) {
-                    if ($header->getName() === 'Subject') {
-                        $subject = $header->getValue();
-                    }
-                }
+            foreach ($messages as $message) {
+                try {
+                    $msg = $service->users_messages->get('me', $message->getId());
+                    $emailsProcessed++;
 
-                if ($msg->getPayload()->getBody()->getData()) {
-                    $body = base64_url_decode($msg->getPayload()->getBody()->getData());
-                } elseif ($msg->getPayload()->getParts()) {
-                    foreach ($msg->getPayload()->getParts() as $part) {
-                        if ($part->getBody()->getData()) {
-                            $body .= base64_url_decode($part->getBody()->getData());
+                    // Extract subject and body
+                    $subject = '';
+                    $body = '';
+                    
+                    foreach ($msg->getPayload()->getHeaders() as $header) {
+                        if ($header->getName() === 'Subject') {
+                            $subject = $header->getValue();
                         }
                     }
-                }
 
-                // Parse email content using AI
-                $parsedData = $this->ai->parseEmail($subject, $body);
-                
-                if ($parsedData && isset($parsedData['transactions'])) {
-                    foreach ($parsedData['transactions'] as $transaction) {
-                        // Save to database
-                        $this->saveTransaction($userId, $transaction);
-                        $transactionsSaved++;
+                    // Decode email body
+                    if ($msg->getPayload()->getBody()->getData()) {
+                        $body = $this->decodeBase64Url($msg->getPayload()->getBody()->getData());
+                    } elseif ($msg->getPayload()->getParts()) {
+                        foreach ($msg->getPayload()->getParts() as $part) {
+                            if ($part->getBody()->getData()) {
+                                $body .= $this->decodeBase64Url($part->getBody()->getData());
+                            }
+                        }
                     }
+
+                    // Parse email content using AI
+                    $parsedData = $this->ai->parseEmailContent($body, $subject);
+                    
+                    if ($parsedData && isset($parsedData['holdings']) && is_array($parsedData['holdings'])) {
+                        // Save mutual funds from CAMS/KFintech statement
+                        foreach ($parsedData['holdings'] as $holding) {
+                            $this->saveMutualFund($userId, $holding, $parsedData);
+                            $mutualFundsSaved++;
+                        }
+                    }
+                } catch (Exception $e) {
+                    error_log("Error processing email {$message->getId()}: " . $e->getMessage());
+                    $errors[] = $e->getMessage();
                 }
             }
 
             Response::success([
                 'emailsProcessed' => $emailsProcessed,
-                'transactionsSaved' => $transactionsSaved,
-                'message' => "Processed $emailsProcessed emails, saved $transactionsSaved transactions"
+                'mutualFundsSaved' => $mutualFundsSaved,
+                'errors' => count($errors),
+                'message' => "Processed $emailsProcessed emails, saved $mutualFundsSaved mutual funds"
             ]);
         } catch (Exception $e) {
             Response::error('Failed to fetch Gmail emails: ' . $e->getMessage(), 500);
         }
     }
 
-    private function saveTransaction($userId, $transaction): void {
-        $query = "INSERT INTO transactions (
-            user_id, type, amount, category, description, 
-            transaction_date, account_id, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, NOW())";
+    private function saveMutualFund(int $userId, array $holding, array $statementData): void {
+        // Check if fund already exists
+        $checkQuery = "SELECT id FROM mutual_funds WHERE user_id = ? AND fund_name = ?";
+        $existing = $this->db->fetchAll($checkQuery, [$userId, $holding['name']]);
 
-        $this->db->execute($query, [
-            $userId,
-            $transaction['type'] ?? 'expense',
-            $transaction['amount'] ?? 0,
-            $transaction['category'] ?? 'Other',
-            $transaction['description'] ?? '',
-            $transaction['date'] ?? date('Y-m-d'),
-            $transaction['account_id'] ?? null
-        ]);
+        $investedAmount = $holding['purchase_value'] ?? 0;
+        $currentValue = $holding['current_value'] ?? 0;
+        $units = $holding['units'] ?? 0;
+        $nav = $units > 0 ? ($currentValue / $units) : 0;
+
+        if (empty($existing)) {
+            // Insert new mutual fund
+            $insertQuery = "INSERT INTO mutual_funds (
+                user_id, fund_name, folio_number, amc, units, nav,
+                invested_amount, current_value, created_at, last_updated
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())";
+
+            $this->db->execute($insertQuery, [
+                $userId,
+                $holding['name'],
+                $statementData['account_number'] ?? 'Unknown',
+                $this->extractAMC($holding['name']),
+                $units,
+                $nav,
+                $investedAmount,
+                $currentValue
+            ]);
+        } else {
+            // Update existing mutual fund
+            $updateQuery = "UPDATE mutual_funds SET 
+                units = ?, nav = ?, invested_amount = ?, current_value = ?, last_updated = NOW()
+                WHERE id = ?";
+
+            $this->db->execute($updateQuery, [
+                $units,
+                $nav,
+                $investedAmount,
+                $currentValue,
+                $existing[0]['id']
+            ]);
+        }
     }
-}
 
-function base64_url_decode($input): string {
-    return base64_decode(strtr($input, '-_', '+/'));
+    private function extractAMC(string $fundName): string {
+        $amcPatterns = [
+            '/HDFC/i' => 'HDFC',
+            '/ICICI/i' => 'ICICI Prudential',
+            '/SBI/i' => 'SBI',
+            '/Axis/i' => 'Axis',
+            '/Kotak/i' => 'Kotak',
+            '/Nippon/i' => 'Nippon India',
+            '/UTI/i' => 'UTI',
+            '/Aditya Birla/i' => 'Aditya Birla Sun Life',
+            '/DSP/i' => 'DSP',
+            '/Franklin/i' => 'Franklin Templeton',
+        ];
+
+        foreach ($amcPatterns as $pattern => $amc) {
+            if (preg_match($pattern, $fundName)) {
+                return $amc;
+            }
+        }
+
+        return 'Other';
+    }
+
+    private function decodeBase64Url(string $input): string {
+        return base64_decode(strtr($input, '-_', '+/'));
+    }
 }
 
