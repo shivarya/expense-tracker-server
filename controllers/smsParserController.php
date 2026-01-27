@@ -72,7 +72,7 @@ class SMSParserController {
                 WHERE user_id = ? 
                 AND account_id IN (SELECT id FROM bank_accounts WHERE account_number LIKE ?)
                 AND amount = ?
-                AND ABS(TIMESTAMPDIFF(MINUTE, date, ?)) < 60
+                AND ABS(TIMESTAMPDIFF(MINUTE, transaction_date, ?)) < 60
                 LIMIT 1
             ";
             
@@ -101,8 +101,8 @@ class SMSParserController {
             $insertQuery = "
                 INSERT INTO transactions (
                     user_id, account_id, category_id, transaction_type, 
-                    amount, merchant, description, date, reference_number, source
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'sms_auto')
+                    amount, merchant, description, transaction_date, reference_number, source
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'sms')
             ";
 
             try {
