@@ -381,6 +381,21 @@ function syncTransactions($userId)
         $sql = "INSERT INTO transactions (user_id, account_id, category_id, transaction_type, amount,
                   merchant, description, transaction_date, reference_number, source, source_data)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+        
+        // Determine source enum value and store card details in source_data
+        $sourceEnum = 'web_scrape'; // Default for scraped transactions
+        if (isset($input['source']) && $input['source'] === 'sms_parser') {
+          $sourceEnum = 'sms';
+        } elseif (isset($input['source']) && $input['source'] === 'email_parser') {
+          $sourceEnum = 'email';
+        }
+        
+        // Add payment method to source_data
+        $sourceDataArray = isset($txn['source_data']) ? json_decode(json_encode($txn['source_data']), true) : [];
+        if (isset($txn['source']) && $txn['source']) {
+          $sourceDataArray['payment_method'] = $txn['source']; // Store "ICICI Card *7003" here
+        }
+        
         $db->insert($sql, [
           $userId,
           $accountId,
@@ -391,8 +406,8 @@ function syncTransactions($userId)
           $txn['description'] ?? null,
           $txn['date'] ?? $txn['transaction_date'] ?? date('Y-m-d'),
           $txn['reference_number'] ?? null,
-          $txn['source'] ?? 'sms',
-          isset($txn['source_data']) ? json_encode($txn['source_data']) : null
+          $sourceEnum,
+          !empty($sourceDataArray) ? json_encode($sourceDataArray) : null
         ]);
         $created++;
       } catch (Exception $e) {

@@ -3,7 +3,7 @@
         'name' => 'expense-tracker/server',
         'pretty_version' => 'dev-master',
         'version' => 'dev-master',
-        'reference' => '48234ba3bd3f9976b5a62b31816e314b96ed8a1d',
+        'reference' => '0653a6a50a80041594b94df72ffc47ffbba19e3d',
         'type' => 'project',
         'install_path' => __DIR__ . '/../../',
         'aliases' => array(),
@@ -13,7 +13,7 @@
         'expense-tracker/server' => array(
             'pretty_version' => 'dev-master',
             'version' => 'dev-master',
-            'reference' => '48234ba3bd3f9976b5a62b31816e314b96ed8a1d',
+            'reference' => '0653a6a50a80041594b94df72ffc47ffbba19e3d',
             'type' => 'project',
             'install_path' => __DIR__ . '/../../',
             'aliases' => array(),
