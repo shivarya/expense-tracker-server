@@ -70,8 +70,8 @@ function createEmi($userId)
 
     $sql = "INSERT INTO emis (user_id, account_id, loan_name, loan_type, bank, principal_amount,
               interest_rate, tenure_months, emi_amount, start_date, end_date, remaining_months,
-              remaining_principal, due_date, status, auto_debit, next_payment_date)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+              remaining_principal, due_date, status, auto_debit, next_payment_date, last_payment_date, total_paid)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
     
     $id = $db->insert($sql, [
       $userId,
@@ -85,12 +85,14 @@ function createEmi($userId)
       $input['emi_amount'],
       $input['start_date'],
       $endDate->format('Y-m-d'),
-      $input['tenure_months'],
-      $input['principal_amount'],
+      $input['remaining_months'] ?? $input['tenure_months'],
+      $input['remaining_principal'] ?? $input['principal_amount'],
       $input['due_date'],
-      'active',
+      $input['status'] ?? 'active',
       $input['auto_debit'] ?? true,
-      $input['start_date']
+      $input['next_payment_date'] ?? null,
+      $input['last_payment_date'] ?? null,
+      $input['total_paid'] ?? 0
     ]);
 
     Response::success(['id' => $id], 'EMI created successfully', 201);
