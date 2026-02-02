@@ -379,10 +379,10 @@ function syncTransactions($userId)
 
         // Insert transaction
         $sql = "INSERT INTO transactions (user_id, account_id, category_id, transaction_type, amount,
-                  merchant, description, transaction_date, reference_number, source, source_data)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+                  merchant, description, transaction_date, reference_number, source, payment_method, source_data)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
         
-        // Determine source enum value and store card details in source_data
+        // Determine source enum value
         $sourceEnum = 'web_scrape'; // Default for scraped transactions
         if (isset($input['source']) && $input['source'] === 'sms_parser') {
           $sourceEnum = 'sms';
@@ -390,11 +390,11 @@ function syncTransactions($userId)
           $sourceEnum = 'email';
         }
         
-        // Add payment method to source_data
+        // Extract payment method (card name like "ICICI Card *7003")
+        $paymentMethod = isset($txn['source']) && $txn['source'] ? $txn['source'] : null;
+        
+        // Prepare source_data JSON (without payment_method since it's now a separate column)
         $sourceDataArray = isset($txn['source_data']) ? json_decode(json_encode($txn['source_data']), true) : [];
-        if (isset($txn['source']) && $txn['source']) {
-          $sourceDataArray['payment_method'] = $txn['source']; // Store "ICICI Card *7003" here
-        }
         
         $db->insert($sql, [
           $userId,
@@ -407,6 +407,7 @@ function syncTransactions($userId)
           $txn['date'] ?? $txn['transaction_date'] ?? date('Y-m-d'),
           $txn['reference_number'] ?? null,
           $sourceEnum,
+          $paymentMethod,
           !empty($sourceDataArray) ? json_encode($sourceDataArray) : null
         ]);
         $created++;

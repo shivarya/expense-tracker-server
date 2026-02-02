@@ -230,6 +230,7 @@ CREATE TABLE IF NOT EXISTS transactions (
     transaction_date DATETIME NOT NULL,
     reference_number VARCHAR(100),
     source ENUM('sms', 'email', 'web_scrape', 'manual') NOT NULL,
+    payment_method VARCHAR(100) COMMENT 'Payment method used (e.g., ICICI Card *7003, RBL Card *5607)',
     source_data JSON COMMENT 'Original SMS/email content',
     is_emi BOOLEAN DEFAULT FALSE,
     emi_id INT NULL COMMENT 'Link to EMI if this is an EMI payment',
@@ -244,7 +245,8 @@ CREATE TABLE IF NOT EXISTS transactions (
     INDEX idx_category (category_id),
     INDEX idx_type_date (transaction_type, transaction_date),
     INDEX idx_merchant (merchant),
-    INDEX idx_source (source)
+    INDEX idx_source (source),
+    INDEX idx_payment_method (payment_method)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================
