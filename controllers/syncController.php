@@ -390,8 +390,16 @@ function syncTransactions($userId)
           $sourceEnum = 'email';
         }
         
-        // Extract payment method (card name like "ICICI Card *7003")
-        $paymentMethod = isset($txn['source']) && $txn['source'] ? $txn['source'] : null;
+        // Map transaction_type from 'expense'/'income' to 'debit'/'credit'
+        $transactionType = $txn['transaction_type'];
+        if ($transactionType === 'expense') {
+          $transactionType = 'debit';
+        } elseif ($transactionType === 'income') {
+          $transactionType = 'credit';
+        }
+        
+        // Extract payment method from the correct field
+        $paymentMethod = isset($txn['payment_method']) && $txn['payment_method'] ? $txn['payment_method'] : null;
         
         // Prepare source_data JSON (without payment_method since it's now a separate column)
         $sourceDataArray = isset($txn['source_data']) ? json_decode(json_encode($txn['source_data']), true) : [];
@@ -400,7 +408,7 @@ function syncTransactions($userId)
           $userId,
           $accountId,
           $categoryId,
-          $txn['transaction_type'],
+          $transactionType,
           $txn['amount'],
           $txn['merchant'] ?? null,
           $txn['description'] ?? null,
