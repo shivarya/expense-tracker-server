@@ -151,28 +151,15 @@ try {
     exit;
   }
 
-  // Email parsing endpoints
-  if (strpos($requestUri, '/parse/email') === 0) {
-    require_once __DIR__ . '/controllers/emailParserController.php';
-    $controller = new EmailParserController();
-    
-    if ($requestUri === '/parse/email/setup' && $requestMethod === 'POST') {
-      $controller->setupGmail();
-    } elseif ($requestUri === '/parse/email/callback' && $requestMethod === 'GET') {
-      $controller->gmailCallback();
-    } elseif ($requestUri === '/parse/email/fetch' && $requestMethod === 'POST') {
-      $controller->fetchEmails();
-    } elseif ($requestUri === '/parse/email/webhook' && $requestMethod === 'POST') {
-      $controller->gmailWebhook();
-    } elseif ($requestUri === '/parse/email/gmail/status' && $requestMethod === 'GET') {
-      $controller->getGmailStatus();
-    } elseif ($requestUri === '/parse/email/gmail/setup' && $requestMethod === 'GET') {
-      $controller->getGmailAuthUrl();
-    } elseif ($requestUri === '/parse/email/gmail/fetch' && $requestMethod === 'POST') {
-      $controller->fetchGmailEmails();
-    } else {
-      Response::error('Invalid email parser route', 404);
-    }
+  // Duplicate detection endpoints
+  if (strpos($requestUri, '/duplicates') === 0) {
+    require_once __DIR__ . '/controllers/duplicateController.php';
+    exit;
+  }
+
+  // Sync status endpoints
+  if (strpos($requestUri, '/sync/status') === 0 || strpos($requestUri, '/sync/log') === 0 || strpos($requestUri, '/sync/check') === 0) {
+    require_once __DIR__ . '/controllers/syncStatusController.php';
     exit;
   }
 

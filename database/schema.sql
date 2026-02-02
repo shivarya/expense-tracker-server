@@ -304,6 +304,25 @@ CREATE TABLE IF NOT EXISTS scrape_logs (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================
+-- SCRAPER SYNC LOG TABLE (Track synced items to detect duplicates)
+-- ============================================
+CREATE TABLE IF NOT EXISTS scraper_sync_log (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    user_id INT NOT NULL,
+    data_type ENUM('stocks', 'mutual_funds', 'fixed_deposits', 'long_term', 'transactions', 'emis', 'bank_accounts') NOT NULL,
+    source VARCHAR(100) NOT NULL COMMENT 'zerodha, groww, cams, kfintech, hdfc-cc, icici-cc, epfo, nps, etc',
+    source_identifier VARCHAR(500) NOT NULL COMMENT 'symbol, folio, reference_number - non-PII identifiers',
+    source_file_hash VARCHAR(64) COMMENT 'SHA-256 hash of source file content',
+    last_portal_date DATE COMMENT 'Last transaction/update date visible on source portal',
+    metadata JSON COMMENT 'Additional non-PII data: statement_date, item_count, etc',
+    synced_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    UNIQUE KEY unique_sync_item (user_id, data_type, source, source_identifier),
+    INDEX idx_user_type_source (user_id, data_type, source),
+    INDEX idx_synced_at (synced_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================
 -- ASSET SUMMARY VIEW (Portfolio overview)
 -- ============================================
 CREATE OR REPLACE VIEW v_asset_summary AS
