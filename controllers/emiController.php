@@ -53,6 +53,16 @@ function createEmi($userId)
 
     $db = getDB();
 
+    // Check for duplicate EMI (same user, account, loan name, and start date)
+    $existing = $db->fetchOne(
+      "SELECT id FROM emis WHERE user_id = ? AND account_id = ? AND loan_name = ? AND start_date = ?",
+      [$userId, $input['account_id'], $input['loan_name'], $input['start_date']]
+    );
+
+    if ($existing) {
+      Response::error('EMI already exists', 422, ['duplicate' => 'EMI with same loan name and start date already exists']);
+    }
+
     // Calculate end date
     $startDate = new DateTime($input['start_date']);
     $endDate = clone $startDate;
