@@ -53,14 +53,18 @@ function createEmi($userId)
 
     $db = getDB();
 
-    // Check for duplicate EMI (same user, account, loan name, and start date)
-    $existing = $db->fetchOne(
-      "SELECT id FROM emis WHERE user_id = ? AND account_id = ? AND loan_name = ? AND start_date = ?",
-      [$userId, $input['account_id'], $input['loan_name'], $input['start_date']]
+    // Use Azure AI to detect duplicate EMIs intelligently
+    $existingEmis = $db->fetchAll(
+      "SELECT id, loan_name, loan_type, bank, principal_amount, tenure_months, emi_amount, start_date 
+       FROM emis WHERE user_id = ? AND account_id = ?",
+      [$userId, $input['account_id']]
     );
 
-    if ($existing) {
-      Response::error('EMI already exists', 422, ['duplicate' => 'EMI with same loan name and start date already exists']);
+    if (!empty($existingEmis)) {
+      $isDuplicate = checkDuplicateEmiWithAI($input, $existingEmis);
+      if ($isDuplicate) {
+        Response::error('EMI already exists', 422, ['duplicate' => 'A similar EMI plan already exists for this account']);
+      }
     }
 
     // Calculate end date
@@ -149,3 +153,116 @@ function deleteEmi($userId, $emiId)
   }
 }
 
+function checkDuplicateEmiWithAI($newEmi, $existingEmis)
+{
+  try {
+    // Prepare context for Azure AI
+    $existingEmisList = array_map(function($emi) {
+      return sprintf(
+        "- %s (%s) - Principal: ₹%.2f, Tenure: %d months, EMI: ₹%.2f, Start: %s",
+        $emi['loan_name'],
+        $emi['loan_type'],
+        $emi['principal_amount'],
+        $emi['tenure_months'],
+        $emi['emi_amount'],
+        $emi['start_date']
+      );
+    }, $existingEmis);
+
+    $prompt = sprintf(
+      "You are a financial data analyst. Determine if the following EMI is a duplicate of any existing EMIs.\n\n" .
+      "NEW EMI:\n" .
+      "- Loan: %s (%s)\n" .
+      "- Bank: %s\n" .
+      "- Principal: ₹%.2f\n" .
+      "- Tenure: %d months\n" .
+      "- EMI Amount: ₹%.2f\n" .
+      "- Start Date: %s\n\n" .
+      "EXISTING EMIs:\n%s\n\n" .
+      "Consider these factors:\n" .
+      "1. Same loan name and similar amounts (within 10%% variance)\n" .
+      "2. Same start date or within 1 month\n" .
+      "3. Similar tenure and EMI amounts\n" .
+      "4. Merchant name variations (e.g., 'AMAZON' vs 'Amazon Pay')\n\n" .
+      "Respond with ONLY 'YES' if it's a duplicate, or 'NO' if it's a new EMI. No explanation needed.",
+      $newEmi['loan_name'],
+      $newEmi['loan_type'],
+      $newEmi['bank'],
+      $newEmi['principal_amount'],
+      $newEmi['tenure_months'],
+      $newEmi['emi_amount'],
+      $newEmi['start_date'],
+      implode("\n", $existingEmisList)
+    );
+
+    // Call Azure OpenAI
+    $endpoint = getenv('AZURE_OPENAI_ENDPOINT');
+    $apiKey = getenv('AZURE_OPENAI_API_KEY');
+    $deployment = getenv('AZURE_OPENAI_DEPLOYMENT');
+
+    if (!$endpoint || !$apiKey || !$deployment) {
+      error_log('Azure OpenAI not configured, falling back to simple duplicate check');
+      // Fallback: simple exact match
+      foreach ($existingEmis as $existing) {
+        if ($existing['loan_name'] === $newEmi['loan_name'] && 
+            $existing['start_date'] === $newEmi['start_date']) {
+          return true;
+        }
+      }
+      return false;
+    }
+
+    $url = rtrim($endpoint, '/') . '/openai/deployments/' . $deployment . '/chat/completions?api-version=2024-02-15-preview';
+    
+    $data = [
+      'messages' => [
+        ['role' => 'system', 'content' => 'You are a precise financial data analyst.'],
+        ['role' => 'user', 'content' => $prompt]
+      ],
+      'max_tokens' => 10,
+      'temperature' => 0
+    ];
+
+    $ch = curl_init($url);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_POST, true);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($data));
+    curl_setopt($ch, CURLOPT_HTTPHEADER, [
+      'Content-Type: application/json',
+      'api-key: ' . $apiKey
+    ]);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 10);
+
+    $response = curl_exec($ch);
+    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+
+    if ($httpCode !== 200) {
+      error_log('Azure OpenAI API error: ' . $response);
+      // Fallback on API error
+      foreach ($existingEmis as $existing) {
+        if ($existing['loan_name'] === $newEmi['loan_name'] && 
+            $existing['start_date'] === $newEmi['start_date']) {
+          return true;
+        }
+      }
+      return false;
+    }
+
+    $result = json_decode($response, true);
+    $answer = trim($result['choices'][0]['message']['content'] ?? 'NO');
+    
+    return strtoupper($answer) === 'YES';
+
+  } catch (Exception $e) {
+    error_log('Error in AI duplicate check: ' . $e->getMessage());
+    // Fallback to simple check on exception
+    foreach ($existingEmis as $existing) {
+      if ($existing['loan_name'] === $newEmi['loan_name'] && 
+          $existing['start_date'] === $newEmi['start_date']) {
+        return true;
+      }
+    }
+    return false;
+  }
+}

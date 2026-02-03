@@ -8,6 +8,8 @@ function handleTransactionRoutes($uri, $method)
 
   if ($uri === '/transactions' && $method === 'GET') {
     getTransactions($userId);
+  } elseif ($uri === '/transactions/duplicates' && $method === 'GET') {
+    getDuplicateTransactions($userId);
   } elseif ($uri === '/transactions' && $method === 'POST') {
     createTransaction($userId);
   } elseif (preg_match('/^\/transactions\/(\d+)$/', $uri, $matches) && $method === 'DELETE') {
@@ -134,6 +136,59 @@ function deleteTransaction($userId, $id)
     }
   } catch (Exception $e) {
     Response::error('Failed to delete transaction: ' . $e->getMessage(), 500);
+  }
+}
+
+function getDuplicateTransactions($userId)
+{
+  try {
+    $db = getDB();
+    
+    // Get query parameter for minimum duplicate score threshold
+    $minScore = $_GET['min_score'] ?? 51; // Default: 51% (possible duplicates)
+    $limit = $_GET['limit'] ?? 100;
+
+    $sql = "SELECT t.*, c.name as category_name, c.color as category_color, c.icon as category_icon,
+                   ba.bank, ba.account_type, ba.account_name
+            FROM transactions t
+            JOIN categories c ON t.category_id = c.id
+            JOIN bank_accounts ba ON t.account_id = ba.id
+            WHERE t.user_id = ? AND t.duplicate_score >= ?
+            ORDER BY t.duplicate_score DESC, t.transaction_date DESC
+            LIMIT ?";
+
+    $transactions = $db->fetchAll($sql, [$userId, (int)$minScore, (int)$limit]);
+
+    // Group by duplicate score ranges for better UX
+    $grouped = [
+      'high_confidence' => [], // 76-100
+      'medium_confidence' => [], // 51-75
+      'low_confidence' => [] // 21-50
+    ];
+
+    foreach ($transactions as $txn) {
+      $score = $txn['duplicate_score'];
+      if ($score >= 76) {
+        $grouped['high_confidence'][] = $txn;
+      } elseif ($score >= 51) {
+        $grouped['medium_confidence'][] = $txn;
+      } else {
+        $grouped['low_confidence'][] = $txn;
+      }
+    }
+
+    Response::success([
+      'transactions' => $transactions,
+      'grouped' => $grouped,
+      'summary' => [
+        'total' => count($transactions),
+        'high_confidence' => count($grouped['high_confidence']),
+        'medium_confidence' => count($grouped['medium_confidence']),
+        'low_confidence' => count($grouped['low_confidence'])
+      ]
+    ], 'Duplicate transactions retrieved successfully');
+  } catch (Exception $e) {
+    Response::error('Failed to fetch duplicate transactions: ' . $e->getMessage(), 500);
   }
 }
 
