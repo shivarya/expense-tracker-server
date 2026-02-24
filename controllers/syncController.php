@@ -157,17 +157,32 @@ function syncStocks($userId)
 
     foreach ($input['stocks'] as $stock) {
       try {
+        $platform = strtolower(trim($stock['platform'] ?? 'other'));
+        if (!in_array($platform, ['zerodha', 'groww', 'cdsl', 'other'])) {
+          $platform = 'other';
+        }
+
+        $symbol = trim($stock['symbol'] ?? '');
+        $isin = trim($stock['isin'] ?? '');
+
         // Check if stock exists (by platform + symbol)
-        $existing = $db->fetchOne(
-          "SELECT id FROM stocks WHERE user_id = ? AND platform = ? AND symbol = ?",
-          [$userId, $stock['platform'], $stock['symbol']]
-        );
+        if ($isin !== '') {
+          $existing = $db->fetchOne(
+            "SELECT id FROM stocks WHERE user_id = ? AND platform = ? AND (isin = ? OR symbol = ?)",
+            [$userId, $platform, $isin, $symbol]
+          );
+        } else {
+          $existing = $db->fetchOne(
+            "SELECT id FROM stocks WHERE user_id = ? AND platform = ? AND symbol = ?",
+            [$userId, $platform, $symbol]
+          );
+        }
 
         if ($existing) {
           // Update
           $sql = "UPDATE stocks SET 
                     company_name = ?, quantity = ?, average_price = ?, invested_amount = ?,
-                    current_value = ?, current_price = ?
+                    current_value = ?, current_price = ?, isin = ?
                   WHERE id = ?";
           $db->execute($sql, [
             $stock['company_name'] ?? null,
@@ -176,18 +191,20 @@ function syncStocks($userId)
             $stock['invested_amount'],
             $stock['current_value'],
             $stock['current_price'] ?? null,
+            $isin !== '' ? $isin : null,
             $existing['id']
           ]);
           $updated++;
         } else {
           // Insert
-          $sql = "INSERT INTO stocks (user_id, platform, symbol, company_name, quantity, average_price,
+          $sql = "INSERT INTO stocks (user_id, platform, symbol, isin, company_name, quantity, average_price,
                     invested_amount, current_value, current_price)
-                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)";
+                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
           $db->insert($sql, [
             $userId,
-            $stock['platform'],
-            $stock['symbol'],
+            $platform,
+            $symbol,
+            $isin !== '' ? $isin : null,
             $stock['company_name'] ?? null,
             $stock['quantity'] ?? 0,
             $stock['average_price'] ?? 0,
@@ -210,7 +227,7 @@ function syncStocks($userId)
     $db->insert($logSql, [
       $userId,
       'stocks',
-      $input['platform'] ?? 'unknown',
+      strtolower(trim($input['platform'] ?? 'mixed')),
       $failed > 0 ? 'partial' : 'success',
       count($input['stocks']),
       $created,

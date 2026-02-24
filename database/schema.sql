@@ -51,8 +51,9 @@ CREATE TABLE IF NOT EXISTS sync_jobs (
 CREATE TABLE IF NOT EXISTS stocks (
     id INT AUTO_INCREMENT PRIMARY KEY,
     user_id INT NOT NULL,
-    platform ENUM('zerodha', 'groww', 'other') NOT NULL,
+    platform ENUM('zerodha', 'groww', 'cdsl', 'other') NOT NULL,
     symbol VARCHAR(50) NOT NULL,
+    isin VARCHAR(20) NULL,
     company_name VARCHAR(255),
     quantity DECIMAL(15, 4) DEFAULT 0,
     average_price DECIMAL(15, 2) DEFAULT 0,
@@ -69,7 +70,8 @@ CREATE TABLE IF NOT EXISTS stocks (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
     INDEX idx_user_platform (user_id, platform),
-    INDEX idx_symbol (symbol)
+    INDEX idx_symbol (symbol),
+    INDEX idx_isin (isin)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================
