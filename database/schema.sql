@@ -54,6 +54,9 @@ CREATE TABLE IF NOT EXISTS stocks (
     platform ENUM('zerodha', 'groww', 'cdsl', 'other') NOT NULL,
     symbol VARCHAR(50) NOT NULL,
     isin VARCHAR(20) NULL,
+    dedupe_key VARCHAR(80) GENERATED ALWAYS AS (
+        COALESCE(NULLIF(TRIM(isin), ''), CONCAT('SYM:', UPPER(TRIM(symbol))))
+    ) STORED,
     company_name VARCHAR(255),
     quantity DECIMAL(15, 4) DEFAULT 0,
     average_price DECIMAL(15, 2) DEFAULT 0,
@@ -71,7 +74,8 @@ CREATE TABLE IF NOT EXISTS stocks (
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
     INDEX idx_user_platform (user_id, platform),
     INDEX idx_symbol (symbol),
-    INDEX idx_isin (isin)
+    INDEX idx_isin (isin),
+    UNIQUE KEY unique_stock_identity (user_id, platform, dedupe_key)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================
