@@ -11,8 +11,35 @@ USE expense_tracker;
 CREATE TABLE IF NOT EXISTS stocks_dedup_backup LIKE stocks;
 
 -- Snapshot duplicate rows before deletion
-INSERT INTO stocks_dedup_backup
-SELECT s.*
+INSERT INTO stocks_dedup_backup (
+    id,
+    user_id,
+    platform,
+    symbol,
+    isin,
+    company_name,
+    quantity,
+    average_price,
+    invested_amount,
+    current_value,
+    current_price,
+    last_updated,
+    created_at
+)
+SELECT
+    s.id,
+    s.user_id,
+    s.platform,
+    s.symbol,
+    s.isin,
+    s.company_name,
+    s.quantity,
+    s.average_price,
+    s.invested_amount,
+    s.current_value,
+    s.current_price,
+    s.last_updated,
+    s.created_at
 FROM stocks s
 INNER JOIN (
     SELECT
