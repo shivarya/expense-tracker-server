@@ -87,6 +87,179 @@ class DuplicateController {
             Response::error('Failed to detect duplicates: ' . $e->getMessage(), 500);
         }
     }
+
+    /**
+     * Preview duplicates between incoming payload items and existing DB records.
+     * POST /api/duplicates/preview
+     *
+     * Request body:
+     * {
+     *   "type": "transactions|stocks|mutual_funds|emis",
+     *   "items": [...]
+     * }
+     */
+    public function preview() {
+        try {
+            $userId = verifyJWT();
+            if (!$userId) {
+                Response::unauthorized('Invalid or missing token');
+                return;
+            }
+
+            $input = getJsonInput();
+            $type = $input['type'] ?? null;
+            $items = $input['items'] ?? null;
+
+            if (!$type || !is_array($items)) {
+                Response::error('Invalid payload. Expected {type, items[]}', 400);
+                return;
+            }
+
+            $validTypes = ['transactions', 'stocks', 'mutual_funds', 'emis'];
+            if (!in_array($type, $validTypes, true)) {
+                Response::error('Invalid type. Allowed: transactions, stocks, mutual_funds, emis', 400);
+                return;
+            }
+
+            $results = [];
+            $duplicateCount = 0;
+
+            foreach ($items as $index => $item) {
+                $matches = [];
+
+                if ($type === 'transactions') {
+                    $matches = $this->previewTransactionMatches($userId, $item);
+                } elseif ($type === 'stocks') {
+                    $matches = $this->previewStockMatches($userId, $item);
+                } elseif ($type === 'mutual_funds') {
+                    $matches = $this->previewMutualFundMatches($userId, $item);
+                } elseif ($type === 'emis') {
+                    $matches = $this->previewEmiMatches($userId, $item);
+                }
+
+                if (!empty($matches)) {
+                    $duplicateCount++;
+                }
+
+                $results[] = [
+                    'index' => $index,
+                    'is_duplicate' => !empty($matches),
+                    'match_count' => count($matches),
+                    'incoming' => $item,
+                    'matches' => $matches
+                ];
+            }
+
+            Response::success([
+                'type' => $type,
+                'total_items' => count($items),
+                'duplicate_items' => $duplicateCount,
+                'new_items' => count($items) - $duplicateCount,
+                'results' => $results
+            ], 'Duplicate preview completed');
+
+        } catch (Exception $e) {
+            error_log("Duplicate preview error: " . $e->getMessage());
+            Response::error('Failed to preview duplicates: ' . $e->getMessage(), 500);
+        }
+    }
+
+    private function previewTransactionMatches($userId, $item) {
+        $reference = $item['reference_number'] ?? null;
+        if (!empty($reference)) {
+            $sql = "SELECT id, amount, merchant, description, transaction_date, reference_number
+                    FROM transactions
+                    WHERE user_id = ? AND reference_number = ?
+                    ORDER BY id DESC LIMIT 5";
+            $stmt = $this->db->prepare($sql);
+            $stmt->execute([$userId, $reference]);
+            $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+            if (!empty($rows)) {
+                return $rows;
+            }
+        }
+
+        $amount = $item['amount'] ?? null;
+        $date = $item['date'] ?? ($item['transaction_date'] ?? null);
+        if ($amount === null || !$date) {
+            return [];
+        }
+
+        $merchant = trim((string)($item['merchant'] ?? ''));
+        $merchantLike = '%' . $merchant . '%';
+
+        $sql = "SELECT id, amount, merchant, description, transaction_date, reference_number
+                FROM transactions
+                WHERE user_id = ?
+                  AND amount = ?
+                  AND DATE(transaction_date) BETWEEN DATE_SUB(DATE(?), INTERVAL 2 DAY) AND DATE_ADD(DATE(?), INTERVAL 2 DAY)
+                  AND (? = '' OR merchant LIKE ?)
+                ORDER BY transaction_date DESC
+                LIMIT 10";
+        $stmt = $this->db->prepare($sql);
+        $stmt->execute([$userId, $amount, $date, $date, $merchant, $merchantLike]);
+        return $stmt->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    private function previewStockMatches($userId, $item) {
+        $symbol = trim((string)($item['symbol'] ?? ''));
+        $isin = trim((string)($item['isin'] ?? ''));
+
+        if ($symbol === '' && $isin === '') {
+            return [];
+        }
+
+        $sql = "SELECT id, platform, symbol, company_name, quantity, current_value
+                FROM stocks
+                WHERE user_id = ?
+                  AND ((? <> '' AND symbol = ?) OR (? <> '' AND isin = ?))
+                ORDER BY id DESC
+                LIMIT 10";
+        $stmt = $this->db->prepare($sql);
+        $stmt->execute([$userId, $symbol, $symbol, $isin, $isin]);
+        return $stmt->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    private function previewMutualFundMatches($userId, $item) {
+        $folio = trim((string)($item['folio'] ?? ($item['folio_number'] ?? '')));
+        $fundName = trim((string)($item['fund_name'] ?? ($item['name'] ?? '')));
+
+        if ($folio === '' && $fundName === '') {
+            return [];
+        }
+
+        $sql = "SELECT id, amc, fund_name, folio_number, units, current_value
+                FROM mutual_funds
+                WHERE user_id = ?
+                  AND ((? <> '' AND folio_number = ?) OR (? <> '' AND fund_name = ?))
+                ORDER BY id DESC
+                LIMIT 10";
+        $stmt = $this->db->prepare($sql);
+        $stmt->execute([$userId, $folio, $folio, $fundName, $fundName]);
+        return $stmt->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    private function previewEmiMatches($userId, $item) {
+        $loanName = trim((string)($item['loan_name'] ?? ($item['name'] ?? '')));
+        $startDate = $item['start_date'] ?? null;
+        $principal = $item['principal_amount'] ?? ($item['amount'] ?? null);
+
+        if ($loanName === '' || !$startDate || $principal === null) {
+            return [];
+        }
+
+        $sql = "SELECT id, loan_name, principal_amount, start_date, tenure_months, status
+                FROM emis
+                WHERE user_id = ?
+                  AND loan_name = ?
+                  AND principal_amount = ?
+                  AND start_date = ?
+                ORDER BY id DESC
+                LIMIT 10";
+        $stmt = $this->db->prepare($sql);
+        $stmt->execute([$userId, $loanName, $principal, $startDate]);
+        return $stmt->fetchAll(PDO::FETCH_ASSOC);
+    }
     
     /**
      * Find duplicate transactions
@@ -289,6 +462,8 @@ switch ($_SERVER['REQUEST_METHOD']) {
     case 'POST':
         if (strpos($_SERVER['REQUEST_URI'], '/detect') !== false) {
             $controller->detect();
+        } elseif (strpos($_SERVER['REQUEST_URI'], '/preview') !== false) {
+            $controller->preview();
         } else {
             Response::error('Invalid endpoint', 404);
         }
