@@ -129,6 +129,10 @@ function handleSyncRoutes($uri, $method)
   elseif ($uri === '/sync/fixed-deposits' && $method === 'POST') {
     syncFixedDeposits($userId);
   }
+  // POST /sync/long-term - Receive long-term funds data (NPS/PF/PPF/etc)
+  elseif ($uri === '/sync/long-term' && $method === 'POST') {
+    syncLongTermFunds($userId);
+  }
   // GET /sync/logs - Get sync history
   elseif ($uri === '/sync/logs' && $method === 'GET') {
     getSyncLogs($userId);
@@ -545,6 +549,138 @@ function syncFixedDeposits($userId)
   } catch (Exception $e) {
     $db->rollback();
     Response::error('Failed to sync fixed deposits: ' . $e->getMessage(), 500);
+  }
+}
+
+function syncLongTermFunds($userId)
+{
+  try {
+    $input = getJsonInput();
+
+    if (!isset($input['long_term_funds']) || !is_array($input['long_term_funds'])) {
+      Response::error('Invalid data format. Expected array of long_term_funds', 400);
+    }
+
+    $db = getDB();
+    $db->beginTransaction();
+
+    $created = 0;
+    $updated = 0;
+    $failed = 0;
+    $errors = [];
+
+    foreach ($input['long_term_funds'] as $fund) {
+      try {
+        $fundType = strtolower(trim($fund['fund_type'] ?? 'nps'));
+        if (!in_array($fundType, ['pf', 'nps', 'sukanya', 'ppf', 'vpf'])) {
+          $fundType = 'nps';
+        }
+
+        $pran = trim($fund['pran_number'] ?? '');
+        $accountNumber = trim($fund['account_number'] ?? '');
+        $accountName = trim($fund['account_name'] ?? 'NPS Account');
+
+        if ($pran !== '') {
+          $existing = $db->fetchOne(
+            "SELECT id FROM long_term_funds WHERE user_id = ? AND fund_type = ? AND pran_number = ?",
+            [$userId, $fundType, $pran]
+          );
+        } elseif ($accountNumber !== '') {
+          $existing = $db->fetchOne(
+            "SELECT id FROM long_term_funds WHERE user_id = ? AND fund_type = ? AND account_number = ?",
+            [$userId, $fundType, $accountNumber]
+          );
+        } else {
+          $existing = $db->fetchOne(
+            "SELECT id FROM long_term_funds WHERE user_id = ? AND fund_type = ? AND account_name = ?",
+            [$userId, $fundType, $accountName]
+          );
+        }
+
+        if ($existing) {
+          $sql = "UPDATE long_term_funds SET
+                    account_name = ?, account_number = ?, pran_number = ?, uan_number = ?,
+                    invested_amount = ?, current_value = ?, employer_contribution = ?, interest_earned = ?,
+                    maturity_date = ?, maturity_value = ?, lock_in_period_years = ?, start_date = ?,
+                    last_contribution_date = ?, status = ?
+                  WHERE id = ?";
+          $db->execute($sql, [
+            $accountName,
+            $accountNumber !== '' ? $accountNumber : null,
+            $pran !== '' ? $pran : null,
+            $fund['uan_number'] ?? null,
+            $fund['invested_amount'] ?? 0,
+            $fund['current_value'] ?? 0,
+            $fund['employer_contribution'] ?? 0,
+            $fund['interest_earned'] ?? 0,
+            $fund['maturity_date'] ?? null,
+            $fund['maturity_value'] ?? null,
+            $fund['lock_in_period_years'] ?? null,
+            $fund['start_date'] ?? null,
+            $fund['last_contribution_date'] ?? null,
+            $fund['status'] ?? 'active',
+            $existing['id']
+          ]);
+          $updated++;
+        } else {
+          $sql = "INSERT INTO long_term_funds (
+                    user_id, fund_type, account_name, account_number, pran_number, uan_number,
+                    invested_amount, current_value, employer_contribution, interest_earned,
+                    maturity_date, maturity_value, lock_in_period_years, start_date, last_contribution_date, status
+                  )
+                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+          $db->insert($sql, [
+            $userId,
+            $fundType,
+            $accountName,
+            $accountNumber !== '' ? $accountNumber : null,
+            $pran !== '' ? $pran : null,
+            $fund['uan_number'] ?? null,
+            $fund['invested_amount'] ?? 0,
+            $fund['current_value'] ?? 0,
+            $fund['employer_contribution'] ?? 0,
+            $fund['interest_earned'] ?? 0,
+            $fund['maturity_date'] ?? null,
+            $fund['maturity_value'] ?? null,
+            $fund['lock_in_period_years'] ?? null,
+            $fund['start_date'] ?? null,
+            $fund['last_contribution_date'] ?? null,
+            $fund['status'] ?? 'active'
+          ]);
+          $created++;
+        }
+      } catch (Exception $e) {
+        $failed++;
+        $errors[] = ($fund['account_name'] ?? 'NPS Account') . ': ' . $e->getMessage();
+      }
+    }
+
+    $logSql = "INSERT INTO scrape_logs (user_id, source_type, source_name, status, records_processed,
+                 records_created, records_updated, records_failed, error_message)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)";
+    $db->insert($logSql, [
+      $userId,
+      'nps',
+      $input['source'] ?? 'nps_email',
+      $failed > 0 ? 'partial' : 'success',
+      count($input['long_term_funds']),
+      $created,
+      $updated,
+      $failed,
+      !empty($errors) ? implode('; ', $errors) : null
+    ]);
+
+    $db->commit();
+
+    Response::success([
+      'created' => $created,
+      'updated' => $updated,
+      'failed' => $failed,
+      'errors' => $errors
+    ], 'Long-term funds synced successfully');
+  } catch (Exception $e) {
+    $db->rollback();
+    Response::error('Failed to sync long-term funds: ' . $e->getMessage(), 500);
   }
 }
 
