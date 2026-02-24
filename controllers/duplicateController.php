@@ -203,15 +203,28 @@ class DuplicateController {
             return [];
         }
 
-        $sql = "SELECT id, platform, symbol, company_name, quantity, current_value
+        try {
+            $sql = "SELECT id, platform, symbol, company_name, quantity, current_value
                 FROM stocks
                 WHERE user_id = ?
                   AND ((? <> '' AND symbol = ?) OR (? <> '' AND isin = ?))
                 ORDER BY id DESC
                 LIMIT 10";
-        $stmt = $this->db->prepare($sql);
-        $stmt->execute([$userId, $symbol, $symbol, $isin, $isin]);
-        return $stmt->fetchAll(PDO::FETCH_ASSOC);
+            $stmt = $this->db->prepare($sql);
+            $stmt->execute([$userId, $symbol, $symbol, $isin, $isin]);
+            return $stmt->fetchAll(PDO::FETCH_ASSOC);
+        } catch (Exception $e) {
+            // Fallback for deployments where stocks table does not yet have `isin` column
+            $sql = "SELECT id, platform, symbol, company_name, quantity, current_value
+                FROM stocks
+                WHERE user_id = ?
+                  AND (? <> '' AND symbol = ?)
+                ORDER BY id DESC
+                LIMIT 10";
+            $stmt = $this->db->prepare($sql);
+            $stmt->execute([$userId, $symbol, $symbol]);
+            return $stmt->fetchAll(PDO::FETCH_ASSOC);
+        }
     }
 
     private function previewMutualFundMatches($userId, $item) {
