@@ -720,7 +720,7 @@ function checkDuplicateTransactionWithAI($db, $userId, $accountId, $newTxn)
         ['role' => 'system', 'content' => 'You are a precise financial data analyst specializing in duplicate detection.'],
         ['role' => 'user', 'content' => $prompt]
       ],
-      'max_tokens' => 10,
+      'max_completion_tokens' => 10,
       'temperature' => 0
     ];
 
