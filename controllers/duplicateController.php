@@ -48,11 +48,8 @@ class DuplicateController {
     public function detect() {
         try {
             // Verify JWT and get user_id
-            $userId = verifyJWT();
-            if (!$userId) {
-                Response::unauthorized('Invalid or missing token');
-                return;
-            }
+            $tokenData = JWTHandler::requireAuth();
+            $userId = $tokenData['userId'];
             
             // Get types to check
             $requestedTypes = $_GET['types'] ?? 'all';
@@ -100,11 +97,8 @@ class DuplicateController {
      */
     public function preview() {
         try {
-            $userId = verifyJWT();
-            if (!$userId) {
-                Response::unauthorized('Invalid or missing token');
-                return;
-            }
+            $tokenData = JWTHandler::requireAuth();
+            $userId = $tokenData['userId'];
 
             $input = getJsonInput();
             $type = $input['type'] ?? null;
