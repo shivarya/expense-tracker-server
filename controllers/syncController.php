@@ -273,10 +273,14 @@ function syncMutualFunds($userId)
 
     foreach ($input['funds'] as $fund) {
       try {
-        // Check if fund exists (by folio + fund name)
+        // Normalize folio: strip trailing "/XX" suffixes (CAMS uses "16901684/49", MF Central uses "16901684")
+        $rawFolio = trim($fund['folio_number']);
+        $cleanFolio = preg_replace('/\/\d+$/', '', $rawFolio);
+
+        // Check if fund exists (by clean folio + fund name, also try with suffix variants)
         $existing = $db->fetchOne(
-          "SELECT id FROM mutual_funds WHERE user_id = ? AND folio_number = ? AND fund_name = ?",
-          [$userId, $fund['folio_number'], $fund['fund_name']]
+          "SELECT id FROM mutual_funds WHERE user_id = ? AND (folio_number = ? OR folio_number = ? OR folio_number LIKE ?) AND fund_name = ?",
+          [$userId, $cleanFolio, $rawFolio, $cleanFolio . '/%', $fund['fund_name']]
         );
 
         if ($existing) {
@@ -297,14 +301,14 @@ function syncMutualFunds($userId)
           ]);
           $updated++;
         } else {
-          // Insert
+          // Insert — store clean folio (without /XX suffix)
           $sql = "INSERT INTO mutual_funds (user_id, fund_name, folio_number, amc, units, nav,
                     invested_amount, current_value, plan_type, option_type, portal_url)
                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
           $db->insert($sql, [
             $userId,
             $fund['fund_name'],
-            $fund['folio_number'],
+            $cleanFolio,
             $fund['amc'],
             $fund['units'],
             $fund['nav'],

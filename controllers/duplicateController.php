@@ -230,19 +230,24 @@ class DuplicateController {
     private function previewMutualFundMatches($userId, $item) {
         $folio = trim((string)($item['folio'] ?? ($item['folio_number'] ?? '')));
         $fundName = trim((string)($item['fund_name'] ?? ($item['name'] ?? '')));
+        // Normalize folio: strip "/XX" suffix for matching
+        $cleanFolio = preg_replace('/\/\d+$/', '', $folio);
 
-        if ($folio === '' && $fundName === '') {
+        if ($cleanFolio === '' && $fundName === '') {
             return [];
         }
 
         $sql = "SELECT id, amc, fund_name, folio_number, units, current_value
                 FROM mutual_funds
                 WHERE user_id = ?
-                  AND ((? <> '' AND folio_number = ?) OR (? <> '' AND fund_name = ?))
+                  AND (
+                    (? <> '' AND (folio_number = ? OR folio_number = ? OR REGEXP_REPLACE(folio_number, '/[0-9]+$', '') = ?))
+                    OR (? <> '' AND fund_name = ?)
+                  )
                 ORDER BY id DESC
                 LIMIT 10";
         $stmt = $this->db->prepare($sql);
-        $stmt->execute([$userId, $folio, $folio, $fundName, $fundName]);
+        $stmt->execute([$userId, $cleanFolio, $folio, $cleanFolio, $cleanFolio, $fundName, $fundName]);
         return $stmt->fetchAll(PDO::FETCH_ASSOC);
     }
 
@@ -325,7 +330,7 @@ class DuplicateController {
     
     /**
      * Find duplicate mutual funds
-     * Criteria: Same scheme name and folio number
+     * Criteria: Same scheme name and folio number (with /XX suffix normalization)
      */
     private function findMutualfundsDuplicates($userId) {
         $sql = "
@@ -337,7 +342,10 @@ class DuplicateController {
             JOIN mutual_funds m2 ON 
                 m1.user_id = m2.user_id 
                 AND m1.fund_name = m2.fund_name 
-                AND m1.folio_number = m2.folio_number
+                AND (
+                    m1.folio_number = m2.folio_number
+                    OR REGEXP_REPLACE(m1.folio_number, '/[0-9]+$', '') = REGEXP_REPLACE(m2.folio_number, '/[0-9]+$', '')
+                )
                 AND m1.id < m2.id
             WHERE m1.user_id = ?
             GROUP BY m1.id
