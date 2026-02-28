@@ -12,6 +12,8 @@ function handleTransactionRoutes($uri, $method)
     getDuplicateTransactions($userId);
   } elseif ($uri === '/transactions' && $method === 'POST') {
     createTransaction($userId);
+  } elseif (preg_match('/^\/transactions\/(\d+)\/category$/', $uri, $matches) && ($method === 'PATCH' || $method === 'PUT')) {
+    updateTransactionCategory($userId, $matches[1]);
   } elseif (preg_match('/^\/transactions\/(\d+)$/', $uri, $matches) && $method === 'DELETE') {
     deleteTransaction($userId, $matches[1]);
   } else {
@@ -189,6 +191,53 @@ function getDuplicateTransactions($userId)
     ], 'Duplicate transactions retrieved successfully');
   } catch (Exception $e) {
     Response::error('Failed to fetch duplicate transactions: ' . $e->getMessage(), 500);
+  }
+}
+
+function updateTransactionCategory($userId, $transactionId)
+{
+  try {
+    $input = getJsonInput();
+
+    if (empty($input['category_id'])) {
+      Response::error('category_id is required', 422);
+    }
+
+    $db = getDB();
+
+    // Verify transaction belongs to user
+    $txn = $db->fetchOne(
+      "SELECT id, merchant, category_id FROM transactions WHERE id = ? AND user_id = ?",
+      [$transactionId, $userId]
+    );
+    if (!$txn) {
+      Response::error('Transaction not found', 404);
+    }
+
+    // Verify category exists and belongs to user (or is system)
+    $cat = $db->fetchOne(
+      "SELECT id, name, icon, color FROM categories WHERE id = ? AND (user_id IS NULL OR user_id = ?)",
+      [$input['category_id'], $userId]
+    );
+    if (!$cat) {
+      Response::error('Category not found', 404);
+    }
+
+    // Update the transaction category
+    $db->execute(
+      "UPDATE transactions SET category_id = ? WHERE id = ? AND user_id = ?",
+      [$input['category_id'], $transactionId, $userId]
+    );
+
+    Response::success([
+      'id' => (int)$transactionId,
+      'category_id' => (int)$input['category_id'],
+      'category_name' => $cat['name'],
+      'category_color' => $cat['color'],
+      'category_icon' => $cat['icon']
+    ], 'Transaction category updated successfully');
+  } catch (Exception $e) {
+    Response::error('Failed to update transaction category: ' . $e->getMessage(), 500);
   }
 }
 
