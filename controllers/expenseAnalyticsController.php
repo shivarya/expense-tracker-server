@@ -51,7 +51,7 @@ class ExpenseAnalyticsController {
             // Get category breakdown (only debits/expenses)
             // If `categories` table/column doesn't exist in this DB, fall back to an "Uncategorized" aggregate
             try {
-                $catColStmt = $db->prepare("SHOW COLUMNS FROM categories LIKE 'category_name'");
+                $catColStmt = $db->prepare("SHOW COLUMNS FROM categories LIKE 'name'");
                 $catColStmt->execute();
                 $hasCategoryName = (bool) $catColStmt->fetch();
             } catch (Exception $e) {
@@ -66,16 +66,19 @@ class ExpenseAnalyticsController {
             if ($hasCategoryName) {
                 $sql = "
                     SELECT 
-                        COALESCE(c.category_name, 'Uncategorized') as category,
+                        COALESCE(c.name, 'Uncategorized') as category,
+                        COALESCE(c.color, '#9E9E9E') as color,
+                        COALESCE(c.icon, 'help-circle-outline') as icon,
                         SUM(t.amount) as amount,
-                        ROUND((SUM(t.amount) / :total_expenses * 100), 2) as percentage
+                        ROUND((SUM(t.amount) / :total_expenses * 100), 2) as percentage,
+                        COUNT(*) as transaction_count
                     FROM transactions t
                     LEFT JOIN categories c ON t.category_id = c.id
                     WHERE t.user_id = :user_id 
                     AND t.transaction_date >= :start_date
                     AND t.transaction_type = 'debit'
                     " . $statusClause . "
-                    GROUP BY COALESCE(c.id, 0), COALESCE(c.category_name, 'Uncategorized')
+                    GROUP BY COALESCE(c.id, 0), COALESCE(c.name, 'Uncategorized'), COALESCE(c.color, '#9E9E9E'), COALESCE(c.icon, 'help-circle-outline')
                     ORDER BY amount DESC
                     LIMIT 10
                 ";
@@ -110,7 +113,6 @@ class ExpenseAnalyticsController {
             }
 
             $categoryBreakdown = $stmt->fetchAll(PDO::FETCH_ASSOC);
-            $categoryBreakdown = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
             // Get monthly trends
             $sql = "
@@ -143,8 +145,11 @@ class ExpenseAnalyticsController {
                 'by_category' => array_map(function($cat) {
                     return [
                         'category' => $cat['category'] ?? 'Uncategorized',
+                        'color' => $cat['color'] ?? '#9E9E9E',
+                        'icon' => $cat['icon'] ?? 'help-circle-outline',
                         'amount' => (float)$cat['amount'],
-                        'percentage' => (float)$cat['percentage']
+                        'percentage' => (float)$cat['percentage'],
+                        'transaction_count' => (int)($cat['transaction_count'] ?? 0)
                     ];
                 }, $categoryBreakdown),
                 'monthly_trends' => array_map(function($trend) {
