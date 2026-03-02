@@ -122,11 +122,55 @@ class AzureOpenAI {
             $smsTexts[] = ($idx + 1) . ". From: {$msg['sender']}, Body: {$msg['body']}";
         }
 
-        $systemPrompt = 'You are a banking SMS parser. Extract transaction data accurately. Return JSON with transactions array. Always include bank name, account_number (last 4 digits), transaction_type (debit or credit), amount (as number), date (YYYY-MM-DD format), and optional merchant, category, reference_number.';
-        
-        $userPrompt = "Extract transaction details from these bank SMS messages. Return JSON object with 'transactions' array containing: bank, account_number, transaction_type (debit/credit), amount, merchant, category, date, reference_number.\n\n";
+        $systemPrompt = <<<'PROMPT'
+You are a banking SMS parser for an Indian expense tracker app.
+
+Extract transaction data from each SMS and return a JSON object with a "transactions" array.
+
+REQUIRED fields per transaction:
+- bank: (hdfc|sbi|icici|idfc|rbl|axis|kotak|other)
+- account_number: last 4 digits only (string)
+- transaction_type: "debit" or "credit"
+- amount: numeric value only (no currency symbols)
+- date: "YYYY-MM-DD HH:MM:SS" format
+- category_id: integer from the canonical list below
+- merchant: merchant/payee name (clean, no bank jargon)
+- reference_number: UPI ref, txn ID, chq number (or null)
+
+CANONICAL CATEGORY LIST — you MUST return one of these integer category_id values only:
+1  = Food & Dining       (restaurants, cafes, Swiggy, Zomato, food delivery)
+2  = Transportation      (Ola, Uber, Rapido, metro, bus, petrol, diesel)
+3  = Shopping            (Amazon, Flipkart, Myntra, retail, fashion, electronics)
+4  = Entertainment       (streaming, Tata Play, Netflix, Hotstar, movies, games, subscriptions)
+5  = Bills & Utilities   (electricity, water, internet, Airtel, Jio, ACT, recharge, BBPS)
+6  = Healthcare          (pharmacy, Apollo, Netmeds, 1mg, hospital, clinic, lab tests)
+7  = Education           (courses, fees, books, certifications)
+8  = Travel              (flights, hotels, MakeMyTrip, Indigo, Goibibo, Cleartrip)
+9  = Groceries           (BigBasket, Blinkit, Zepto, DMart, supermarket, kirana)
+10 = Insurance           (LIC, HDFC Ergo, premium payments, policy renewals)
+11 = Rent/EMI            (rent, EMI, loan installment, amortization)
+12 = Personal Care       (salon, grooming, spa, wellness)
+13 = Investments         (SIP, mutual fund, stocks, NPS, PPF, FD deposit)
+14 = Salary              (salary credit, payroll)
+15 = Refund              (refund, reversal, cashback credited)
+16 = Other Income        (any credit that is not salary/refund)
+17 = Transfer            (self transfer between own accounts)
+18 = Uncategorized       (use ONLY if truly unclassifiable)
+51 = Miscellaneous       (person-to-person UPI, ATM withdrawal, fees, tax, genuinely unclear debits)
+
+RULES:
+- For credit transactions: apply income categories first (14/15/16/17)
+- ATM withdrawals → category_id 51
+- UPI to a person's name (not a business) → category_id 51
+- When in doubt between 18 and 51, prefer 51
+- Do NOT invent new category names or IDs
+
+Return ONLY a valid JSON object — no markdown, no explanation.
+PROMPT;
+
+        $userPrompt = "Parse these bank SMS messages and return a JSON object with a 'transactions' array.\n\n";
         $userPrompt .= "SMS Messages:\n" . implode("\n", $smsTexts) . "\n\n";
-        $userPrompt .= "Return ONLY valid JSON object with transactions array, no markdown.";
+        $userPrompt .= "Return JSON: {\"transactions\": [...]}";
 
         return $this->callAI($systemPrompt, $userPrompt);
     }

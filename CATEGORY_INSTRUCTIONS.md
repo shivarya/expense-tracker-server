@@ -1,9 +1,9 @@
 # Transaction Category Assignment Instructions
 
-> **Version**: 2.0  
+> **Version**: 3.0  
 > **Last Updated**: 2026-03-02  
-> **For**: GPT-5, Claude, and other AI models in expense-tracker pipeline  
-> **Status**: Updated after category consolidation (duplicates merged)
+> **For**: GPT-4 / Azure OpenAI SMS parser, Claude, and other AI models in expense-tracker pipeline  
+> **Status**: AI now returns `category_id` integer directly — no new categories ever created by sync
 
 ---
 
@@ -11,9 +11,7 @@
 
 This is the **single source of truth** for assigning `category_id` to transactions.
 
-After consolidation, multiple overlapping categories were merged. AI should now map all incoming transactions to the **canonical master list** below.
-
-When uncertain, prefer a canonical business category over creating new categories.
+**Critical change in v3.0**: The SMS parser now asks AI to return a `category_id` integer (not a name string). The PHP resolver maps any name-based fallback to a canonical ID. **No new category rows are ever created by SMS sync.**
 
 ---
 
@@ -21,37 +19,53 @@ When uncertain, prefer a canonical business category over creating new categorie
 
 ### Expense
 
-| ID | Name | Use for |
-|---|---|---|
-| 1 | Food & Dining | Restaurants, cafes, food delivery, dining out |
-| 2 | Transportation | Cabs, bus, metro, fuel, commute |
-| 3 | Shopping | E-commerce, retail, fashion, electronics |
-| 4 | Entertainment | Streaming, movies, games, subscriptions |
-| 5 | Bills & Utilities | Electricity, water, internet, telecom, bill pay |
-| 6 | Healthcare | Pharmacy, hospital, diagnostics, clinics |
-| 7 | Education | Courses, fees, books, certifications |
-| 8 | Travel | Flight/hotel/outstation travel bookings |
-| 9 | Groceries | Supermarket, kirana, essentials |
-| 10 | Insurance | Premium payments, policy renewals |
-| 11 | Rent/EMI | Rent, loan EMI, amortization entries |
-| 12 | Personal Care | Salon, grooming, wellness care |
-| 18 | Uncategorized | Unclear/unknown transactions (fallback only) |
-| 51 | Miscellaneous | Person-to-person UPI and genuinely uncategorizable spend |
+| ID | Name | Icon | Color | Use for |
+|---|---|---|---|---|
+| 1 | Food & Dining | `restaurant-outline` | `#FF4757` | Restaurants, cafes, food delivery, dining out |
+| 2 | Transportation | `car-outline` | `#FFA502` | Cabs, bus, metro, fuel, commute |
+| 3 | Shopping | `bag-handle-outline` | `#2B7BE5` | E-commerce, retail, fashion, electronics |
+| 4 | Entertainment | `tv-outline` | `#9C27B0` | Streaming, movies, games, subscriptions, Tata Play |
+| 5 | Bills & Utilities | `flash-outline` | `#FF6B6B` | Electricity, water, internet, telecom, bill pay, recharge |
+| 6 | Healthcare | `medical-outline` | `#00C48C` | Pharmacy, hospital, diagnostics, clinics |
+| 7 | Education | `school-outline` | `#3F51B5` | Courses, fees, books, certifications |
+| 8 | Travel | `airplane-outline` | `#FF9800` | Flight/hotel/outstation travel bookings |
+| 9 | Groceries | `cart-outline` | `#4CAF50` | Supermarket, kirana, essentials |
+| 10 | Insurance | `shield-checkmark-outline` | `#607D8B` | Premium payments, policy renewals |
+| 11 | Rent/EMI | `home-outline` | `#795548` | Rent, loan EMI, amortization entries |
+| 12 | Personal Care | `person-outline` | `#E91E63` | Salon, grooming, wellness care |
+| 18 | Uncategorized | `help-circle-outline` | `#BDBDBD` | Final fallback only — use sparingly |
+| 51 | Miscellaneous | `ellipsis-horizontal-circle-outline` | `#FF5722` | P2P UPI, ATM withdrawal, fees, tax, genuinely unclear debits |
 
 ### Income
 
-| ID | Name | Use for |
-|---|---|---|
-| 14 | Salary | Salary credits |
-| 15 | Refund | Refund/reversal credits |
-| 16 | Other Income | All non-salary/non-refund income |
+| ID | Name | Icon | Color | Use for |
+|---|---|---|---|---|
+| 14 | Salary | `cash-outline` | `#4CAF50` | Salary credits |
+| 15 | Refund | `return-down-back-outline` | `#8BC34A` | Refund/reversal/cashback credits |
+| 16 | Other Income | `wallet-outline` | `#CDDC39` | All non-salary/non-refund income |
 
 ### Investment / Transfer
 
-| ID | Name | Use for |
-|---|---|---|
-| 13 | Investments | SIP/MF/stocks/NPS/PPF investment movements |
-| 17 | Transfer | Internal self-account transfers |
+| ID | Name | Icon | Color | Use for |
+|---|---|---|---|---|
+| 13 | Investments | `trending-up-outline` | `#00BCD4` | SIP/MF/stocks/NPS/PPF investment movements |
+| 17 | Transfer | `swap-horizontal-outline` | `#9E9E9E` | Internal self-account transfers |
+
+---
+
+## AI Prompt Behaviour (SMS Parser — v3.0)
+
+The Azure OpenAI SMS parser prompt now instructs AI to:
+1. Return `category_id` as an **integer** from the canonical list above
+2. Never invent category names or IDs outside this list
+3. Use `51` (Miscellaneous) for ATM withdrawals, P2P UPI, ambiguous debits
+4. Use income IDs (14/15/16) for credit transactions
+
+The PHP resolver (`resolveCategoryId`) additionally:
+- Validates the returned `category_id` against the canonical list
+- Falls back to name-alias lookup if ID is invalid
+- Falls back to `51` or `16` (for credits) if still unresolved
+- **Never calls `INSERT INTO categories`** — rogue category creation is eliminated
 
 ---
 
@@ -63,10 +77,11 @@ These old names are now merged and should **not** be reused as separate categori
 - `food`, `Food & Beverage`, `food_and_beverage`, `food_delivery`, `dining`, `Restaurant` → **Food & Dining (1)**
 - `fuel`, `Transport` → **Transportation (2)**
 - `Health` → **Healthcare (6)**
+- `Streaming`, `Tata Play`, `OTT` → **Entertainment (4)**
 - `EMI`, `EMI Principal/Amortization`, `loan_payment` → **Rent/EMI (11)**
-- `Other`, `Tax`, `Tax (IGST)`, `Tax component`, `interest`, `Fees`, `Online Services` → **Miscellaneous (51)**
-- `UPI`, `UPI Payment`, `UPI Transfer`, `Card`, `card_spend`, `purchase`, `Purchase (tax/fee)`, `reversal`, `Unknown` → **Uncategorized (18)**
-- Income-side `Income`, `Other`, `Travel`, `Shopping` → **Other Income (16)**
+- `Other`, `Tax`, `Tax (IGST)`, `Tax component`, `interest`, `Fees`, `Online Services`, `ATM`, `ATM Withdrawal`, `UPI`, `UPI Payment`, `UPI Transfer`, `Card`, `card_spend`, `purchase`, `Purchase (tax/fee)`, `reversal` → **Miscellaneous (51)**
+- `Unknown` → **Uncategorized (18)**
+- Income-side `Income`, `Other` → **Other Income (16)**
 
 ---
 
