@@ -108,6 +108,13 @@ try {
     exit;
   }
 
+  // Trusted Contacts (own UPI IDs / names for self-transfer detection)
+  if (strpos($requestUri, '/contacts') === 0) {
+    require_once __DIR__ . '/controllers/trustedContactsController.php';
+    handleContactRoutes($requestUri, $requestMethod);
+    exit;
+  }
+
   // Categories
   if (strpos($requestUri, '/categories') === 0) {
     require_once __DIR__ . '/controllers/categoryController.php';

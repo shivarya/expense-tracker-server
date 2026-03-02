@@ -163,6 +163,7 @@ CANONICAL CATEGORY LIST — you MUST return one of these integer category_id val
 
 RULES:
 - For credit transactions: apply income categories first (14/15/16/17)
+- Interest credited (FD, savings, bond) → category_id 16 (Other Income)
 - ATM withdrawals → category_id 51
 - UPI to a person's name (not a business) → category_id 51
 - Cook/maid/driver payments → category_id 52

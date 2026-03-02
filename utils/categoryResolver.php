@@ -191,7 +191,11 @@ class CategoryResolver
         'atm'                        => 51, 'atm_withdrawal'       => 51,
         'atm withdrawal'             => 51, 'cash withdrawal'      => 51,
         'tax'                        => 51, 'tax (igst)'           => 51,
-        'tax component'              => 51, 'interest'             => 51,
+        'tax component'              => 51,
+        // interest credited → Other Income (not Miscellaneous)
+        'interest'                   => 16, 'interest credit'      => 16,
+        'interest credited'          => 16, 'fd interest'          => 16,
+        'savings interest'           => 16, 'interest income'      => 16,
         'fees'                       => 51, 'online services'      => 51,
         'purchase (tax/fee)'         => 51, 'bank charge'          => 51,
         'bank charges'               => 51, 'service charge'       => 51,

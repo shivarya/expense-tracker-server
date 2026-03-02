@@ -256,10 +256,31 @@ class SMSParserController {
 
     /**
      * Resolve a transaction to a canonical category ID.
-     * Delegates to shared CategoryResolver — never creates new category rows.
+     * First checks trusted contacts (own UPI IDs / account names) → Transfer (17).
+     * Falls back to shared CategoryResolver — never creates new category rows.
      */
     private function resolveCategoryId(int $userId, array $transaction): int
     {
+        // Check trusted contacts first — self-transfers should always be Transfer (17)
+        $merchant = strtolower(trim($transaction['merchant'] ?? ''));
+        if ($merchant !== '') {
+            $contacts = $this->db->fetchAll(
+                "SELECT name, upi_id FROM trusted_contacts WHERE user_id = ?",
+                [$userId]
+            );
+            foreach ($contacts as $contact) {
+                $contactName  = strtolower(trim($contact['name'] ?? ''));
+                $contactUpiId = strtolower(trim($contact['upi_id'] ?? ''));
+
+                if ($contactName !== '' && str_contains($merchant, $contactName)) {
+                    return 17; // Transfer
+                }
+                if ($contactUpiId !== '' && str_contains($merchant, $contactUpiId)) {
+                    return 17; // Transfer
+                }
+            }
+        }
+
         return CategoryResolver::resolveTransaction($transaction);
     }
 
