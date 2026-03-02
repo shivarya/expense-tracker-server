@@ -40,7 +40,7 @@ function getTransactions($userId)
             FROM transactions t
             JOIN categories c ON t.category_id = c.id
             JOIN bank_accounts ba ON t.account_id = ba.id
-            WHERE t.user_id = ?";
+            WHERE t.user_id = ? AND t.deleted_at IS NULL";
 
     if ($startDate) {
       $sql .= " AND t.transaction_date >= ?";
@@ -74,7 +74,7 @@ function getTransactions($userId)
                     SUM(CASE WHEN transaction_type = 'credit' THEN amount ELSE 0 END) as total_credit,
                     COUNT(*) as total_count
                    FROM transactions
-                   WHERE user_id = ? AND transaction_date BETWEEN ? AND ?";
+                   WHERE user_id = ? AND deleted_at IS NULL AND transaction_date BETWEEN ? AND ?";
     $summaryParams = [$userId, $startDate, $endDate . ' 23:59:59'];
     $summary = $db->fetchOne($summarySQL, $summaryParams);
 
@@ -129,7 +129,11 @@ function deleteTransaction($userId, $id)
 {
   try {
     $db = getDB();
-    $affected = $db->execute("DELETE FROM transactions WHERE id = ? AND user_id = ?", [$id, $userId]);
+    // Soft delete: mark deleted_at so SMS re-sync won't recreate this transaction
+    $affected = $db->execute(
+      "UPDATE transactions SET deleted_at = NOW() WHERE id = ? AND user_id = ? AND deleted_at IS NULL",
+      [$id, $userId]
+    );
 
     if ($affected > 0) {
       Response::success(null, 'Transaction deleted successfully');
@@ -205,9 +209,9 @@ function updateTransactionCategory($userId, $transactionId)
 
     $db = getDB();
 
-    // Verify transaction belongs to user
+    // Verify transaction belongs to user and is not deleted
     $txn = $db->fetchOne(
-      "SELECT id, merchant, category_id FROM transactions WHERE id = ? AND user_id = ?",
+      "SELECT id, merchant, category_id FROM transactions WHERE id = ? AND user_id = ? AND deleted_at IS NULL",
       [$transactionId, $userId]
     );
     if (!$txn) {

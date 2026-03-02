@@ -242,6 +242,7 @@ CREATE TABLE IF NOT EXISTS transactions (
     is_emi BOOLEAN DEFAULT FALSE,
     emi_id INT NULL COMMENT 'Link to EMI if this is an EMI payment',
     notes TEXT,
+    deleted_at TIMESTAMP NULL DEFAULT NULL COMMENT 'Soft delete timestamp; NULL = active, set = deleted',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
@@ -254,7 +255,8 @@ CREATE TABLE IF NOT EXISTS transactions (
     INDEX idx_merchant (merchant),
     INDEX idx_source (source),
     INDEX idx_payment_method (payment_method),
-    INDEX idx_duplicate_score (duplicate_score)
+    INDEX idx_duplicate_score (duplicate_score),
+    INDEX idx_deleted_at (deleted_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================
