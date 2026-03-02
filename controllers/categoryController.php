@@ -10,6 +10,8 @@ function handleCategoryRoutes($uri, $method)
     getCategories($userId);
   } elseif ($uri === '/categories' && $method === 'POST') {
     createCategory($userId);
+  } elseif ($uri === '/categories/consolidate' && $method === 'POST') {
+    consolidateCategories($userId);
   } elseif (preg_match('/^\/categories\/(\d+)$/', $uri, $matches) && $method === 'PUT') {
     updateCategory($userId, $matches[1]);
   } elseif (preg_match('/^\/categories\/(\d+)$/', $uri, $matches) && $method === 'DELETE') {
@@ -134,6 +136,85 @@ function deleteCategory($userId, $categoryId)
     }
   } catch (Exception $e) {
     Response::error('Failed to delete category: ' . $e->getMessage(), 500);
+  }
+}
+
+function consolidateCategories($userId)
+{
+  try {
+    $db = getDB();
+
+    $categories = $db->fetchAll(
+      "SELECT id, user_id, name, type, is_system
+       FROM categories
+       WHERE user_id IS NULL OR user_id = ?
+       ORDER BY is_system DESC, id ASC",
+      [$userId]
+    );
+
+    $groups = [];
+    foreach ($categories as $category) {
+      $normalized = strtolower(trim(preg_replace('/\s+/', ' ', $category['name'] ?? '')));
+      $key = ($category['type'] ?? 'expense') . '|' . $normalized;
+      if (!isset($groups[$key])) {
+        $groups[$key] = [];
+      }
+      $groups[$key][] = $category;
+    }
+
+    $merged = 0;
+    $touchedGroups = 0;
+
+    foreach ($groups as $group) {
+      if (count($group) <= 1) {
+        continue;
+      }
+
+      $touchedGroups++;
+
+      $target = null;
+      foreach ($group as $item) {
+        if (!empty($item['is_system'])) {
+          $target = $item;
+          break;
+        }
+      }
+      if (!$target) {
+        $target = $group[0];
+      }
+
+      $targetId = (int)$target['id'];
+
+      foreach ($group as $source) {
+        $sourceId = (int)$source['id'];
+        if ($sourceId === $targetId) {
+          continue;
+        }
+
+        $db->execute(
+          "UPDATE transactions
+           SET category_id = ?
+           WHERE user_id = ? AND category_id = ?",
+          [$targetId, $userId, $sourceId]
+        );
+
+        if ((int)$source['user_id'] === (int)$userId) {
+          $db->execute(
+            "DELETE FROM categories WHERE id = ? AND user_id = ?",
+            [$sourceId, $userId]
+          );
+        }
+
+        $merged++;
+      }
+    }
+
+    Response::success([
+      'merged_categories' => $merged,
+      'duplicate_groups' => $touchedGroups,
+    ], 'Categories consolidated successfully');
+  } catch (Exception $e) {
+    Response::error('Failed to consolidate categories: ' . $e->getMessage(), 500);
   }
 }
 

@@ -66,6 +66,7 @@ class ExpenseAnalyticsController {
             if ($hasCategoryName) {
                 $sql = "
                     SELECT 
+                        COALESCE(c.id, 0) as category_id,
                         COALESCE(c.name, 'Uncategorized') as category,
                         COALESCE(c.color, '#9E9E9E') as color,
                         COALESCE(c.icon, 'help-circle-outline') as icon,
