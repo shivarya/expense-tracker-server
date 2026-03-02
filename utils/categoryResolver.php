@@ -34,6 +34,7 @@ class CategoryResolver
         51 => ['name' => 'Miscellaneous',    'icon' => 'ellipsis-horizontal-circle-outline',      'color' => '#FF5722', 'type' => 'expense'],
         52 => ['name' => 'Household Help',    'icon' => 'people-outline',                          'color' => '#8D6E63', 'type' => 'expense'],
         53 => ['name' => 'Kids Activities',   'icon' => 'trophy-outline',                          'color' => '#FF7043', 'type' => 'expense'],
+        54 => ['name' => 'Software & Tools',  'icon' => 'laptop-outline',                          'color' => '#5C6BC0', 'type' => 'expense'],
     ];
 
     /**
@@ -138,6 +139,21 @@ class CategoryResolver
         'tennis'                     => 53, 'hobby class'          => 53,
         'kids class'                 => 53, 'abacus'               => 53,
         'drawing class'              => 53, 'music class'          => 53,
+
+        // ── Software & Tools (54) ─────────────────────────────────────────
+        'software & tools'           => 54, 'software and tools'   => 54,
+        'software'                   => 54, 'saas'                 => 54,
+        'hosting'                    => 54, 'domain'               => 54,
+        'github'                     => 54, 'figma'                => 54,
+        'notion'                     => 54, 'aws'                  => 54,
+        'azure'                      => 54, 'gcp'                  => 54,
+        'digitalocean'               => 54, 'vercel'               => 54,
+        'netlify'                    => 54, 'jetbrains'            => 54,
+        'cloudflare'                 => 54, 'openai'               => 54,
+        'developer tools'            => 54, 'dev tools'            => 54,
+        'cloud storage'              => 54, 'google workspace'     => 54,
+        'microsoft 365'              => 54, 'dropbox'              => 54,
+        'slack'                      => 54, 'zoom'                 => 54,
 
         // ── Investments (13) ────────────────────────────────────────────
         'investments'                => 13, 'investment'           => 13,
