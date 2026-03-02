@@ -255,12 +255,6 @@ class SMSParserController {
     }
 
     /**
-     * Canonical category map — single source of truth.
-     * Moved to utils/categoryResolver.php — kept here for reference only.
-     * @deprecated Use CategoryResolver::CANONICAL directly.
-     */
-
-    /**
      * Resolve a transaction to a canonical category ID.
      * Delegates to shared CategoryResolver — never creates new category rows.
      */
@@ -307,5 +301,4 @@ class SMSParserController {
             [$userId, $bank, $fullAccountNumber]
         );
     }
-}
 }

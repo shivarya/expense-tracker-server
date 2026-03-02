@@ -57,7 +57,8 @@ class CategoryResolver
         // ── Shopping (3) ────────────────────────────────────────────────
         'shopping'                   => 3, 'retail'                => 3,
         'e-commerce'                 => 3, 'ecommerce'             => 3,
-        'purchase'                   => 3,
+        'purchase'                   => 3, 'card_purchase'         => 3,
+        'card purchase'              => 3,
 
         // ── Entertainment (4) ───────────────────────────────────────────
         'entertainment'              => 4, 'streaming'             => 4,
@@ -109,6 +110,7 @@ class CategoryResolver
         'emandate'                   => 11, 'nach'                 => 11,
         'nach_debit'                 => 11, 'nach debit'           => 11,
         'auto_debit'                 => 11, 'auto debit'           => 11,
+        'emi_conversion'             => 11, 'emi conversion'       => 11,
 
         // ── Personal Care (12) ──────────────────────────────────────────
         'personal care'              => 12, 'grooming'             => 12,
@@ -121,8 +123,7 @@ class CategoryResolver
         'ppf'                        => 13,
 
         // ── Salary (14) ─────────────────────────────────────────────────
-        'salary'                     => 14, 'payroll'              => 14,
-
+        'salary'                     => 14, 'payroll'              => 14,        'neft_salary'                => 14, 'neft salary'          => 14,
         // ── Refund (15) ─────────────────────────────────────────────────
         'refund'                     => 15, 'reversal'             => 15,
         'cashback'                   => 15,
@@ -131,10 +132,12 @@ class CategoryResolver
         'other income'               => 16, 'income'               => 16,
         'account_credit'             => 16, 'account credit'       => 16,
         'credit'                     => 16,
+        'card_payment_received'      => 16, 'card payment received' => 16,
 
         // ── Transfer (17) ───────────────────────────────────────────────
         'transfer'                   => 17, 'self transfer'        => 17,
-        'internal transfer'          => 17,
+        'internal transfer'          => 17, 'fund_transfer'        => 17,
+        'fund transfer'              => 17, 'neft transfer'        => 17,
 
         // ── Uncategorized (18) ──────────────────────────────────────────
         'uncategorized'              => 18, 'unknown'              => 18,

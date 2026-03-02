@@ -32,6 +32,9 @@ Thumbs.db
 *.sqlite
 *.db
 
+# Scripts with credentials
+database/db-fix.ps1
+
 # Cache
 cache/
 tmp/
