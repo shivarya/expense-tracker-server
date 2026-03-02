@@ -32,6 +32,8 @@ class CategoryResolver
         17 => ['name' => 'Transfer',         'icon' => 'swap-horizontal-outline',                 'color' => '#9E9E9E', 'type' => 'transfer'],
         18 => ['name' => 'Uncategorized',    'icon' => 'help-circle-outline',                     'color' => '#BDBDBD', 'type' => 'expense'],
         51 => ['name' => 'Miscellaneous',    'icon' => 'ellipsis-horizontal-circle-outline',      'color' => '#FF5722', 'type' => 'expense'],
+        52 => ['name' => 'Household Help',    'icon' => 'people-outline',                          'color' => '#8D6E63', 'type' => 'expense'],
+        53 => ['name' => 'Kids Activities',   'icon' => 'trophy-outline',                          'color' => '#FF7043', 'type' => 'expense'],
     ];
 
     /**
@@ -114,7 +116,28 @@ class CategoryResolver
 
         // ── Personal Care (12) ──────────────────────────────────────────
         'personal care'              => 12, 'grooming'             => 12,
-        'salon'                      => 12,
+        'salon'                      => 12, 'spa'                  => 12,
+
+        // ── Household Help (52) ─────────────────────────────────────────
+        'household help'             => 52, 'household'            => 52,
+        'maid'                       => 52, 'cook'                 => 52,
+        'driver'                     => 52, 'domestic help'        => 52,
+        'maid salary'                => 52, 'cook salary'          => 52,
+        'driver salary'              => 52, 'bai'                  => 52,
+        'sweeper'                    => 52, 'watchman'             => 52,
+        'househelp'                  => 52, 'house help'           => 52,
+
+        // ── Kids Activities (53) ─────────────────────────────────────────
+        'kids activities'            => 53, 'kids activity'        => 53,
+        'karate'                     => 53, 'dance'                => 53,
+        'dance class'                => 53, 'karate class'         => 53,
+        'sports'                     => 53, 'sport fee'            => 53,
+        'extracurricular'            => 53, 'extra curricular'     => 53,
+        'swimming'                   => 53, 'cricket'              => 53,
+        'football'                   => 53, 'badminton'            => 53,
+        'tennis'                     => 53, 'hobby class'          => 53,
+        'kids class'                 => 53, 'abacus'               => 53,
+        'drawing class'              => 53, 'music class'          => 53,
 
         // ── Investments (13) ────────────────────────────────────────────
         'investments'                => 13, 'investment'           => 13,
@@ -259,7 +282,7 @@ class CategoryResolver
                     'income'     => 16,
                     'investment' => 13,
                     'transfer'   => 17,
-                    default      => 51,
+                    default      => 51, // Miscellaneous — not 52/53 as those need explicit mapping
                 };
             }
 

@@ -157,11 +157,15 @@ CANONICAL CATEGORY LIST — you MUST return one of these integer category_id val
 17 = Transfer            (self transfer between own accounts)
 18 = Uncategorized       (use ONLY if truly unclassifiable)
 51 = Miscellaneous       (person-to-person UPI, ATM withdrawal, fees, tax, genuinely unclear debits)
+52 = Household Help      (cook, maid, driver, domestic worker salary)
+53 = Kids Activities     (karate, dance, swimming, sports, hobby classes, extracurricular fees)
 
 RULES:
 - For credit transactions: apply income categories first (14/15/16/17)
 - ATM withdrawals → category_id 51
 - UPI to a person's name (not a business) → category_id 51
+- Cook/maid/driver payments → category_id 52
+- Kids sports, dance, activity class fees → category_id 53
 - When in doubt between 18 and 51, prefer 51
 - Do NOT invent new category names or IDs
 
