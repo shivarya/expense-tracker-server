@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Delete Account – Expense Tracker</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f9f9f9; color: #222; line-height: 1.7; }
+    header { background: #D32F2F; color: #fff; padding: 32px 24px; text-align: center; }
+    header h1 { font-size: 28px; font-weight: 700; }
+    header p { font-size: 14px; margin-top: 6px; opacity: 0.85; }
+    main { max-width: 640px; margin: 32px auto; padding: 0 20px 60px; }
+    h2 { font-size: 18px; font-weight: 600; color: #D32F2F; margin: 28px 0 8px; }
+    p, li { font-size: 15px; color: #444; }
+    ul { padding-left: 20px; margin-top: 6px; }
+    li { margin-bottom: 6px; }
+    .callout { background: #fff3e0; border-left: 4px solid #f57c00; border-radius: 6px; padding: 14px 18px; margin: 20px 0; }
+    .callout p { color: #e65100; font-weight: 500; }
+    .steps { background: #fff; border-radius: 12px; padding: 24px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); margin: 24px 0; }
+    .step { display: flex; align-items: flex-start; margin-bottom: 16px; }
+    .step-num { background: #D32F2F; color: #fff; border-radius: 50%; width: 28px; height: 28px; min-width: 28px; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 13px; margin-right: 14px; margin-top: 2px; }
+    .step-text { font-size: 15px; color: #333; }
+    footer { text-align: center; padding: 20px; font-size: 13px; color: #888; border-top: 1px solid #ddd; margin-top: 40px; }
+    a { color: #1a73e8; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Delete Your Account</h1>
+    <p>Expense Tracker — Account & Data Deletion</p>
+  </header>
+  <main>
+    <p>You can permanently delete your Expense Tracker account and all associated data at any time. Once deleted, your data cannot be recovered.</p>
+
+    <div class="callout">
+      <p>⚠️ Deletion is permanent. All your transactions, categories, accounts, and profile data will be erased immediately.</p>
+    </div>
+
+    <h2>What gets deleted</h2>
+    <ul>
+      <li>Your user profile (name, email)</li>
+      <li>All transaction history</li>
+      <li>Custom categories</li>
+      <li>Bank accounts and linked data</li>
+      <li>EMI tracking records</li>
+      <li>All SMS sync history</li>
+    </ul>
+
+    <h2>How to delete your account</h2>
+
+    <div class="steps">
+      <div class="step">
+        <div class="step-num">1</div>
+        <div class="step-text">Open the <strong>Expense Tracker</strong> app on your phone.</div>
+      </div>
+      <div class="step">
+        <div class="step-num">2</div>
+        <div class="step-text">Tap the <strong>More</strong> tab at the bottom of the screen.</div>
+      </div>
+      <div class="step">
+        <div class="step-num">3</div>
+        <div class="step-text">Scroll down to the <strong>Account</strong> section.</div>
+      </div>
+      <div class="step">
+        <div class="step-num">4</div>
+        <div class="step-text">Tap <strong>Delete Account</strong> (red button).</div>
+      </div>
+      <div class="step">
+        <div class="step-num">5</div>
+        <div class="step-text">Confirm the two-step prompt. Your account and all data will be deleted immediately.</div>
+      </div>
+    </div>
+
+    <h2>Prefer to request by email?</h2>
+    <p>If you cannot access the app, send a deletion request to:<br />
+      <a href="mailto:ash@shivarya.dev">ash@shivarya.dev</a><br /><br />
+      Include the email address associated with your account. We will process the request within 7 business days.
+    </p>
+
+    <h2>After deletion</h2>
+    <ul>
+      <li>You will be signed out immediately.</li>
+      <li>Your data is deleted from our servers with no backup retained.</li>
+      <li>You can create a new account at any time using Google Sign-In.</li>
+    </ul>
+  </main>
+  <footer>
+    &copy; 2026 Expense Tracker. |
+    <a href="privacy.html">Privacy Policy</a> &nbsp;|&nbsp;
+    <a href="terms.html">Terms of Use</a>
+  </footer>
+</body>
+</html>

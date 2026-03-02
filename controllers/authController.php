@@ -8,6 +8,8 @@ function handleAuthRoutes($uri, $method)
     googleLogin();
   } elseif ($uri === '/auth/me' && $method === 'GET') {
     getMe();
+  } elseif ($uri === '/auth/account' && $method === 'DELETE') {
+    deleteAccount();
   } else {
     Response::error('Route not found', 404);
   }
@@ -131,6 +133,38 @@ function getMe()
     Response::success($user, 'User data retrieved');
   } catch (Exception $e) {
     Response::error('Failed to get user: ' . $e->getMessage(), 500);
+  }
+}
+
+function deleteAccount()
+{
+  try {
+    $tokenData = JWTHandler::requireAuth();
+    $userId = $tokenData['userId'];
+
+    $db = getDB();
+
+    // Verify user exists
+    $user = $db->fetchOne("SELECT id FROM users WHERE id = ?", [$userId]);
+    if (!$user) {
+      Response::error('User not found', 404);
+      return;
+    }
+
+    // Delete all user data in dependency order
+    $db->execute("DELETE FROM transactions WHERE user_id = ?", [$userId]);
+    $db->execute("DELETE FROM categories WHERE user_id = ? AND is_system = 0", [$userId]);
+    $db->execute("DELETE FROM bank_accounts WHERE user_id = ?", [$userId]);
+    $db->execute("DELETE FROM emis WHERE user_id = ?", [$userId]);
+    $db->execute("DELETE FROM sync_logs WHERE user_id = ?", [$userId]);
+
+    // Finally delete the user
+    $db->execute("DELETE FROM users WHERE id = ?", [$userId]);
+
+    Response::success(null, 'Account and all associated data deleted successfully');
+  } catch (Exception $e) {
+    error_log("Delete account error: " . $e->getMessage());
+    Response::error('Failed to delete account: ' . $e->getMessage(), 500);
   }
 }
 
