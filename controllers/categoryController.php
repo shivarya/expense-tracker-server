@@ -12,6 +12,8 @@ function handleCategoryRoutes($uri, $method)
     createCategory($userId);
   } elseif ($uri === '/categories/consolidate' && $method === 'POST') {
     consolidateCategories($userId);
+  } elseif ($uri === '/categories/auto-fix' && $method === 'POST') {
+    autoFixCategories($userId);
   } elseif (preg_match('/^\/categories\/(\d+)$/', $uri, $matches) && $method === 'PUT') {
     updateCategory($userId, $matches[1]);
   } elseif (preg_match('/^\/categories\/(\d+)$/', $uri, $matches) && $method === 'DELETE') {
@@ -215,6 +217,23 @@ function consolidateCategories($userId)
     ], 'Categories consolidated successfully');
   } catch (Exception $e) {
     Response::error('Failed to consolidate categories: ' . $e->getMessage(), 500);
+  }
+}
+
+function autoFixCategories($userId)
+{
+  try {
+    require_once __DIR__ . '/../utils/categoryResolver.php';
+    $db = getDB();
+    $result = CategoryResolver::autoFix($db, (int)$userId);
+
+    Response::success([
+      'fixed'   => $result['fixed'],
+      'deleted' => $result['deleted'],
+      'details' => $result['details'],
+    ], "Auto-fix complete: {$result['fixed']} transactions reassigned, {$result['deleted']} rogue categories removed.");
+  } catch (Exception $e) {
+    Response::error('Auto-fix failed: ' . $e->getMessage(), 500);
   }
 }
 

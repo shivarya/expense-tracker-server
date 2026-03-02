@@ -3,6 +3,7 @@
 require_once __DIR__ . '/../utils/response.php';
 require_once __DIR__ . '/../utils/jwt.php';
 require_once __DIR__ . '/../utils/azureOpenAI.php';
+require_once __DIR__ . '/../utils/categoryResolver.php';
 require_once __DIR__ . '/../config/database.php';
 
 class SMSParserController {
@@ -161,6 +162,12 @@ class SMSParserController {
         error_log("User ID: $userId");
         error_log("===========================");
 
+        // Self-heal: remove any rogue categories this sync may have created
+        $autoFixResult = CategoryResolver::autoFix($this->db, $userId);
+        if ($autoFixResult['deleted'] > 0) {
+            error_log("[CategoryResolver] Auto-fix after SMS sync: {$autoFixResult['fixed']} txns remapped, {$autoFixResult['deleted']} rogues deleted");
+        }
+
         Response::success([
             'message' => 'SMS parsing complete',
             'total_sms' => count($bankSMS),
@@ -249,120 +256,17 @@ class SMSParserController {
 
     /**
      * Canonical category map — single source of truth.
-     * AI now returns category_id directly; this is the fallback for name-based lookup
-     * and the guard that prevents new rogue categories from being created.
+     * Moved to utils/categoryResolver.php — kept here for reference only.
+     * @deprecated Use CategoryResolver::CANONICAL directly.
      */
-    private static array $CANONICAL_CATEGORIES = [
-        // ID → [name, icon, color, type]
-        1  => ['Food & Dining',    'restaurant-outline',       '#FF4757', 'expense'],
-        2  => ['Transportation',   'car-outline',              '#FFA502', 'expense'],
-        3  => ['Shopping',         'bag-handle-outline',       '#2B7BE5', 'expense'],
-        4  => ['Entertainment',    'tv-outline',               '#9C27B0', 'expense'],
-        5  => ['Bills & Utilities','flash-outline',            '#FF6B6B', 'expense'],
-        6  => ['Healthcare',       'medical-outline',          '#00C48C', 'expense'],
-        7  => ['Education',        'school-outline',           '#3F51B5', 'expense'],
-        8  => ['Travel',           'airplane-outline',         '#FF9800', 'expense'],
-        9  => ['Groceries',        'cart-outline',             '#4CAF50', 'expense'],
-        10 => ['Insurance',        'shield-checkmark-outline', '#607D8B', 'expense'],
-        11 => ['Rent/EMI',         'home-outline',             '#795548', 'expense'],
-        12 => ['Personal Care',    'person-outline',           '#E91E63', 'expense'],
-        13 => ['Investments',      'trending-up-outline',      '#00BCD4', 'investment'],
-        14 => ['Salary',           'cash-outline',             '#4CAF50', 'income'],
-        15 => ['Refund',           'return-down-back-outline', '#8BC34A', 'income'],
-        16 => ['Other Income',     'wallet-outline',           '#CDDC39', 'income'],
-        17 => ['Transfer',         'swap-horizontal-outline',  '#9E9E9E', 'transfer'],
-        18 => ['Uncategorized',    'help-circle-outline',      '#BDBDBD', 'expense'],
-        51 => ['Miscellaneous',    'ellipsis-horizontal-circle-outline', '#FF5722', 'expense'],
-    ];
-
-    /**
-     * Name aliases → canonical ID. Normalised lowercase key → ID.
-     */
-    private static array $NAME_ALIASES = [
-        // Food
-        'food & dining' => 1, 'food and dining' => 1, 'food' => 1, 'food & beverage' => 1,
-        'food_and_beverage' => 1, 'food_delivery' => 1, 'dining' => 1, 'restaurant' => 1,
-        'cafe' => 1, 'swiggy' => 1, 'zomato' => 1,
-        // Transportation
-        'transportation' => 2, 'transport' => 2, 'fuel' => 2, 'cab' => 2, 'petrol' => 2,
-        // Shopping
-        'shopping' => 3, 'retail' => 3, 'e-commerce' => 3, 'ecommerce' => 3, 'purchase' => 3,
-        // Entertainment
-        'entertainment' => 4, 'streaming' => 4, 'subscription' => 4, 'tata play' => 4,
-        'ott' => 4, 'movies' => 4,
-        // Bills & Utilities
-        'bills & utilities' => 5, 'bills and utilities' => 5, 'bills' => 5, 'utilities' => 5,
-        'bill payment' => 5, 'recharge' => 5, 'mobile recharge' => 5, 'internet' => 5,
-        'broadband' => 5, 'electricity' => 5, 'bill pay' => 5,
-        // Healthcare
-        'healthcare' => 6, 'health' => 6, 'medical' => 6, 'pharmacy' => 6, 'hospital' => 6,
-        // Education
-        'education' => 7,
-        // Travel
-        'travel' => 8, 'flight' => 8, 'hotel' => 8,
-        // Groceries
-        'groceries' => 9, 'grocery' => 9, 'supermarket' => 9, 'kirana' => 9,
-        // Insurance
-        'insurance' => 10, 'premium' => 10,
-        // Rent/EMI
-        'rent/emi' => 11, 'rent' => 11, 'emi' => 11, 'loan_payment' => 11,
-        'emi principal/amortization' => 11, 'amortization' => 11, 'loan installment' => 11,
-        // Personal Care
-        'personal care' => 12, 'grooming' => 12, 'salon' => 12,
-        // Investments
-        'investments' => 13, 'investment' => 13, 'sip' => 13, 'mutual fund' => 13,
-        'stocks' => 13, 'nps' => 13, 'ppf' => 13,
-        // Salary
-        'salary' => 14, 'payroll' => 14,
-        // Refund
-        'refund' => 15, 'reversal' => 15, 'cashback' => 15,
-        // Other Income
-        'other income' => 16, 'income' => 16,
-        // Transfer
-        'transfer' => 17, 'self transfer' => 17, 'internal transfer' => 17,
-        // Uncategorized — map explicit "unknown" here
-        'uncategorized' => 18, 'unknown' => 18,
-        // Miscellaneous — catch all old junk categories
-        'miscellaneous' => 51, 'other' => 51, 'upi' => 51, 'upi payment' => 51,
-        'upi transfer' => 51, 'card' => 51, 'card_spend' => 51, 'atm' => 51,
-        'atm withdrawal' => 51, 'cash withdrawal' => 51, 'tax' => 51,
-        'tax (igst)' => 51, 'tax component' => 51, 'interest' => 51,
-        'fees' => 51, 'online services' => 51, 'purchase (tax/fee)' => 51,
-    ];
 
     /**
      * Resolve a transaction to a canonical category ID.
-     * Priority: AI-returned category_id > AI-returned category name > merchant keyword > 51 fallback
-     * NEVER creates a new category row.
+     * Delegates to shared CategoryResolver — never creates new category rows.
      */
     private function resolveCategoryId(int $userId, array $transaction): int
     {
-        // 1. AI already returned a valid canonical ID
-        if (!empty($transaction['category_id']) && isset(self::$CANONICAL_CATEGORIES[(int)$transaction['category_id']])) {
-            return (int)$transaction['category_id'];
-        }
-
-        // 2. Map AI-returned category name to canonical ID
-        if (!empty($transaction['category'])) {
-            $normalised = strtolower(trim((string)$transaction['category']));
-            if (isset(self::$NAME_ALIASES[$normalised])) {
-                return self::$NAME_ALIASES[$normalised];
-            }
-            // Partial substring match
-            foreach (self::$NAME_ALIASES as $alias => $id) {
-                if (str_contains($normalised, $alias) || str_contains($alias, $normalised)) {
-                    return $id;
-                }
-            }
-        }
-
-        // 3. Infer from transaction type for credits
-        if (($transaction['transaction_type'] ?? '') === 'credit') {
-            return 16; // Other Income
-        }
-
-        // 4. Ultimate fallback
-        return 51; // Miscellaneous
+        return CategoryResolver::resolveTransaction($transaction);
     }
 
     private function getOrCreateBankAccount(int $userId, array $transaction): int {
