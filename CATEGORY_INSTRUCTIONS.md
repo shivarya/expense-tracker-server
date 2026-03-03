@@ -1,7 +1,7 @@
 # Transaction Category Assignment Instructions
 
-> **Version**: 3.0  
-> **Last Updated**: 2026-03-02  
+> **Version**: 3.1  
+> **Last Updated**: 2026-03-03  
 > **For**: GPT-4 / Azure OpenAI SMS parser, Claude, and other AI models in expense-tracker pipeline  
 > **Status**: AI now returns `category_id` integer directly — no new categories ever created by sync
 
@@ -35,6 +35,9 @@ This is the **single source of truth** for assigning `category_id` to transactio
 | 12 | Personal Care | `person-outline` | `#E91E63` | Salon, grooming, wellness care |
 | 18 | Uncategorized | `help-circle-outline` | `#BDBDBD` | Final fallback only — use sparingly |
 | 51 | Miscellaneous | `ellipsis-horizontal-circle-outline` | `#FF5722` | P2P UPI, ATM withdrawal, fees, tax, genuinely unclear debits |
+| 52 | Household Help | `people-outline` | `#8D6E63` | Cook, maid, driver, domestic worker salary/payments |
+| 53 | Kids Activities | `trophy-outline` | `#FF7043` | Karate, dance, swimming, sports, hobby/activity classes for kids |
+| 54 | Software & Tools | `laptop-outline` | `#5C6BC0` | GitHub, AWS, Azure, Vercel, Figma, Notion, SaaS, domains, dev tools |
 
 ### Income
 
@@ -79,9 +82,12 @@ These old names are now merged and should **not** be reused as separate categori
 - `Health` → **Healthcare (6)**
 - `Streaming`, `Tata Play`, `OTT` → **Entertainment (4)**
 - `EMI`, `EMI Principal/Amortization`, `loan_payment` → **Rent/EMI (11)**
-- `Other`, `Tax`, `Tax (IGST)`, `Tax component`, `interest`, `Fees`, `Online Services`, `ATM`, `ATM Withdrawal`, `UPI`, `UPI Payment`, `UPI Transfer`, `Card`, `card_spend`, `purchase`, `Purchase (tax/fee)`, `reversal` → **Miscellaneous (51)**
+- `Other`, `Tax`, `Tax (IGST)`, `Tax component`, `interest`, `Fees`, `Online Services`, `ATM`, `ATM Withdrawal`, `UPI`, `UPI Payment`, `UPI Transfer`, `Card`, `card_spend`, `purchase`, `Purchase (tax/fee)`, `reversal`, `Services`, `Home Services`, `UPI Payment` → **Miscellaneous (51)**
 - `Unknown` → **Uncategorized (18)**
 - Income-side `Income`, `Other` → **Other Income (16)**
+- `Software`, `SaaS`, `cloud services`, `developer tools`, `Subscription Service` (for dev/tech tools) → **Software & Tools (54)**
+- `Domestic worker`, `Cook`, `Maid`, `Driver`, `Bai`, `Helper` → **Household Help (52)**
+- `Kids class`, `Activity class`, `Sports class`, `hobby class` → **Kids Activities (53)**
 
 ---
 
@@ -134,12 +140,28 @@ Use for: delivery apps, restaurants, cafes, dessert outlets.
 - Use when description clearly indicates rent/EMI/amortization.
 - Keywords: `EMI`, `AMORTIZATION`, `LOAN INSTALLMENT`, `RENT`
 
+### Household Help (ID 52)
+
+- UPI payee names or descriptions containing: `COOK`, `MAID`, `BAI`, `DRIVER`, `HELPER`, `BHAIYYA`, `DOMESTIC`, `KAAMWALI`, `WATCHMAN`
+- Recurring small UPI payments to same personal name (likely domestic staff)
+
+### Kids Activities (ID 53)
+
+- Keywords: `KARATE`, `DANCE CLASS`, `SWIMMING`, `CRICKET ACADEMY`, `FOOTBALL`, `BADMINTON`, `HOBBY CLASS`, `SPORTS ACADEMY`, `ACTIVITY CENTER`
+- Fees paid to academies/classes specifically described as kids-related
+
+### Software & Tools (ID 54)
+
+- Known merchants: `GITHUB`, `AWS`, `AMAZON WEB SERVICES`, `AZURE`, `GOOGLE CLOUD`, `GCP`, `VERCEL`, `NETLIFY`, `FIGMA`, `NOTION`, `CLOUDFLARE`, `NAMECHEAP`, `GODADDY`, `DIGITALOCEAN`, `HEROKU`, `RENDER`, `LINEAR`, `JIRA`, `CONFLUENCE`
+- Keywords: `SAAS`, `HOSTING`, `DOMAIN RENEWAL`, `DEV TOOLS`
+- Note: OTT/gaming subscriptions → **Entertainment (4)**, not 54
+
 ### Miscellaneous (ID 51)
 
 Use for genuinely uncategorizable debit transactions and person-to-person spend.
 
 - Typical patterns:
-  - UPI payee appears to be a personal name
+  - UPI payee appears to be a personal name (not domestic staff → 52, not kids → 53)
   - No merchant category confidence
   - Tax/fee-like lines not tied to a stronger domain category
 
@@ -181,6 +203,26 @@ Only use as final fallback if confidence is very low and transaction is not safe
 - Normalize merchant text (`trim`, lowercase, collapse spaces) before matching.
 - Prefer stable canonical IDs listed above.
 - Keep `Uncategorized (18)` volume low; if a repeat pattern appears, map it to a proper category.
+
+---
+
+## Description Quality Standards
+
+All AI-generated `description` and `merchant` fields must follow these rules:
+
+### Merchant Name
+- Use the well-known brand name — **max 3 words**
+- `"Swiggy"` not `"SWIGGY ENTERTAINMENT PRIVATE LIM"`
+- `"Amazon"` not `"AMZN MKTP IN*AB12C"`
+- For UPI person payments: use extracted name — `"Rahul Sharma"` not `"rahulsh@upi"`
+- Strip: city names, state codes, bank codes, UPI handles, trailing IDs
+
+### Description
+- **5–10 words**, specific and contextual
+- Good: `"Monthly food delivery via Swiggy"`, `"Electricity bill paid via BESCOM"`, `"GitHub Copilot SaaS subscription"`, `"SIP investment in Axis Bluechip Fund"`, `"UPI transfer to Rahul Sharma"`, `"Karate class fee for kids at Academy"`
+- Bad: `"Bill payment"`, `"Other Transaction"`, `"UPI Payment"`, `"Food Delivery at Swiggy"`
+- For income: `"Salary credit for March 2026"`, `"Interest credited by HDFC Bank"`
+- For refunds: `"Refund from Amazon for returned item"`
 
 ---
 
