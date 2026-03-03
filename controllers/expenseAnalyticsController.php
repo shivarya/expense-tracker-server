@@ -178,6 +178,8 @@ class ExpenseAnalyticsController {
         $now = new DateTime();
         
         switch ($period) {
+            case 'cm':
+                return (new DateTime('first day of this month'))->format('Y-m-d');
             case '1m':
                 return $now->modify('-1 month')->format('Y-m-d');
             case '3m':
