@@ -4,6 +4,7 @@ require_once __DIR__ . '/../utils/response.php';
 require_once __DIR__ . '/../utils/jwt.php';
 require_once __DIR__ . '/../utils/azureOpenAI.php';
 require_once __DIR__ . '/../utils/categoryResolver.php';
+require_once __DIR__ . '/../utils/categoryLearning.php';
 require_once __DIR__ . '/../config/database.php';
 
 class SMSParserController {
@@ -261,6 +262,12 @@ class SMSParserController {
      */
     private function resolveCategoryId(int $userId, array $transaction): int
     {
+        // Highest priority: user-provided learning from manual recategorization.
+        $learnedCategoryId = CategoryLearning::resolveFromTransaction($this->db, $userId, $transaction);
+        if ($learnedCategoryId !== null) {
+            return $learnedCategoryId;
+        }
+
         // Check trusted contacts first — self-transfers should always be Transfer (17)
         $merchant = strtolower(trim($transaction['merchant'] ?? ''));
         if ($merchant !== '') {

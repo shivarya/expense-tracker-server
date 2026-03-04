@@ -1,9 +1,9 @@
 # Transaction Category Assignment Instructions
 
-> **Version**: 3.1  
-> **Last Updated**: 2026-03-03  
+> **Version**: 3.2  
+> **Last Updated**: 2026-03-04  
 > **For**: GPT-4 / Azure OpenAI SMS parser, Claude, and other AI models in expense-tracker pipeline  
-> **Status**: AI now returns `category_id` integer directly — no new categories ever created by sync
+> **Status**: AI returns canonical `category_id` and server now applies user feedback learning from manual recategorization
 
 ---
 
@@ -206,6 +206,23 @@ Only use as final fallback if confidence is very low and transaction is not safe
 
 ---
 
+## Auto-Learning from Manual Category Updates (v3.2)
+
+When a user changes category of an existing transaction in the mobile app:
+
+1. Server updates `transactions.category_id`.
+2. Server extracts a stable merchant pattern from transaction metadata.
+3. Server upserts a user-specific rule in `category_learning_rules`.
+4. During next SMS parsing, this learned rule is checked before default resolver logic.
+5. This file's generated section is refreshed as a review mirror.
+
+Notes:
+- Runtime learning is **user-specific** (stored in DB); the markdown list is only for visibility.
+- Generic patterns like `UPI Payment` are intentionally ignored.
+- Trusted contact transfer mapping still applies when no user-learned rule matches.
+
+---
+
 ## Description Quality Standards
 
 All AI-generated `description` and `merchant` fields must follow these rules:
@@ -233,4 +250,17 @@ When new recurring merchant patterns appear:
 1. Add them under the relevant canonical category in this file.
 2. Avoid introducing alias categories if canonical one already exists.
 3. Re-run periodic duplicate check on categories table and keep taxonomy clean.
+
+---
+
+## Auto-Learned Merchant Overrides (Generated)
+
+This section is auto-generated from manual category changes in the mobile app.
+Runtime matching uses DB table `category_learning_rules` (per user) and this markdown is a review mirror.
+
+<!-- AUTO_LEARNED_MAPPINGS_START -->
+| User | Pattern | Category ID | Category Name | Uses | Last Updated |
+|---|---|---:|---|---:|---|
+| - | - | - | - | - | - |
+<!-- AUTO_LEARNED_MAPPINGS_END -->
 

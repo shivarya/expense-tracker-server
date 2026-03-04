@@ -1,5 +1,7 @@
 <?php
 
+require_once __DIR__ . '/../utils/categoryLearning.php';
+
 function handleTransactionRoutes($uri, $method)
 {
   // Require authentication
@@ -211,7 +213,7 @@ function updateTransactionCategory($userId, $transactionId)
 
     // Verify transaction belongs to user and is not deleted
     $txn = $db->fetchOne(
-      "SELECT id, merchant, category_id FROM transactions WHERE id = ? AND user_id = ? AND deleted_at IS NULL",
+      "SELECT id, merchant, description, category_id FROM transactions WHERE id = ? AND user_id = ? AND deleted_at IS NULL",
       [$transactionId, $userId]
     );
     if (!$txn) {
@@ -227,18 +229,40 @@ function updateTransactionCategory($userId, $transactionId)
       Response::error('Category not found', 404);
     }
 
+    $newCategoryId = (int)$input['category_id'];
+    $oldCategoryId = (int)$txn['category_id'];
+
     // Update the transaction category
     $db->execute(
       "UPDATE transactions SET category_id = ? WHERE id = ? AND user_id = ?",
-      [$input['category_id'], $transactionId, $userId]
+      [$newCategoryId, $transactionId, $userId]
     );
+
+    $learning = [
+      'learned' => false,
+      'reason' => 'unchanged_category'
+    ];
+
+    // Learn only when user changed category so future similar transactions auto-match.
+    if ($newCategoryId !== $oldCategoryId) {
+      $learning = CategoryLearning::learnFromTransaction(
+        $db,
+        (int)$userId,
+        $txn,
+        $newCategoryId,
+        (int)$transactionId
+      );
+    }
 
     Response::success([
       'id' => (int)$transactionId,
-      'category_id' => (int)$input['category_id'],
+      'category_id' => $newCategoryId,
       'category_name' => $cat['name'],
       'category_color' => $cat['color'],
-      'category_icon' => $cat['icon']
+      'category_icon' => $cat['icon'],
+      'learning_applied' => (bool)($learning['learned'] ?? false),
+      'learning_pattern' => $learning['pattern'] ?? null,
+      'learning_reason' => $learning['reason'] ?? null
     ], 'Transaction category updated successfully');
   } catch (Exception $e) {
     Response::error('Failed to update transaction category: ' . $e->getMessage(), 500);
