@@ -5,7 +5,7 @@
  *
  * - Used by smsParserController to assign categories during SMS sync
  * - Used by /categories/auto-fix to heal rogue categories created by old SMS syncs
- * - Never creates new DB rows; always maps to one of the 19 canonical IDs
+ * - Never creates new DB rows; always maps to one of the canonical IDs
  *
  * To add new merchant/category patterns, edit $NAME_ALIASES and $KEYWORD_MAP below.
  */
@@ -35,6 +35,7 @@ class CategoryResolver
         52 => ['name' => 'Household Help',    'icon' => 'people-outline',                          'color' => '#8D6E63', 'type' => 'expense'],
         53 => ['name' => 'Kids Activities',   'icon' => 'trophy-outline',                          'color' => '#FF7043', 'type' => 'expense'],
         54 => ['name' => 'Software & Tools',  'icon' => 'laptop-outline',                          'color' => '#5C6BC0', 'type' => 'expense'],
+        55 => ['name' => 'Donation',          'icon' => 'heart-outline',                           'color' => '#E74C3C', 'type' => 'expense'],
     ];
 
     /**
@@ -154,6 +155,15 @@ class CategoryResolver
         'cloud storage'              => 54, 'google workspace'     => 54,
         'microsoft 365'              => 54, 'dropbox'              => 54,
         'slack'                      => 54, 'zoom'                 => 54,
+
+        // ── Donation (55) ──────────────────────────────────────────────
+        'donation'                   => 55, 'charity'              => 55,
+        'charitable'                 => 55, 'donate'               => 55,
+        'charity donation'           => 55, 'charitable donation'  => 55,
+        'ngo donation'               => 55, 'contribution'         => 55,
+        'relief fund'                => 55, 'donation fund'        => 55,
+        'temple donation'            => 55, 'mosque donation'      => 55,
+        'church donation'            => 55,
 
         // ── Investments (13) ────────────────────────────────────────────
         'investments'                => 13, 'investment'           => 13,

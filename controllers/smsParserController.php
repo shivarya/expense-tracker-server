@@ -51,6 +51,14 @@ class SMSParserController {
             Response::success([
                 'message' => 'No bank SMS found',
                 'parsed_count' => 0,
+                'total_sms' => 0,
+                'parsed_transactions' => 0,
+                'saved_transactions' => 0,
+                'skipped_duplicates' => 0,
+                'saved_debit_count' => 0,
+                'saved_credit_count' => 0,
+                'saved_debit_amount' => 0,
+                'saved_credit_amount' => 0,
                 'transactions' => []
             ]);
             return;
@@ -66,53 +74,13 @@ class SMSParserController {
         // Save transactions to database
         $savedCount = 0;
         $skippedCount = 0;
+        $savedDebitCount = 0;
+        $savedCreditCount = 0;
+        $savedDebitAmount = 0.0;
+        $savedCreditAmount = 0.0;
 
         foreach ($transactions as $transaction) {
-            // Check for duplicates using multiple strategies for robustness
-            // Strategy 1: Check by reference number (most reliable if available)
-            $isDuplicate = false;
-            
-            if (!empty($transaction['reference_number'])) {
-                $refCheckQuery = "
-                    SELECT id FROM transactions 
-                    WHERE user_id = ? AND reference_number = ?
-                    LIMIT 1
-                ";
-                $refCheck = $this->db->fetchAll($refCheckQuery, [
-                    $userId,
-                    $transaction['reference_number']
-                ]);
-                
-                if (count($refCheck) > 0) {
-                    $isDuplicate = true;
-                    error_log("Skipping duplicate (ref number): {$transaction['reference_number']}");
-                }
-            }
-            
-            // Strategy 2: Check by account, amount, and date (fallback for transactions without ref numbers)
-            if (!$isDuplicate) {
-                $existingQuery = "
-                    SELECT id FROM transactions 
-                    WHERE user_id = ? 
-                    AND account_id IN (SELECT id FROM bank_accounts WHERE account_number LIKE ?)
-                    AND amount = ?
-                    AND ABS(TIMESTAMPDIFF(MINUTE, transaction_date, ?)) < 60
-                    LIMIT 1
-                ";
-                
-                $accountPattern = '%' . ($transaction['account_number'] ?? '0000');
-                $existing = $this->db->fetchAll($existingQuery, [
-                    $userId,
-                    $accountPattern,
-                    $transaction['amount'],
-                    $transaction['date'] ?? date('Y-m-d H:i:s')
-                ]);
-
-                if (count($existing) > 0) {
-                    $isDuplicate = true;
-                    error_log("Skipping duplicate (amount+date): " . json_encode($transaction));
-                }
-            }
+            $isDuplicate = $this->isDuplicateTransaction($userId, $transaction);
 
             if ($isDuplicate) {
                 $skippedCount++;
@@ -147,6 +115,17 @@ class SMSParserController {
                     $transaction['reference_number'] ?? null
                 ]);
                 $savedCount++;
+
+                $txnType = strtolower((string)($transaction['transaction_type'] ?? 'debit'));
+                $txnAmount = (float)($transaction['amount'] ?? 0);
+                if ($txnType === 'credit') {
+                    $savedCreditCount++;
+                    $savedCreditAmount += $txnAmount;
+                } else {
+                    $savedDebitCount++;
+                    $savedDebitAmount += $txnAmount;
+                }
+
                 error_log("Transaction saved successfully: Amount={$transaction['amount']}, Merchant=" . ($transaction['merchant'] ?? 'N/A'));
             } catch (Exception $e) {
                 error_log("Failed to save transaction: " . $e->getMessage());
@@ -160,6 +139,8 @@ class SMSParserController {
         error_log("Transactions parsed by AI: " . count($transactions));
         error_log("Transactions saved to DB: $savedCount");
         error_log("Duplicates skipped: $skippedCount");
+        error_log("Saved debit txns: $savedDebitCount, amount: $savedDebitAmount");
+        error_log("Saved credit txns: $savedCreditCount, amount: $savedCreditAmount");
         error_log("User ID: $userId");
         error_log("===========================");
 
@@ -175,6 +156,10 @@ class SMSParserController {
             'parsed_transactions' => count($transactions),
             'saved_transactions' => $savedCount,
             'skipped_duplicates' => $skippedCount,
+            'saved_debit_count' => $savedDebitCount,
+            'saved_credit_count' => $savedCreditCount,
+            'saved_debit_amount' => round($savedDebitAmount, 2),
+            'saved_credit_amount' => round($savedCreditAmount, 2),
             'transactions' => $transactions
         ]);
     }
@@ -226,13 +211,31 @@ class SMSParserController {
 
         // Save transaction
         $transaction = $transactions[0];
+
+        $isDuplicate = $this->isDuplicateTransaction($userId, $transaction);
+        if ($isDuplicate) {
+            Response::success([
+                'message' => 'Duplicate transaction skipped',
+                'processed' => true,
+                'saved' => false,
+                'duplicate' => true,
+                'saved_transactions' => 0,
+                'saved_debit_count' => 0,
+                'saved_credit_count' => 0,
+                'saved_debit_amount' => 0,
+                'saved_credit_amount' => 0,
+                'transaction' => $transaction
+            ]);
+            return;
+        }
+
         $accountId = $this->getOrCreateBankAccount($userId, $transaction);
         $categoryId = $this->resolveCategoryId($userId, $transaction);
 
         $insertQuery = "
             INSERT INTO transactions (
                 user_id, account_id, category_id, transaction_type, 
-                amount, merchant, description, date, reference_number, source
+                amount, merchant, description, transaction_date, reference_number, source
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'sms_webhook')
         ";
 
@@ -248,11 +251,67 @@ class SMSParserController {
             $transaction['reference_number'] ?? null
         ]);
 
+        $txnType = strtolower((string)($transaction['transaction_type'] ?? 'debit'));
+        $txnAmount = round((float)($transaction['amount'] ?? 0), 2);
+        $savedDebitCount = $txnType === 'credit' ? 0 : 1;
+        $savedCreditCount = $txnType === 'credit' ? 1 : 0;
+
         Response::success([
             'message' => 'SMS processed successfully',
             'processed' => true,
+            'saved' => true,
+            'duplicate' => false,
+            'saved_transactions' => 1,
+            'saved_debit_count' => $savedDebitCount,
+            'saved_credit_count' => $savedCreditCount,
+            'saved_debit_amount' => $savedDebitCount === 1 ? $txnAmount : 0,
+            'saved_credit_amount' => $savedCreditCount === 1 ? $txnAmount : 0,
             'transaction' => $transaction
         ]);
+    }
+
+    /**
+     * Duplicate check strategy:
+     * 1. Reference number exact match (if available)
+     * 2. Account + amount + timestamp window (+/- 60 min)
+     */
+    private function isDuplicateTransaction(int $userId, array $transaction): bool
+    {
+        if (!empty($transaction['reference_number'])) {
+            $refCheck = $this->db->fetchAll(
+                "SELECT id FROM transactions WHERE user_id = ? AND reference_number = ? LIMIT 1",
+                [$userId, $transaction['reference_number']]
+            );
+
+            if (count($refCheck) > 0) {
+                error_log("Skipping duplicate (ref number): {$transaction['reference_number']}");
+                return true;
+            }
+        }
+
+        $existingQuery = "
+            SELECT id FROM transactions
+            WHERE user_id = ?
+            AND account_id IN (SELECT id FROM bank_accounts WHERE account_number LIKE ?)
+            AND amount = ?
+            AND ABS(TIMESTAMPDIFF(MINUTE, transaction_date, ?)) < 60
+            LIMIT 1
+        ";
+
+        $accountPattern = '%' . ($transaction['account_number'] ?? '0000');
+        $existing = $this->db->fetchAll($existingQuery, [
+            $userId,
+            $accountPattern,
+            $transaction['amount'] ?? 0,
+            $transaction['date'] ?? date('Y-m-d H:i:s')
+        ]);
+
+        if (count($existing) > 0) {
+            error_log("Skipping duplicate (amount+date): " . json_encode($transaction));
+            return true;
+        }
+
+        return false;
     }
 
     /**

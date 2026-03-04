@@ -1,6 +1,6 @@
 # Transaction Category Assignment Instructions
 
-> **Version**: 3.2  
+> **Version**: 3.3  
 > **Last Updated**: 2026-03-04  
 > **For**: GPT-4 / Azure OpenAI SMS parser, Claude, and other AI models in expense-tracker pipeline  
 > **Status**: AI returns canonical `category_id` and server now applies user feedback learning from manual recategorization
@@ -38,6 +38,7 @@ This is the **single source of truth** for assigning `category_id` to transactio
 | 52 | Household Help | `people-outline` | `#8D6E63` | Cook, maid, driver, domestic worker salary/payments |
 | 53 | Kids Activities | `trophy-outline` | `#FF7043` | Karate, dance, swimming, sports, hobby/activity classes for kids |
 | 54 | Software & Tools | `laptop-outline` | `#5C6BC0` | GitHub, AWS, Azure, Vercel, Figma, Notion, SaaS, domains, dev tools |
+| 55 | Donation | `heart-outline` | `#E74C3C` | Charity, NGO contributions, religious/place donations, relief fund support |
 
 ### Income
 
@@ -88,6 +89,7 @@ These old names are now merged and should **not** be reused as separate categori
 - `Software`, `SaaS`, `cloud services`, `developer tools`, `Subscription Service` (for dev/tech tools) → **Software & Tools (54)**
 - `Domestic worker`, `Cook`, `Maid`, `Driver`, `Bai`, `Helper` → **Household Help (52)**
 - `Kids class`, `Activity class`, `Sports class`, `hobby class` → **Kids Activities (53)**
+- `Donation`, `Charity`, `Charitable`, `NGO donation`, `Relief fund` → **Donation (55)**
 
 ---
 
@@ -155,6 +157,12 @@ Use for: delivery apps, restaurants, cafes, dessert outlets.
 - Known merchants: `GITHUB`, `AWS`, `AMAZON WEB SERVICES`, `AZURE`, `GOOGLE CLOUD`, `GCP`, `VERCEL`, `NETLIFY`, `FIGMA`, `NOTION`, `CLOUDFLARE`, `NAMECHEAP`, `GODADDY`, `DIGITALOCEAN`, `HEROKU`, `RENDER`, `LINEAR`, `JIRA`, `CONFLUENCE`
 - Keywords: `SAAS`, `HOSTING`, `DOMAIN RENEWAL`, `DEV TOOLS`
 - Note: OTT/gaming subscriptions → **Entertainment (4)**, not 54
+
+### Donation (ID 55)
+
+- Known: `PM CARES`, `AKSHAYA PATRA`, `ISKCON`, `CRY`, `GOONJ`, donation links/UPI IDs tagged as charity
+- Keywords: `DONATION`, `CHARITY`, `CHARITABLE`, `NGO`, `RELIEF FUND`, `CONTRIBUTION`
+- Use when payment intent clearly indicates financial help / donation and not bill or purchase
 
 ### Miscellaneous (ID 51)
 
