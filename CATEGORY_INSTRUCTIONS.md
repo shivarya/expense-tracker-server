@@ -1,7 +1,7 @@
 # Transaction Category Assignment Instructions
 
-> **Version**: 3.3  
-> **Last Updated**: 2026-03-04  
+> **Version**: 3.4  
+> **Last Updated**: 2026-03-06  
 > **For**: GPT-4 / Azure OpenAI SMS parser, Claude, and other AI models in expense-tracker pipeline  
 > **Status**: AI returns canonical `category_id` and server now applies user feedback learning from manual recategorization
 
@@ -39,6 +39,7 @@ This is the **single source of truth** for assigning `category_id` to transactio
 | 53 | Kids Activities | `trophy-outline` | `#FF7043` | Karate, dance, swimming, sports, hobby/activity classes for kids |
 | 54 | Software & Tools | `laptop-outline` | `#5C6BC0` | GitHub, AWS, Azure, Vercel, Figma, Notion, SaaS, domains, dev tools |
 | 55 | Donation | `heart-outline` | `#E74C3C` | Charity, NGO contributions, religious/place donations, relief fund support |
+| 56 | Home Improvement | `hammer-outline` | `#8D6E63` | House repairs, renovation, carpentry, plumbing/electrical work, home decor/furnishing |
 
 ### Income
 
@@ -83,13 +84,14 @@ These old names are now merged and should **not** be reused as separate categori
 - `Health` → **Healthcare (6)**
 - `Streaming`, `Tata Play`, `OTT` → **Entertainment (4)**
 - `EMI`, `EMI Principal/Amortization`, `loan_payment` → **Rent/EMI (11)**
-- `Other`, `Tax`, `Tax (IGST)`, `Tax component`, `interest`, `Fees`, `Online Services`, `ATM`, `ATM Withdrawal`, `UPI`, `UPI Payment`, `UPI Transfer`, `Card`, `card_spend`, `purchase`, `Purchase (tax/fee)`, `reversal`, `Services`, `Home Services`, `UPI Payment` → **Miscellaneous (51)**
+- `Other`, `Tax`, `Tax (IGST)`, `Tax component`, `interest`, `Fees`, `Online Services`, `ATM`, `ATM Withdrawal`, `UPI`, `UPI Payment`, `UPI Transfer`, `Card`, `card_spend`, `purchase`, `Purchase (tax/fee)`, `reversal`, `Services`, `UPI Payment` → **Miscellaneous (51)**
 - `Unknown` → **Uncategorized (18)**
 - Income-side `Income`, `Other` → **Other Income (16)**
 - `Software`, `SaaS`, `cloud services`, `developer tools`, `Subscription Service` (for dev/tech tools) → **Software & Tools (54)**
 - `Domestic worker`, `Cook`, `Maid`, `Driver`, `Bai`, `Helper` → **Household Help (52)**
 - `Kids class`, `Activity class`, `Sports class`, `hobby class` → **Kids Activities (53)**
 - `Donation`, `Charity`, `Charitable`, `NGO donation`, `Relief fund` → **Donation (55)**
+- `Home Services`, `House Repair`, `Home Repair`, `Renovation`, `Home Decor`, `Home Furnishing`, `Interior Work`, `Carpenter`, `Plumber`, `Electrician`, `Paint Work` → **Home Improvement (56)**
 
 ---
 
@@ -163,6 +165,12 @@ Use for: delivery apps, restaurants, cafes, dessert outlets.
 - Known: `PM CARES`, `AKSHAYA PATRA`, `ISKCON`, `CRY`, `GOONJ`, donation links/UPI IDs tagged as charity
 - Keywords: `DONATION`, `CHARITY`, `CHARITABLE`, `NGO`, `RELIEF FUND`, `CONTRIBUTION`
 - Use when payment intent clearly indicates financial help / donation and not bill or purchase
+
+### Home Improvement (ID 56)
+
+- Known contexts: home repair services, civil/renovation contracts, interior work, painting, carpentry, electrical/plumbing jobs, home decor and furnishing purchases
+- Keywords: `HOME REPAIR`, `HOUSE REPAIR`, `RENOVATION`, `HOME MAINTENANCE`, `CARPENTER`, `PLUMBER`, `ELECTRICIAN`, `PAINTING`, `INTERIOR`, `HOME DECOR`, `HOME FURNISHING`
+- Use when spend is clearly tied to improving/repairing/home setup; do not use for regular rent/EMI (11)
 
 ### Miscellaneous (ID 51)
 

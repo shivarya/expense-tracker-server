@@ -36,6 +36,7 @@ class CategoryResolver
         53 => ['name' => 'Kids Activities',   'icon' => 'trophy-outline',                          'color' => '#FF7043', 'type' => 'expense'],
         54 => ['name' => 'Software & Tools',  'icon' => 'laptop-outline',                          'color' => '#5C6BC0', 'type' => 'expense'],
         55 => ['name' => 'Donation',          'icon' => 'heart-outline',                           'color' => '#E74C3C', 'type' => 'expense'],
+        56 => ['name' => 'Home Improvement',  'icon' => 'hammer-outline',                          'color' => '#8D6E63', 'type' => 'expense'],
     ];
 
     /**
@@ -164,6 +165,19 @@ class CategoryResolver
         'relief fund'                => 55, 'donation fund'        => 55,
         'temple donation'            => 55, 'mosque donation'      => 55,
         'church donation'            => 55,
+
+        // ── Home Improvement (56) ──────────────────────────────────────
+        'home improvement'           => 56, 'house repair'         => 56,
+        'home repair'                => 56, 'home renovation'      => 56,
+        'house renovation'           => 56, 'renovation'           => 56,
+        'rennovation'                => 56, 'home maintenance'     => 56,
+        'home decor'                 => 56, 'home decoration'      => 56,
+        'home furnishing'            => 56, 'interior design'      => 56,
+        'interior'                   => 56, 'carpenter'            => 56,
+        'plumber'                    => 56, 'electrician'          => 56,
+        'painting'                   => 56, 'paint work'           => 56,
+        'hardware store'             => 56, 'tiles'                => 56,
+        'civil work'                 => 56,
 
         // ── Investments (13) ────────────────────────────────────────────
         'investments'                => 13, 'investment'           => 13,

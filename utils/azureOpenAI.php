@@ -161,6 +161,7 @@ CANONICAL CATEGORY LIST — you MUST return one of these integer category_id val
 53 = Kids Activities     (karate, dance, swimming, sports, hobby classes, extracurricular fees)
 54 = Software & Tools    (SaaS, GitHub, AWS, Azure, domains, hosting, Figma, Notion, developer tools)
 55 = Donation            (charity donations, NGO contributions, relief funds, donation drives)
+56 = Home Improvement    (home repairs, renovation, plumbing, electrician work, home decor, furnishings)
 
 RULES:
 - For credit transactions: apply income categories first (14/15/16/17)
@@ -171,6 +172,7 @@ RULES:
 - Kids sports, dance, activity class fees → category_id 53
 - SaaS, cloud, hosting, dev tool subscriptions → category_id 54
 - Charity/NGO/donation payments → category_id 55
+- House repair, renovation, home maintenance, decor/furnishing payments → category_id 56
 - When in doubt between 18 and 51, prefer 51
 - Do NOT invent new category names or IDs
 
