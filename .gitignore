@@ -13,6 +13,9 @@ composer.lock
 php_errors.log
 error_log
 
+# Archives
+vendor.zip
+
 # OS
 .DS_Store
 Thumbs.db
@@ -43,6 +46,7 @@ temp/
 # Uploads
 uploads/
 storage/
+data/
 
 # Config files are safe to commit - they only read from .env
 # config/config.php
