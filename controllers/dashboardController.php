@@ -55,7 +55,7 @@ function getDashboardSummary($userId)
        FROM transactions t
        JOIN categories c ON t.category_id = c.id
        JOIN bank_accounts ba ON t.account_id = ba.id
-       WHERE t.user_id = ?
+      WHERE t.user_id = ? AND t.deleted_at IS NULL
        ORDER BY t.transaction_date DESC
        LIMIT 10",
       [$userId]
@@ -78,6 +78,7 @@ function getDashboardSummary($userId)
        FROM transactions t
        JOIN categories c ON t.category_id = c.id
        WHERE t.user_id = ? 
+         AND t.deleted_at IS NULL
          AND t.transaction_type = 'debit'
          AND YEAR(t.transaction_date) = YEAR(CURDATE())
          AND MONTH(t.transaction_date) = MONTH(CURDATE())

@@ -31,6 +31,16 @@ class ExpenseAnalyticsController {
             }
             $statusClause = $hasStatus ? "AND status IN ('completed', 'pending')" : "";
 
+            // Keep analytics in sync with transaction listing by ignoring soft-deleted rows.
+            try {
+                $deletedColStmt = $db->prepare("SHOW COLUMNS FROM transactions LIKE 'deleted_at'");
+                $deletedColStmt->execute();
+                $hasDeletedAt = (bool) $deletedColStmt->fetch();
+            } catch (Exception $e) {
+                $hasDeletedAt = false;
+            }
+            $deletedClause = $hasDeletedAt ? "AND deleted_at IS NULL" : "";
+
             // Get total expenses and income
             $sql = "
                 SELECT 
@@ -39,6 +49,7 @@ class ExpenseAnalyticsController {
                 FROM transactions
                 WHERE user_id = :user_id 
                 AND transaction_date >= :start_date
+                " . $deletedClause . "
                 " . $statusClause . "
             ";
             $stmt = $db->prepare($sql);
@@ -78,6 +89,7 @@ class ExpenseAnalyticsController {
                     WHERE t.user_id = :user_id 
                     AND t.transaction_date >= :start_date
                     AND t.transaction_type = 'debit'
+                    " . $deletedClause . "
                     " . $statusClause . "
                     GROUP BY COALESCE(c.id, 0), COALESCE(c.name, 'Uncategorized'), COALESCE(c.color, '#9E9E9E'), COALESCE(c.icon, 'help-circle-outline')
                     ORDER BY amount DESC
@@ -101,6 +113,7 @@ class ExpenseAnalyticsController {
                     WHERE t.user_id = :user_id
                     AND t.transaction_date >= :start_date
                     AND t.transaction_type = 'debit'
+                    " . $deletedClause . "
                     " . $statusClause . "
                     LIMIT 10
                 ";
@@ -125,6 +138,7 @@ class ExpenseAnalyticsController {
                 FROM transactions
                 WHERE user_id = :user_id 
                 AND transaction_date >= :start_date
+                " . $deletedClause . "
                 " . $statusClause . "
                 GROUP BY DATE_FORMAT(transaction_date, '%Y-%m')
                 ORDER BY month ASC
