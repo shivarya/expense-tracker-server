@@ -65,6 +65,13 @@ try {
     ], 'Expense Tracker API is running');
   }
 
+  // Widget summary
+  if (strpos($requestUri, '/widget') === 0) {
+    require_once __DIR__ . '/controllers/widgetController.php';
+    handleWidgetRoutes($requestUri, $requestMethod);
+    exit;
+  }
+
   // Dashboard
   if (strpos($requestUri, '/dashboard') === 0) {
     require_once __DIR__ . '/controllers/dashboardController.php';
