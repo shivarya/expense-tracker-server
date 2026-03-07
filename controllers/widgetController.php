@@ -20,6 +20,7 @@ function getWidgetSummary($userId)
     $monthStart = (new DateTime('first day of this month'))->format('Y-m-d');
     $nextMonthStart = (new DateTime('first day of next month'))->format('Y-m-d');
     $previousMonthStart = (new DateTime('first day of last month'))->format('Y-m-d');
+    $seriesStart = (new DateTime('first day of -5 months'))->format('Y-m-d');
 
     $hasStatus = widgetDetectColumn($db, 'transactions', 'status');
     $hasDeletedAt = widgetDetectColumn($db, 'transactions', 'deleted_at');
@@ -62,16 +63,6 @@ function getWidgetSummary($userId)
     ]);
     $previousSpend = (float) (($previousSpendStmt->fetch(PDO::FETCH_ASSOC)['previous_spent'] ?? 0));
 
-    $portfolioStmt = $db->prepare(
-      "SELECT
-          COALESCE(SUM(invested_amount), 0) AS total_invested,
-          COALESCE(SUM(current_value), 0) AS portfolio_value
-       FROM v_asset_summary
-       WHERE user_id = :user_id"
-    );
-    $portfolioStmt->execute([':user_id' => $userId]);
-    $portfolio = $portfolioStmt->fetch(PDO::FETCH_ASSOC) ?: [];
-
     $topCategoriesStmt = $db->prepare(
       "SELECT
           COALESCE(c.name, 'Uncategorized') AS name,
@@ -99,29 +90,32 @@ function getWidgetSummary($userId)
     $topCategoriesRows = $topCategoriesStmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
     $topCategories = array_map('widgetMapCategorySummary', $topCategoriesRows);
 
-    $upcomingEmiStmt = $db->prepare(
-      "SELECT loan_name, emi_amount, next_payment_date, bank, remaining_months
-       FROM emis
+    $monthlySeriesStmt = $db->prepare(
+      "SELECT
+          DATE_FORMAT(transaction_date, '%Y-%m') AS month_key,
+          COALESCE(SUM(amount), 0) AS amount
+       FROM transactions
        WHERE user_id = :user_id
-         AND status = 'active'
-         AND next_payment_date >= CURDATE()
-         AND next_payment_date <= DATE_ADD(CURDATE(), INTERVAL 30 DAY)
-       ORDER BY next_payment_date ASC
-       LIMIT 1"
+         AND transaction_type = 'debit'
+         AND transaction_date >= :series_start
+         AND transaction_date < :next_month_start
+         {$deletedClause}
+         {$statusClause}
+       GROUP BY DATE_FORMAT(transaction_date, '%Y-%m')
+       ORDER BY month_key ASC"
     );
-    $upcomingEmiStmt->execute([':user_id' => $userId]);
-    $upcomingEmi = $upcomingEmiStmt->fetch(PDO::FETCH_ASSOC) ?: null;
+    $monthlySeriesStmt->execute([
+      ':user_id' => $userId,
+      ':series_start' => $seriesStart,
+      ':next_month_start' => $nextMonthStart,
+    ]);
+    $monthlySeriesRows = $monthlySeriesStmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
+    $monthlySpendSeries = widgetBuildMonthlySpendSeries($seriesStart, $monthlySeriesRows);
 
     $monthSpent = (float) ($monthTotals['month_spent'] ?? 0);
     $monthIncome = (float) ($monthTotals['month_income'] ?? 0);
     $transactionCount = (int) ($monthTotals['transaction_count'] ?? 0);
     $monthSavings = $monthIncome - $monthSpent;
-    $portfolioValue = (float) ($portfolio['portfolio_value'] ?? 0);
-    $totalInvested = (float) ($portfolio['total_invested'] ?? 0);
-    $gainLossAmount = $portfolioValue - $totalInvested;
-    $gainLossPercent = $totalInvested > 0
-      ? round(($gainLossAmount / $totalInvested) * 100, 2)
-      : 0.0;
     $amountChange = $monthSpent - $previousSpend;
     $trendPercentage = $previousSpend > 0
       ? round(($amountChange / $previousSpend) * 100, 2)
@@ -138,10 +132,6 @@ function getWidgetSummary($userId)
       'month_spent' => round($monthSpent, 2),
       'month_income' => round($monthIncome, 2),
       'month_savings' => round($monthSavings, 2),
-      'portfolio_value' => round($portfolioValue, 2),
-      'total_invested' => round($totalInvested, 2),
-      'gain_loss_amount' => round($gainLossAmount, 2),
-      'gain_loss_percent' => $gainLossPercent,
       'transaction_count' => $transactionCount,
       'trend_vs_last_month' => [
         'percentage' => $trendPercentage,
@@ -151,13 +141,7 @@ function getWidgetSummary($userId)
       ],
       'top_category' => $topCategories[0] ?? null,
       'top_categories' => $topCategories,
-      'upcoming_emi' => $upcomingEmi ? [
-        'loan_name' => $upcomingEmi['loan_name'],
-        'emi_amount' => round((float) $upcomingEmi['emi_amount'], 2),
-        'next_payment_date' => $upcomingEmi['next_payment_date'],
-        'bank' => $upcomingEmi['bank'],
-        'remaining_months' => (int) $upcomingEmi['remaining_months'],
-      ] : null,
+      'monthly_spend_series' => $monthlySpendSeries,
       'updated_at' => (new DateTime('now', new DateTimeZone('UTC')))->format(DateTime::ATOM),
       'currency' => 'INR',
     ], 'Widget summary retrieved successfully');
@@ -187,4 +171,28 @@ function widgetMapCategorySummary($row)
     'count' => (int) ($row['count'] ?? 0),
     'amount' => round((float) ($row['amount'] ?? 0), 2),
   ];
+}
+
+function widgetBuildMonthlySpendSeries($seriesStart, $rows)
+{
+  $amountByMonth = [];
+  foreach ($rows as $row) {
+    $amountByMonth[$row['month_key']] = round((float) ($row['amount'] ?? 0), 2);
+  }
+
+  $series = [];
+  $cursor = new DateTime($seriesStart);
+  $end = new DateTime('first day of next month');
+
+  while ($cursor < $end) {
+    $key = $cursor->format('Y-m');
+    $series[] = [
+      'key' => $key,
+      'label' => strtoupper($cursor->format('M')),
+      'amount' => $amountByMonth[$key] ?? 0.0,
+    ];
+    $cursor->modify('+1 month');
+  }
+
+  return $series;
 }
