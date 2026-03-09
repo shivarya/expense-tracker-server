@@ -510,31 +510,39 @@ function syncFixedDeposits($userId)
 
         if ($existing) {
           $sql = "UPDATE fixed_deposits SET 
-                    principal_amount = ?, maturity_date = ?, maturity_value = ?, status = ?
+                    account_number = ?, principal_amount = ?, interest_rate = ?, tenure_months = ?,
+                    start_date = ?, maturity_date = ?, maturity_value = ?, status = ?, auto_renewal = ?
                   WHERE id = ?";
           $db->execute($sql, [
-            $fd['principal_amount'],
-            $fd['maturity_date'],
-            $fd['maturity_value'],
-            $fd['status'] ?? 'active',
-            $existing['id']
-          ]);
-          $updated++;
-        } else {
-          $sql = "INSERT INTO fixed_deposits (user_id, bank, fd_number, principal_amount, interest_rate,
-                    tenure_months, start_date, maturity_date, maturity_value, status)
-                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
-          $db->insert($sql, [
-            $userId,
-            $fd['bank'],
-            $fd['fd_number'],
+            $fd['account_number'] ?? null,
             $fd['principal_amount'],
             $fd['interest_rate'],
             $fd['tenure_months'],
             $fd['start_date'],
             $fd['maturity_date'],
             $fd['maturity_value'],
-            $fd['status'] ?? 'active'
+            $fd['status'] ?? 'active',
+            $fd['auto_renewal'] ?? false,
+            $existing['id']
+          ]);
+          $updated++;
+        } else {
+          $sql = "INSERT INTO fixed_deposits (user_id, bank, fd_number, account_number, principal_amount, interest_rate,
+                    tenure_months, start_date, maturity_date, maturity_value, status, auto_renewal)
+                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+          $db->insert($sql, [
+            $userId,
+            $fd['bank'],
+            $fd['fd_number'],
+            $fd['account_number'] ?? null,
+            $fd['principal_amount'],
+            $fd['interest_rate'],
+            $fd['tenure_months'],
+            $fd['start_date'],
+            $fd['maturity_date'],
+            $fd['maturity_value'],
+            $fd['status'] ?? 'active',
+            $fd['auto_renewal'] ?? false
           ]);
           $created++;
         }
