@@ -277,6 +277,23 @@ Runtime matching uses DB table `category_learning_rules` (per user) and this mar
 <!-- AUTO_LEARNED_MAPPINGS_START -->
 | User | Pattern | Category ID | Category Name | Uses | Last Updated |
 |---|---|---:|---|---:|---|
-| - | - | - | - | - | - |
+| 1 | nallola munemma | 2 | Transportation | 1 | 2026-03-08 21:17:50 |
+| 1 | jyothi | 9 | Groceries | 1 | 2026-03-08 21:17:31 |
+| 1 | the arun | 9 | Groceries | 1 | 2026-03-08 21:17:00 |
+| 1 | credpaya | 12 | Personal Care | 1 | 2026-03-08 21:15:57 |
+| 1 | sathya | 6 | Healthcare | 3 | 2026-03-08 21:15:38 |
+| 1 | cred | 5 | Bills & Utilities | 1 | 2026-03-08 21:13:23 |
+| 1 | deepak kumar | 1 | Food & Dining | 1 | 2026-03-07 09:22:57 |
+| 1 | vivek kumar rai | 1 | Food & Dining | 1 | 2026-03-07 09:22:50 |
+| 1 | hemanth singh | 53 | Kids Activities | 1 | 2026-03-07 09:22:05 |
+| 1 | district | 1 | Food & Dining | 1 | 2026-03-07 09:21:36 |
+| 1 | vijiyamm | 9 | Groceries | 1 | 2026-03-06 21:49:09 |
+| 1 | piku sukanya | 13 | Investments | 1 | 2026-03-06 10:42:08 |
+| 1 | raja kumar sahu | 9 | Groceries | 1 | 2026-03-06 10:41:16 |
+| 1 | kamala devi | 56 | Home Improvement | 1 | 2026-03-06 10:40:48 |
+| 1 | rajashekar | 52 | Household Help | 1 | 2026-03-05 22:56:06 |
+| 1 | rajnish kumar singh | 55 | Donation | 1 | 2026-03-05 22:55:53 |
+| 1 | mr anand kumar | 2 | Transportation | 1 | 2026-03-05 22:55:42 |
+| 1 | kolar | 9 | Groceries | 1 | 2026-03-05 22:54:47 |
 <!-- AUTO_LEARNED_MAPPINGS_END -->
 
