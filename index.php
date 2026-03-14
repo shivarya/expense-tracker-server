@@ -129,6 +129,13 @@ try {
     exit;
   }
 
+  // Transaction groups
+  if (strpos($requestUri, '/groups') === 0) {
+    require_once __DIR__ . '/controllers/groupController.php';
+    handleGroupRoutes($requestUri, $requestMethod);
+    exit;
+  }
+
   // Sync endpoints (for scraper to push data)
   if (strpos($requestUri, '/sync') === 0) {
     require_once __DIR__ . '/controllers/syncController.php';

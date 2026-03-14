@@ -1,6 +1,7 @@
 <?php
 
 require_once __DIR__ . '/../utils/categoryLearning.php';
+require_once __DIR__ . '/groupController.php';
 
 function handleTransactionRoutes($uri, $method)
 {
@@ -33,8 +34,20 @@ function getTransactions($userId)
     $endDate = $_GET['end_date'] ?? date('Y-m-t');     // Last day of current month
     $accountId = $_GET['account_id'] ?? null;
     $categoryId = $_GET['category_id'] ?? null;
+    $groupId = isset($_GET['group_id']) ? (int)$_GET['group_id'] : null;
     $type = $_GET['type'] ?? null;
     $limit = $_GET['limit'] ?? 100;
+
+    if ($groupId) {
+      $group = $db->fetchOne(
+        "SELECT id FROM transaction_groups WHERE id = ? AND user_id = ?",
+        [$groupId, $userId]
+      );
+
+      if (!$group) {
+        Response::error('Invalid group_id', 422);
+      }
+    }
 
     $params = [$userId];
     $sql = "SELECT t.*, c.name as category_name, c.color as category_color, c.icon as category_icon,
@@ -65,19 +78,45 @@ function getTransactions($userId)
       $params[] = $type;
     }
 
+    $sql .= buildGroupFilterSql($groupId, $params, 't');
+
     $sql .= " ORDER BY t.transaction_date DESC LIMIT ?";
     $params[] = (int)$limit;
 
     $transactions = $db->fetchAll($sql, $params);
 
     // Get summary
+    $summaryParams = [$userId];
     $summarySQL = "SELECT 
-                    SUM(CASE WHEN transaction_type = 'debit' THEN amount ELSE 0 END) as total_debit,
-                    SUM(CASE WHEN transaction_type = 'credit' THEN amount ELSE 0 END) as total_credit,
+                    SUM(CASE WHEN t.transaction_type = 'debit' THEN t.amount ELSE 0 END) as total_debit,
+                    SUM(CASE WHEN t.transaction_type = 'credit' THEN t.amount ELSE 0 END) as total_credit,
                     COUNT(*) as total_count
-                   FROM transactions
-                   WHERE user_id = ? AND deleted_at IS NULL AND transaction_date BETWEEN ? AND ?";
-    $summaryParams = [$userId, $startDate, $endDate . ' 23:59:59'];
+                   FROM transactions t
+                   WHERE t.user_id = ? AND t.deleted_at IS NULL";
+
+    if ($startDate) {
+      $summarySQL .= " AND t.transaction_date >= ?";
+      $summaryParams[] = $startDate;
+    }
+    if ($endDate) {
+      $summarySQL .= " AND t.transaction_date <= ?";
+      $summaryParams[] = $endDate . ' 23:59:59';
+    }
+    if ($accountId) {
+      $summarySQL .= " AND t.account_id = ?";
+      $summaryParams[] = $accountId;
+    }
+    if ($categoryId) {
+      $summarySQL .= " AND t.category_id = ?";
+      $summaryParams[] = $categoryId;
+    }
+    if ($type) {
+      $summarySQL .= " AND t.transaction_type = ?";
+      $summaryParams[] = $type;
+    }
+
+    $summarySQL .= buildGroupFilterSql($groupId, $summaryParams, 't');
+
     $summary = $db->fetchOne($summarySQL, $summaryParams);
 
     Response::success([

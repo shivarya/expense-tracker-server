@@ -1,7 +1,47 @@
 <?php
 
+function normalizeAccountType($rawType) {
+  $value = strtolower(trim((string)$rawType));
+  if ($value === 'credit_card' || $value === 'credit card' || $value === 'card') {
+    return 'credit_card';
+  }
+  if ($value === 'current') {
+    return 'current';
+  }
+  return 'savings';
+}
+
+function detectAccountTypeAndCardLastFour($txn) {
+  $sourceData = isset($txn['source_data']) && is_array($txn['source_data']) ? $txn['source_data'] : [];
+
+  $accountType = normalizeAccountType($txn['account_type'] ?? '');
+  $paymentMethod = strtolower((string)($txn['payment_method'] ?? ''));
+
+  if ($accountType !== 'credit_card') {
+    if (
+      str_contains($paymentMethod, 'card') ||
+      isset($sourceData['card_last4']) ||
+      isset($sourceData['card_last_four']) ||
+      isset($sourceData['card_type'])
+    ) {
+      $accountType = 'credit_card';
+    }
+  }
+
+  $cardLastFour = null;
+  if ($accountType === 'credit_card') {
+    $candidate = $sourceData['card_last4'] ?? $sourceData['card_last_four'] ?? $txn['card_last_four'] ?? $txn['account_number'] ?? '';
+    $digits = preg_replace('/\D+/', '', (string)$candidate);
+    if (!empty($digits)) {
+      $cardLastFour = substr($digits, -4);
+    }
+  }
+
+  return [$accountType, $cardLastFour];
+}
+
 // Helper function to get or create bank account
-function getOrCreateBankAccount($db, $userId, $bankName, $accountNumber) {
+function getOrCreateBankAccount($db, $userId, $bankName, $accountNumber, $accountType = 'savings', $cardLastFour = null) {
   // Normalize bank name to enum value
   $bankMap = [
     'HDFC Bank' => 'hdfc',
@@ -28,25 +68,47 @@ function getOrCreateBankAccount($db, $userId, $bankName, $accountNumber) {
     $cleanAccountNumber = 'AUTO_' . substr(md5($bankName . $accountNumber), 0, 10);
   }
   
+  $accountType = normalizeAccountType($accountType);
+  $lastFour = substr($cleanAccountNumber, -4);
+
   // Check if account exists
-  $existing = $db->fetchOne(
-    "SELECT id FROM bank_accounts WHERE user_id = ? AND bank = ? AND account_number LIKE ?",
-    [$userId, $bank, '%' . substr($cleanAccountNumber, -4)]
-  );
+  if ($accountType === 'credit_card' && $cardLastFour) {
+    $existing = $db->fetchOne(
+      "SELECT id, card_last_four
+       FROM bank_accounts
+       WHERE user_id = ? AND bank = ? AND account_type = 'credit_card'
+         AND (card_last_four = ? OR account_number LIKE ?)",
+      [$userId, $bank, $cardLastFour, '%' . $cardLastFour]
+    );
+  } else {
+    $existing = $db->fetchOne(
+      "SELECT id, card_last_four
+       FROM bank_accounts
+       WHERE user_id = ? AND bank = ? AND account_type = ? AND account_number LIKE ?",
+      [$userId, $bank, $accountType, '%' . $lastFour]
+    );
+  }
   
   if ($existing) {
+    if ($accountType === 'credit_card' && $cardLastFour && empty($existing['card_last_four'])) {
+      $db->execute(
+        "UPDATE bank_accounts SET card_last_four = ? WHERE id = ?",
+        [$cardLastFour, $existing['id']]
+      );
+    }
     return $existing['id'];
   }
   
   // Create new account
-  $sql = "INSERT INTO bank_accounts (user_id, bank, account_type, account_number, account_name, status)
-          VALUES (?, ?, ?, ?, ?, ?)";
+  $sql = "INSERT INTO bank_accounts (user_id, bank, account_type, account_number, account_name, card_last_four, status)
+          VALUES (?, ?, ?, ?, ?, ?, ?)";
   return $db->insert($sql, [
     $userId,
     $bank,
-    'savings',
+    $accountType,
     $cleanAccountNumber,
-    $bankName . ' Account',
+    $bankName . ($accountType === 'credit_card' ? ' Card' : ' Account'),
+    $accountType === 'credit_card' ? $cardLastFour : null,
     'active'
   ]);
 }
@@ -396,8 +458,16 @@ function syncTransactions($userId)
           }
         }
 
-        // Get or create bank account
-        $accountId = getOrCreateBankAccount($db, $userId, $txn['bank'], $txn['account_number']);
+        // Get or create bank account with account type/card metadata when available.
+        [$accountType, $cardLastFour] = detectAccountTypeAndCardLastFour($txn);
+        $accountId = getOrCreateBankAccount(
+          $db,
+          $userId,
+          $txn['bank'],
+          $txn['account_number'],
+          $accountType,
+          $cardLastFour
+        );
         
         // Get or create category
         $categoryId = getOrCreateCategory($db, $userId, $txn['category'], $txn['transaction_type']);

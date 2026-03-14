@@ -98,8 +98,8 @@ class SMSParserController {
             $insertQuery = "
                 INSERT INTO transactions (
                     user_id, account_id, category_id, transaction_type, 
-                    amount, merchant, description, transaction_date, reference_number, source
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'sms')
+                    amount, merchant, description, transaction_date, reference_number, payment_method, source
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'sms')
             ";
 
             try {
@@ -112,7 +112,8 @@ class SMSParserController {
                     $transaction['merchant'] ?? null,
                     $transaction['merchant'] ?? 'SMS Transaction',
                     $transaction['date'] ?? date('Y-m-d H:i:s'),
-                    $transaction['reference_number'] ?? null
+                    $transaction['reference_number'] ?? null,
+                    $transaction['payment_method'] ?? null,
                 ]);
                 $savedCount++;
 
@@ -235,8 +236,8 @@ class SMSParserController {
         $insertQuery = "
             INSERT INTO transactions (
                 user_id, account_id, category_id, transaction_type, 
-                amount, merchant, description, transaction_date, reference_number, source
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'sms_webhook')
+                amount, merchant, description, transaction_date, reference_number, payment_method, source
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'sms_webhook')
         ";
 
         $this->db->execute($insertQuery, [
@@ -248,7 +249,8 @@ class SMSParserController {
             $transaction['merchant'] ?? null,
             $transaction['merchant'] ?? 'SMS Transaction',
             $transaction['date'] ?? $date,
-            $transaction['reference_number'] ?? null
+            $transaction['reference_number'] ?? null,
+            $transaction['payment_method'] ?? null,
         ]);
 
         $txnType = strtolower((string)($transaction['transaction_type'] ?? 'debit'));
@@ -353,6 +355,8 @@ class SMSParserController {
     private function getOrCreateBankAccount(int $userId, array $transaction): int {
         $bankName = strtolower($transaction['bank'] ?? 'other');
         $accountNumber = $transaction['account_number'] ?? '0000';
+        $accountType = $this->inferAccountType($transaction);
+        $cardLastFour = $this->inferCardLastFour($transaction);
 
         // Map bank names to enum values
         $bankMap = [
@@ -373,19 +377,64 @@ class SMSParserController {
         
         $bank = $bankMap[$bankName] ?? 'other';
 
-        // Check if account exists
-        $query = "SELECT id FROM bank_accounts WHERE user_id = ? AND bank = ? AND account_number LIKE ?";
-        $existing = $this->db->fetchAll($query, [$userId, $bank, "%$accountNumber%"]);
+        // Check if account exists (same bank + same account type)
+        if ($accountType === 'credit_card' && $cardLastFour) {
+            $query = "SELECT id, card_last_four
+                      FROM bank_accounts
+                      WHERE user_id = ? AND bank = ? AND account_type = 'credit_card'
+                        AND (card_last_four = ? OR account_number LIKE ?)";
+            $existing = $this->db->fetchAll($query, [$userId, $bank, $cardLastFour, "%$cardLastFour%"]);
+        } else {
+            $query = "SELECT id, card_last_four
+                      FROM bank_accounts
+                      WHERE user_id = ? AND bank = ? AND account_type = ? AND account_number LIKE ?";
+            $existing = $this->db->fetchAll($query, [$userId, $bank, $accountType, "%$accountNumber%"]);
+        }
 
         if (!empty($existing)) {
+            if ($accountType === 'credit_card' && $cardLastFour && empty($existing[0]['card_last_four'])) {
+                $this->db->execute(
+                    "UPDATE bank_accounts SET card_last_four = ? WHERE id = ?",
+                    [$cardLastFour, $existing[0]['id']]
+                );
+            }
             return $existing[0]['id'];
         }
 
         // Create new account
-        $fullAccountNumber = 'XXXX' . str_pad($accountNumber, 4, '0', STR_PAD_LEFT);
+        $digits = preg_replace('/\D+/', '', (string)$accountNumber);
+        $lastFour = substr($digits, -4);
+        $fullAccountNumber = 'XXXX' . str_pad($lastFour ?: $accountNumber, 4, '0', STR_PAD_LEFT);
         return $this->db->insert(
-            "INSERT INTO bank_accounts (user_id, bank, account_number, account_type, balance) VALUES (?, ?, ?, 'savings', 0)",
-            [$userId, $bank, $fullAccountNumber]
+            "INSERT INTO bank_accounts (user_id, bank, account_number, account_type, card_last_four, balance) VALUES (?, ?, ?, ?, ?, 0)",
+            [$userId, $bank, $fullAccountNumber, $accountType, $accountType === 'credit_card' ? $cardLastFour : null]
         );
+    }
+
+    private function inferAccountType(array $transaction): string {
+        $explicit = strtolower(trim((string)($transaction['account_type'] ?? '')));
+        if (in_array($explicit, ['credit_card', 'credit card', 'card'], true)) {
+            return 'credit_card';
+        }
+        if ($explicit === 'current') {
+            return 'current';
+        }
+
+        $paymentMethod = strtolower(trim((string)($transaction['payment_method'] ?? '')));
+        if (str_contains($paymentMethod, 'card')) {
+            return 'credit_card';
+        }
+
+        return 'savings';
+    }
+
+    private function inferCardLastFour(array $transaction): ?string {
+        $candidate = (string)($transaction['card_last_four'] ?? $transaction['account_number'] ?? '');
+        $digits = preg_replace('/\D+/', '', $candidate);
+        if (empty($digits)) {
+            return null;
+        }
+
+        return substr($digits, -4);
     }
 }
