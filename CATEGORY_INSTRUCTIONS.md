@@ -277,6 +277,10 @@ Runtime matching uses DB table `category_learning_rules` (per user) and this mar
 <!-- AUTO_LEARNED_MAPPINGS_START -->
 | User | Pattern | Category ID | Category Name | Uses | Last Updated |
 |---|---|---:|---|---:|---|
+| 1 | nagalakshmi | 55 | Donation | 1 | 2026-03-11 09:14:58 |
+| 1 | kumara | 2 | Transportation | 1 | 2026-03-11 09:13:09 |
+| 1 | kanti | 1 | Food & Dining | 1 | 2026-03-11 09:09:26 |
+| 1 | ramaling dundappa belakud | 2 | Transportation | 1 | 2026-03-11 09:09:22 |
 | 1 | nallola munemma | 2 | Transportation | 1 | 2026-03-08 21:17:50 |
 | 1 | jyothi | 9 | Groceries | 1 | 2026-03-08 21:17:31 |
 | 1 | the arun | 9 | Groceries | 1 | 2026-03-08 21:17:00 |
