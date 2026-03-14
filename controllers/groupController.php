@@ -34,6 +34,75 @@ function getAllowedGroupRuleTypes()
   ];
 }
 
+function getDefaultPresetGroupDefinitions()
+{
+  return [
+    [
+      'name' => 'Credit Cards',
+      'description' => 'All transactions that look like credit card spends or credits.',
+      'icon' => 'card-outline',
+      'color' => '#EF5350',
+      'rules' => [
+        ['rule_type' => 'account_type', 'rule_value' => 'credit_card'],
+        ['rule_type' => 'payment_method_keyword', 'rule_value' => 'card'],
+        ['rule_type' => 'payment_method_keyword', 'rule_value' => 'credit'],
+      ],
+    ],
+    [
+      'name' => 'Home',
+      'description' => 'Rent, utilities and home-related spends.',
+      'icon' => 'home-outline',
+      'color' => '#42A5F5',
+      'rules' => [
+        ['rule_type' => 'merchant_keyword', 'rule_value' => 'rent'],
+        ['rule_type' => 'merchant_keyword', 'rule_value' => 'electricity'],
+        ['rule_type' => 'merchant_keyword', 'rule_value' => 'maintenance'],
+        ['rule_type' => 'merchant_keyword', 'rule_value' => 'gas'],
+      ],
+    ],
+    [
+      'name' => 'Travel',
+      'description' => 'Flights, trains, cabs and hotels.',
+      'icon' => 'airplane-outline',
+      'color' => '#26A69A',
+      'rules' => [
+        ['rule_type' => 'merchant_keyword', 'rule_value' => 'uber'],
+        ['rule_type' => 'merchant_keyword', 'rule_value' => 'ola'],
+        ['rule_type' => 'merchant_keyword', 'rule_value' => 'irctc'],
+        ['rule_type' => 'merchant_keyword', 'rule_value' => 'hotel'],
+        ['rule_type' => 'merchant_keyword', 'rule_value' => 'flight'],
+      ],
+    ],
+  ];
+}
+
+function seedDefaultTransactionGroups($db, $userId)
+{
+  $existingCount = $db->fetchOne(
+    "SELECT COUNT(*) as total FROM transaction_groups WHERE user_id = ?",
+    [$userId]
+  );
+
+  if ((int)($existingCount['total'] ?? 0) > 0) {
+    return;
+  }
+
+  foreach (getDefaultPresetGroupDefinitions() as $preset) {
+    $groupId = $db->insert(
+      "INSERT INTO transaction_groups (user_id, name, description, icon, color, is_preset)
+       VALUES (?, ?, ?, ?, ?, 1)",
+      [$userId, $preset['name'], $preset['description'], $preset['icon'], $preset['color']]
+    );
+
+    foreach (normalizeGroupRules($preset['rules']) as $rule) {
+      $db->insert(
+        "INSERT INTO transaction_group_rules (group_id, rule_type, rule_value) VALUES (?, ?, ?)",
+        [$groupId, $rule['rule_type'], $rule['rule_value']]
+      );
+    }
+  }
+}
+
 function normalizeGroupRules(array $rules)
 {
   $normalized = [];
@@ -150,6 +219,9 @@ function getTransactionGroups($userId)
 {
   try {
     $db = getDB();
+
+    // First-time experience: seed editable presets when user has zero groups.
+    seedDefaultTransactionGroups($db, $userId);
 
     $groups = $db->fetchAll(
       "SELECT g.*, (
@@ -313,51 +385,12 @@ function createTransactionGroupPresets($userId)
   try {
     $db = getDB();
 
-    $presetDefs = [
-      [
-        'name' => 'Credit Cards',
-        'description' => 'All transactions that look like credit card spends or credits.',
-        'icon' => 'card-outline',
-        'color' => '#EF5350',
-        'rules' => [
-          ['rule_type' => 'account_type', 'rule_value' => 'credit_card'],
-          ['rule_type' => 'payment_method_keyword', 'rule_value' => 'card'],
-          ['rule_type' => 'payment_method_keyword', 'rule_value' => 'credit'],
-        ],
-      ],
-      [
-        'name' => 'Home',
-        'description' => 'Rent, utilities and home-related spends.',
-        'icon' => 'home-outline',
-        'color' => '#42A5F5',
-        'rules' => [
-          ['rule_type' => 'merchant_keyword', 'rule_value' => 'rent'],
-          ['rule_type' => 'merchant_keyword', 'rule_value' => 'electricity'],
-          ['rule_type' => 'merchant_keyword', 'rule_value' => 'maintenance'],
-          ['rule_type' => 'merchant_keyword', 'rule_value' => 'gas'],
-        ],
-      ],
-      [
-        'name' => 'Travel',
-        'description' => 'Flights, trains, cabs and hotels.',
-        'icon' => 'airplane-outline',
-        'color' => '#26A69A',
-        'rules' => [
-          ['rule_type' => 'merchant_keyword', 'rule_value' => 'uber'],
-          ['rule_type' => 'merchant_keyword', 'rule_value' => 'ola'],
-          ['rule_type' => 'merchant_keyword', 'rule_value' => 'irctc'],
-          ['rule_type' => 'merchant_keyword', 'rule_value' => 'hotel'],
-          ['rule_type' => 'merchant_keyword', 'rule_value' => 'flight'],
-        ],
-      ],
-    ];
-
     $created = 0;
     $skipped = 0;
 
     $db->beginTransaction();
 
-    foreach ($presetDefs as $preset) {
+    foreach (getDefaultPresetGroupDefinitions() as $preset) {
       $exists = $db->fetchOne(
         "SELECT id FROM transaction_groups WHERE user_id = ? AND name = ?",
         [$userId, $preset['name']]
