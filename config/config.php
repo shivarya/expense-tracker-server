@@ -23,6 +23,9 @@ define('DB_PASS', getenv('DB_PASS') ?: '');
 define('JWT_SECRET', getenv('JWT_SECRET') ?: 'your-secret-key-change-in-production');
 define('JWT_EXPIRES_IN', 30 * 24 * 60 * 60); // 30 days in seconds
 
+// Statement password vault encryption key
+define('STATEMENT_PASSWORD_KEY', getenv('STATEMENT_PASSWORD_KEY') ?: JWT_SECRET);
+
 // Google OAuth configuration (for future multi-user support)
 define('GOOGLE_CLIENT_ID', getenv('GOOGLE_CLIENT_ID') ?: '');
 define('GOOGLE_CLIENT_SECRET', getenv('GOOGLE_CLIENT_SECRET') ?: '');

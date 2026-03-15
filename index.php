@@ -143,6 +143,13 @@ try {
     exit;
   }
 
+  // Statement password + statement PDF upload endpoints
+  if (strpos($requestUri, '/statements') === 0) {
+    require_once __DIR__ . '/controllers/statementsController.php';
+    handleStatementRoutes($requestUri, $requestMethod);
+    exit;
+  }
+
   // Summary endpoints (for MCP server)
   if (strpos($requestUri, '/summary') === 0) {
     require_once __DIR__ . '/controllers/summaryController.php';

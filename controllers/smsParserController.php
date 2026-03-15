@@ -3,6 +3,7 @@
 require_once __DIR__ . '/../utils/response.php';
 require_once __DIR__ . '/../utils/jwt.php';
 require_once __DIR__ . '/../utils/azureOpenAI.php';
+require_once __DIR__ . '/../utils/transactionDuplicateDetector.php';
 require_once __DIR__ . '/../utils/categoryResolver.php';
 require_once __DIR__ . '/../utils/categoryLearning.php';
 require_once __DIR__ . '/../config/database.php';
@@ -10,10 +11,12 @@ require_once __DIR__ . '/../config/database.php';
 class SMSParserController {
     private Database $db;
     private AzureOpenAI $ai;
+    private TransactionDuplicateDetector $duplicateDetector;
 
     public function __construct() {
         $this->db = Database::getInstance();
         $this->ai = new AzureOpenAI();
+        $this->duplicateDetector = new TransactionDuplicateDetector($this->db->getConnection(), $this->ai);
     }
 
     /**
@@ -74,17 +77,31 @@ class SMSParserController {
         // Save transactions to database
         $savedCount = 0;
         $skippedCount = 0;
+        $flaggedPossibleCount = 0;
+        $aiCheckedCount = 0;
+        $fallbackUsedCount = 0;
         $savedDebitCount = 0;
         $savedCreditCount = 0;
         $savedDebitAmount = 0.0;
         $savedCreditAmount = 0.0;
 
         foreach ($transactions as $transaction) {
-            $isDuplicate = $this->isDuplicateTransaction($userId, $transaction);
+            $duplicateCheck = $this->evaluateDuplicateTransaction($userId, $transaction, null, true);
 
-            if ($isDuplicate) {
+            if (!empty($duplicateCheck['ai_used'])) {
+                $aiCheckedCount++;
+            }
+            if (!empty($duplicateCheck['fallback_used'])) {
+                $fallbackUsedCount++;
+            }
+
+            if (!empty($duplicateCheck['should_skip'])) {
                 $skippedCount++;
                 continue; // Skip duplicate
+            }
+
+            if (!empty($duplicateCheck['possible_duplicate'])) {
+                $flaggedPossibleCount++;
             }
 
             // Get or create bank account
@@ -98,8 +115,8 @@ class SMSParserController {
             $insertQuery = "
                 INSERT INTO transactions (
                     user_id, account_id, category_id, transaction_type, 
-                    amount, merchant, description, transaction_date, reference_number, payment_method, source
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'sms')
+                    amount, merchant, description, transaction_date, reference_number, payment_method, source, duplicate_score
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'sms', ?)
             ";
 
             try {
@@ -114,6 +131,7 @@ class SMSParserController {
                     $transaction['date'] ?? date('Y-m-d H:i:s'),
                     $transaction['reference_number'] ?? null,
                     $transaction['payment_method'] ?? null,
+                    (int)($duplicateCheck['confidence'] ?? 0),
                 ]);
                 $savedCount++;
 
@@ -157,6 +175,10 @@ class SMSParserController {
             'parsed_transactions' => count($transactions),
             'saved_transactions' => $savedCount,
             'skipped_duplicates' => $skippedCount,
+            'skipped_high_confidence' => $skippedCount,
+            'flagged_possible_duplicates' => $flaggedPossibleCount,
+            'ai_checked_transactions' => $aiCheckedCount,
+            'duplicate_fallback_used' => $fallbackUsedCount,
             'saved_debit_count' => $savedDebitCount,
             'saved_credit_count' => $savedCreditCount,
             'saved_debit_amount' => round($savedDebitAmount, 2),
@@ -213,13 +235,15 @@ class SMSParserController {
         // Save transaction
         $transaction = $transactions[0];
 
-        $isDuplicate = $this->isDuplicateTransaction($userId, $transaction);
-        if ($isDuplicate) {
+        $duplicateCheck = $this->evaluateDuplicateTransaction($userId, $transaction, null, true);
+        if (!empty($duplicateCheck['should_skip'])) {
             Response::success([
                 'message' => 'Duplicate transaction skipped',
                 'processed' => true,
                 'saved' => false,
                 'duplicate' => true,
+                'duplicate_confidence' => (int)($duplicateCheck['confidence'] ?? 0),
+                'duplicate_reason' => $duplicateCheck['reason'] ?? 'unknown',
                 'saved_transactions' => 0,
                 'saved_debit_count' => 0,
                 'saved_credit_count' => 0,
@@ -236,8 +260,8 @@ class SMSParserController {
         $insertQuery = "
             INSERT INTO transactions (
                 user_id, account_id, category_id, transaction_type, 
-                amount, merchant, description, transaction_date, reference_number, payment_method, source
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'sms_webhook')
+                amount, merchant, description, transaction_date, reference_number, payment_method, source, duplicate_score
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'sms_webhook', ?)
         ";
 
         $this->db->execute($insertQuery, [
@@ -251,6 +275,7 @@ class SMSParserController {
             $transaction['date'] ?? $date,
             $transaction['reference_number'] ?? null,
             $transaction['payment_method'] ?? null,
+            (int)($duplicateCheck['confidence'] ?? 0),
         ]);
 
         $txnType = strtolower((string)($transaction['transaction_type'] ?? 'debit'));
@@ -262,7 +287,9 @@ class SMSParserController {
             'message' => 'SMS processed successfully',
             'processed' => true,
             'saved' => true,
-            'duplicate' => false,
+            'duplicate' => !empty($duplicateCheck['possible_duplicate']),
+            'duplicate_confidence' => (int)($duplicateCheck['confidence'] ?? 0),
+            'duplicate_reason' => $duplicateCheck['reason'] ?? 'new_transaction',
             'saved_transactions' => 1,
             'saved_debit_count' => $savedDebitCount,
             'saved_credit_count' => $savedCreditCount,
@@ -272,48 +299,14 @@ class SMSParserController {
         ]);
     }
 
-    /**
-     * Duplicate check strategy:
-     * 1. Reference number exact match (if available)
-     * 2. Account + amount + timestamp window (+/- 60 min)
-     */
-    private function isDuplicateTransaction(int $userId, array $transaction): bool
+    private function evaluateDuplicateTransaction(int $userId, array $transaction, ?int $accountId = null, bool $useAi = true): array
     {
-        if (!empty($transaction['reference_number'])) {
-            $refCheck = $this->db->fetchAll(
-                "SELECT id FROM transactions WHERE user_id = ? AND reference_number = ? LIMIT 1",
-                [$userId, $transaction['reference_number']]
-            );
-
-            if (count($refCheck) > 0) {
-                error_log("Skipping duplicate (ref number): {$transaction['reference_number']}");
-                return true;
-            }
-        }
-
-        $existingQuery = "
-            SELECT id FROM transactions
-            WHERE user_id = ?
-            AND account_id IN (SELECT id FROM bank_accounts WHERE account_number LIKE ?)
-            AND amount = ?
-            AND ABS(TIMESTAMPDIFF(MINUTE, transaction_date, ?)) < 60
-            LIMIT 1
-        ";
-
-        $accountPattern = '%' . ($transaction['account_number'] ?? '0000');
-        $existing = $this->db->fetchAll($existingQuery, [
-            $userId,
-            $accountPattern,
-            $transaction['amount'] ?? 0,
-            $transaction['date'] ?? date('Y-m-d H:i:s')
+        return $this->duplicateDetector->evaluate($userId, $transaction, [
+            'account_id' => $accountId,
+            'ai_enabled' => $useAi,
+            'skip_threshold' => 76,
+            'duplicate_threshold' => 51,
         ]);
-
-        if (count($existing) > 0) {
-            error_log("Skipping duplicate (amount+date): " . json_encode($transaction));
-            return true;
-        }
-
-        return false;
     }
 
     /**

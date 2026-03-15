@@ -15,12 +15,15 @@
 require_once __DIR__ . '/../config/database.php';
 require_once __DIR__ . '/../utils/response.php';
 require_once __DIR__ . '/../utils/jwt.php';
+require_once __DIR__ . '/../utils/transactionDuplicateDetector.php';
 
 class DuplicateController {
     private $db;
+    private TransactionDuplicateDetector $duplicateDetector;
     
     public function __construct() {
         $this->db = Database::getInstance()->getConnection();
+        $this->duplicateDetector = new TransactionDuplicateDetector($this->db, null);
     }
     
     /**
@@ -120,25 +123,37 @@ class DuplicateController {
 
             foreach ($items as $index => $item) {
                 $matches = [];
+                $isDuplicate = false;
+                $duplicateConfidence = 0;
+                $duplicateReason = null;
 
                 if ($type === 'transactions') {
-                    $matches = $this->previewTransactionMatches($userId, $item);
+                    $evaluation = $this->previewTransactionEvaluation($userId, $item);
+                    $matches = $evaluation['matches'];
+                    $isDuplicate = (bool)$evaluation['is_duplicate'];
+                    $duplicateConfidence = (int)$evaluation['confidence'];
+                    $duplicateReason = $evaluation['reason'];
                 } elseif ($type === 'stocks') {
                     $matches = $this->previewStockMatches($userId, $item);
+                    $isDuplicate = !empty($matches);
                 } elseif ($type === 'mutual_funds') {
                     $matches = $this->previewMutualFundMatches($userId, $item);
+                    $isDuplicate = !empty($matches);
                 } elseif ($type === 'emis') {
                     $matches = $this->previewEmiMatches($userId, $item);
+                    $isDuplicate = !empty($matches);
                 }
 
-                if (!empty($matches)) {
+                if ($isDuplicate) {
                     $duplicateCount++;
                 }
 
                 $results[] = [
                     'index' => $index,
-                    'is_duplicate' => !empty($matches),
+                    'is_duplicate' => $isDuplicate,
                     'match_count' => count($matches),
+                    'duplicate_confidence' => $duplicateConfidence,
+                    'duplicate_reason' => $duplicateReason,
                     'incoming' => $item,
                     'matches' => $matches
                 ];
@@ -159,40 +174,23 @@ class DuplicateController {
     }
 
     private function previewTransactionMatches($userId, $item) {
-        $reference = $item['reference_number'] ?? null;
-        if (!empty($reference)) {
-            $sql = "SELECT id, amount, merchant, description, transaction_date, reference_number
-                    FROM transactions
-                    WHERE user_id = ? AND reference_number = ?
-                    ORDER BY id DESC LIMIT 5";
-            $stmt = $this->db->prepare($sql);
-            $stmt->execute([$userId, $reference]);
-            $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
-            if (!empty($rows)) {
-                return $rows;
-            }
-        }
+        $evaluation = $this->previewTransactionEvaluation($userId, $item);
+        return $evaluation['matches'];
+    }
 
-        $amount = $item['amount'] ?? null;
-        $date = $item['date'] ?? ($item['transaction_date'] ?? null);
-        if ($amount === null || !$date) {
-            return [];
-        }
+    private function previewTransactionEvaluation($userId, $item) {
+        $evaluation = $this->duplicateDetector->evaluate((int)$userId, $item, [
+            'ai_enabled' => false,
+            'skip_threshold' => 76,
+            'duplicate_threshold' => 51,
+        ]);
 
-        $merchant = trim((string)($item['merchant'] ?? ''));
-        $merchantLike = '%' . $merchant . '%';
-
-        $sql = "SELECT id, amount, merchant, description, transaction_date, reference_number
-                FROM transactions
-                WHERE user_id = ?
-                  AND amount = ?
-                  AND DATE(transaction_date) BETWEEN DATE_SUB(DATE(?), INTERVAL 2 DAY) AND DATE_ADD(DATE(?), INTERVAL 2 DAY)
-                  AND (? = '' OR merchant LIKE ?)
-                ORDER BY transaction_date DESC
-                LIMIT 10";
-        $stmt = $this->db->prepare($sql);
-        $stmt->execute([$userId, $amount, $date, $date, $merchant, $merchantLike]);
-        return $stmt->fetchAll(PDO::FETCH_ASSOC);
+        return [
+            'is_duplicate' => (bool)($evaluation['is_duplicate'] ?? false),
+            'confidence' => (int)($evaluation['confidence'] ?? 0),
+            'reason' => $evaluation['reason'] ?? null,
+            'matches' => $evaluation['matches'] ?? [],
+        ];
     }
 
     private function previewStockMatches($userId, $item) {
@@ -280,21 +278,50 @@ class DuplicateController {
     private function findTransactionsDuplicates($userId) {
         $sql = "
             SELECT 
-                t1.id, t1.amount, t1.date, t1.merchant, t1.reference_number,
-                ba.bank_name, ba.account_number,
+                t1.id,
+                t1.amount,
+                t1.transaction_date,
+                t1.transaction_type,
+                t1.merchant,
+                t1.reference_number,
+                ba.bank,
+                ba.account_number,
                 GROUP_CONCAT(t2.id ORDER BY t2.id) as duplicate_ids,
-                COUNT(t2.id) as duplicate_count
+                COUNT(t2.id) as duplicate_count,
+                MAX(
+                    CASE
+                        WHEN t1.reference_number IS NOT NULL
+                             AND t1.reference_number <> ''
+                             AND t1.reference_number = t2.reference_number THEN 100
+                        ELSE 80
+                    END
+                ) as duplicate_confidence
             FROM transactions t1
             JOIN bank_accounts ba ON t1.account_id = ba.id
             JOIN transactions t2 ON 
-                t1.account_id = t2.account_id 
-                AND t1.amount = t2.amount 
-                AND ABS(TIMESTAMPDIFF(MINUTE, t1.date, t2.date)) <= 60
+                t1.user_id = t2.user_id
+                AND t1.account_id = t2.account_id
+                AND t1.transaction_type = t2.transaction_type
+                AND t1.amount = t2.amount
+                AND ABS(TIMESTAMPDIFF(MINUTE, t1.transaction_date, t2.transaction_date)) <= 60
+                AND (
+                    (
+                        t1.reference_number IS NOT NULL
+                        AND t1.reference_number <> ''
+                        AND t1.reference_number = t2.reference_number
+                    )
+                    OR (
+                        NULLIF(TRIM(COALESCE(t1.merchant, '')), '') IS NOT NULL
+                        AND LOWER(TRIM(COALESCE(t1.merchant, ''))) = LOWER(TRIM(COALESCE(t2.merchant, '')))
+                    )
+                )
                 AND t1.id < t2.id
             WHERE t1.user_id = ?
+              AND t1.deleted_at IS NULL
+              AND t2.deleted_at IS NULL
             GROUP BY t1.id
             HAVING duplicate_count > 0
-            ORDER BY t1.date DESC
+            ORDER BY t1.transaction_date DESC
         ";
         
         $stmt = $this->db->prepare($sql);

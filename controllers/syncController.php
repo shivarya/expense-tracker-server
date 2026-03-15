@@ -1,5 +1,8 @@
 <?php
 
+require_once __DIR__ . '/../utils/azureOpenAI.php';
+require_once __DIR__ . '/../utils/transactionDuplicateDetector.php';
+
 function normalizeAccountType($rawType) {
   $value = strtolower(trim((string)$rawType));
   if ($value === 'credit_card' || $value === 'credit card' || $value === 'card') {
@@ -428,6 +431,7 @@ function syncTransactions($userId)
     }
 
     $db = getDB();
+    $duplicateDetector = new TransactionDuplicateDetector($db->getConnection(), new AzureOpenAI());
     
     // Ensure user exists
     $user = $db->fetchOne("SELECT id FROM users WHERE id = ?", [$userId]);
@@ -441,23 +445,14 @@ function syncTransactions($userId)
 
     $created = 0;
     $skipped = 0;
+    $flaggedPossible = 0;
+    $aiChecked = 0;
+    $fallbackUsed = 0;
     $failed = 0;
     $errors = [];
 
     foreach ($input['transactions'] as $txn) {
       try {
-        // Check for duplicate (by reference number or exact match)
-        if (isset($txn['reference_number']) && $txn['reference_number']) {
-          $existing = $db->fetchOne(
-            "SELECT id FROM transactions WHERE user_id = ? AND reference_number = ?",
-            [$userId, $txn['reference_number']]
-          );
-          if ($existing) {
-            $skipped++;
-            continue;
-          }
-        }
-
         // Get or create bank account with account type/card metadata when available.
         [$accountType, $cardLastFour] = detectAccountTypeAndCardLastFour($txn);
         $accountId = getOrCreateBankAccount(
@@ -472,8 +467,29 @@ function syncTransactions($userId)
         // Get or create category
         $categoryId = getOrCreateCategory($db, $userId, $txn['category'], $txn['transaction_type']);
 
-        // Check for potential duplicates using AI
-        $duplicateScore = checkDuplicateTransactionWithAI($db, $userId, $accountId, $txn);
+        // Re-run with resolved account id for higher confidence, but keep conservative fallback.
+        $duplicateCheck = $duplicateDetector->evaluate($userId, $txn, [
+          'account_id' => $accountId,
+          'ai_enabled' => true,
+          'skip_threshold' => 76,
+          'duplicate_threshold' => 51,
+        ]);
+
+        if (!empty($duplicateCheck['ai_used'])) {
+          $aiChecked++;
+        }
+        if (!empty($duplicateCheck['fallback_used'])) {
+          $fallbackUsed++;
+        }
+
+        if (!empty($duplicateCheck['should_skip'])) {
+          $skipped++;
+          continue;
+        }
+
+        if (!empty($duplicateCheck['possible_duplicate'])) {
+          $flaggedPossible++;
+        }
 
         // Insert transaction
         $sql = "INSERT INTO transactions (user_id, account_id, category_id, transaction_type, amount,
@@ -515,7 +531,7 @@ function syncTransactions($userId)
           $sourceEnum,
           $paymentMethod,
           !empty($sourceDataArray) ? json_encode($sourceDataArray) : null,
-          $duplicateScore
+          (int)($duplicateCheck['confidence'] ?? 0)
         ]);
         $created++;
       } catch (Exception $e) {
@@ -545,6 +561,11 @@ function syncTransactions($userId)
     Response::success([
       'created' => $created,
       'skipped' => $skipped,
+      'skipped_duplicates' => $skipped,
+      'skipped_high_confidence' => $skipped,
+      'flagged_possible_duplicates' => $flaggedPossible,
+      'ai_checked_transactions' => $aiChecked,
+      'duplicate_fallback_used' => $fallbackUsed,
       'failed' => $failed,
       'errors' => $errors
     ], 'Transactions synced successfully');
@@ -859,122 +880,4 @@ function getLatestSyncJob() {
   }
 }
 
-function checkDuplicateTransactionWithAI($db, $userId, $accountId, $newTxn)
-{
-  try {
-    // Get recent transactions from the same account (last 30 days)
-    $dateFrom = date('Y-m-d', strtotime('-30 days', strtotime($newTxn['date'] ?? $newTxn['transaction_date'] ?? date('Y-m-d'))));
-    $dateTo = date('Y-m-d', strtotime('+7 days', strtotime($newTxn['date'] ?? $newTxn['transaction_date'] ?? date('Y-m-d'))));
-    
-    $existingTxns = $db->fetchAll(
-      "SELECT id, merchant, description, amount, transaction_date, transaction_type
-       FROM transactions 
-       WHERE user_id = ? AND account_id = ? 
-         AND transaction_date BETWEEN ? AND ?
-       ORDER BY transaction_date DESC
-       LIMIT 20",
-      [$userId, $accountId, $dateFrom, $dateTo]
-    );
-
-    if (empty($existingTxns)) {
-      return 0; // No potential duplicates
-    }
-
-    // Prepare context for Azure AI
-    $existingTxnsList = array_map(function($txn) {
-      return sprintf(
-        "- %s | %s | ₹%.2f | %s | %s",
-        $txn['transaction_date'],
-        $txn['merchant'] ?? 'N/A',
-        $txn['amount'],
-        $txn['transaction_type'],
-        $txn['description'] ?? 'N/A'
-      );
-    }, $existingTxns);
-
-    $prompt = sprintf(
-      "You are a financial data analyst. Analyze if the following transaction is likely a duplicate of any existing transactions.\n\n" .
-      "NEW TRANSACTION:\n" .
-      "- Date: %s\n" .
-      "- Merchant: %s\n" .
-      "- Amount: ₹%.2f\n" .
-      "- Type: %s\n" .
-      "- Description: %s\n\n" .
-      "EXISTING TRANSACTIONS (last 30 days):\n%s\n\n" .
-      "Consider these factors:\n" .
-      "1. Same/similar merchant and exact amount (±1 rupee)\n" .
-      "2. Same date or within 2 days\n" .
-      "3. Merchant name variations (e.g., 'AMAZON' vs 'Amazon.in')\n" .
-      "4. Description similarities\n" .
-      "5. Duplicate notifications from bank (SMS vs email vs portal)\n\n" .
-      "Respond with ONLY a number 0-100 representing duplicate probability:\n" .
-      "- 0-20: Definitely not a duplicate\n" .
-      "- 21-50: Unlikely duplicate\n" .
-      "- 51-75: Possible duplicate (flag for review)\n" .
-      "- 76-100: Highly likely duplicate\n\n" .
-      "Respond with ONLY the number, no explanation.",
-      $newTxn['date'] ?? $newTxn['transaction_date'] ?? date('Y-m-d'),
-      $newTxn['merchant'] ?? 'N/A',
-      $newTxn['amount'],
-      $newTxn['transaction_type'],
-      $newTxn['description'] ?? 'N/A',
-      implode("\n", $existingTxnsList)
-    );
-
-    // Call Azure OpenAI
-    $endpoint = getenv('AZURE_OPENAI_ENDPOINT');
-    $apiKey = getenv('AZURE_OPENAI_API_KEY');
-    $deployment = getenv('AZURE_OPENAI_DEPLOYMENT');
-
-    if (!$endpoint || !$apiKey || !$deployment) {
-      error_log('Azure OpenAI not configured, skipping AI duplicate check');
-      return 0; // Skip AI check if not configured
-    }
-
-    $url = rtrim($endpoint, '/') . '/openai/deployments/' . $deployment . '/chat/completions?api-version=2024-02-15-preview';
-    
-    $data = [
-      'messages' => [
-        ['role' => 'system', 'content' => 'You are a precise financial data analyst specializing in duplicate detection.'],
-        ['role' => 'user', 'content' => $prompt]
-      ],
-      'max_completion_tokens' => 10,
-      'temperature' => 0
-    ];
-
-    $ch = curl_init($url);
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_POST, true);
-    curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($data));
-    curl_setopt($ch, CURLOPT_HTTPHEADER, [
-      'Content-Type: application/json',
-      'api-key: ' . $apiKey
-    ]);
-    curl_setopt($ch, CURLOPT_TIMEOUT, 10);
-
-    $response = curl_exec($ch);
-    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    curl_close($ch);
-
-    if ($httpCode !== 200) {
-      error_log('Azure OpenAI API error for transaction duplicate check: ' . $response);
-      return 0;
-    }
-
-    $result = json_decode($response, true);
-    $answer = trim($result['choices'][0]['message']['content'] ?? '0');
-    
-    // Extract number from response
-    if (preg_match('/\d+/', $answer, $matches)) {
-      $score = (int)$matches[0];
-      return min(100, max(0, $score)); // Clamp between 0-100
-    }
-    
-    return 0;
-
-  } catch (Exception $e) {
-    error_log('Error in AI transaction duplicate check: ' . $e->getMessage());
-    return 0; // Return 0 on error
-  }
-}
 

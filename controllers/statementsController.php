@@ -1,0 +1,644 @@
+<?php
+
+require_once __DIR__ . '/../utils/response.php';
+require_once __DIR__ . '/../utils/jwt.php';
+require_once __DIR__ . '/../config/database.php';
+require_once __DIR__ . '/../utils/azureOpenAI.php';
+require_once __DIR__ . '/../utils/transactionDuplicateDetector.php';
+require_once __DIR__ . '/../utils/categoryResolver.php';
+require_once __DIR__ . '/../utils/statementPasswordVault.php';
+
+if (!class_exists('\Smalot\PdfParser\Parser')) {
+    require_once __DIR__ . '/../vendor/autoload.php';
+}
+
+class StatementController
+{
+    private Database $db;
+    private TransactionDuplicateDetector $duplicateDetector;
+
+    public function __construct()
+    {
+        $this->db = Database::getInstance();
+        $this->duplicateDetector = new TransactionDuplicateDetector($this->db->getConnection(), new AzureOpenAI());
+    }
+
+    public function savePassword(): void
+    {
+        $tokenData = JWTHandler::requireAuth();
+        $userId = (int)$tokenData['userId'];
+
+        $input = getJsonInput();
+        $bank = $this->normalizeBank($input['bank'] ?? '');
+        $accountType = $this->normalizeAccountType($input['account_type'] ?? 'credit_card');
+        $cardLastFour = $this->normalizeCardLastFour($input['card_last_four'] ?? '');
+        $password = (string)($input['password'] ?? '');
+
+        if ($bank !== 'icici') {
+            Response::error('Only ICICI statement password setup is supported in this release.', 400);
+        }
+
+        if ($accountType !== 'credit_card') {
+            Response::error('Only credit card statements are supported in this release.', 400);
+        }
+
+        if ($cardLastFour === '') {
+            Response::error('card_last_four is required for credit card statements.', 400);
+        }
+
+        if (trim($password) === '') {
+            Response::error('password is required.', 400);
+        }
+
+        $encrypted = StatementPasswordVault::encrypt($password);
+
+        $sql = "INSERT INTO statement_passwords
+                (user_id, bank, account_type, card_last_four, encrypted_password, iv, auth_tag, encryption_version)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON DUPLICATE KEY UPDATE
+                    encrypted_password = VALUES(encrypted_password),
+                    iv = VALUES(iv),
+                    auth_tag = VALUES(auth_tag),
+                    encryption_version = VALUES(encryption_version),
+                    updated_at = CURRENT_TIMESTAMP";
+
+        $this->db->execute($sql, [
+            $userId,
+            $bank,
+            $accountType,
+            $cardLastFour,
+            $encrypted['encrypted_password'],
+            $encrypted['iv'],
+            $encrypted['auth_tag'],
+            $encrypted['encryption_version'],
+        ]);
+
+        Response::success([
+            'bank' => $bank,
+            'account_type' => $accountType,
+            'card_last_four' => $cardLastFour,
+            'stored' => true,
+        ], 'Statement password saved securely.');
+    }
+
+    public function deletePassword(): void
+    {
+        $tokenData = JWTHandler::requireAuth();
+        $userId = (int)$tokenData['userId'];
+
+        $input = getJsonInput();
+        $bank = $this->normalizeBank($input['bank'] ?? '');
+        $accountType = $this->normalizeAccountType($input['account_type'] ?? 'credit_card');
+        $cardLastFour = $this->normalizeCardLastFour($input['card_last_four'] ?? '');
+
+        if ($bank === '') {
+            Response::error('bank is required.', 400);
+        }
+
+        if ($accountType === 'credit_card' && $cardLastFour === '') {
+            Response::error('card_last_four is required for credit card statements.', 400);
+        }
+
+        $deleted = $this->db->execute(
+            "DELETE FROM statement_passwords WHERE user_id = ? AND bank = ? AND account_type = ? AND card_last_four <=> ?",
+            [$userId, $bank, $accountType, $cardLastFour !== '' ? $cardLastFour : null]
+        );
+
+        Response::success([
+            'deleted' => $deleted > 0,
+        ], $deleted > 0 ? 'Statement password removed.' : 'No matching statement password found.');
+    }
+
+    public function uploadStatement(): void
+    {
+        $tokenData = JWTHandler::requireAuth();
+        $userId = (int)$tokenData['userId'];
+
+        if (!isset($_FILES['statement_pdf'])) {
+            Response::error('Missing statement_pdf file field.', 400);
+        }
+
+        $bank = $this->normalizeBank($_POST['bank'] ?? '');
+        $accountType = $this->normalizeAccountType($_POST['account_type'] ?? 'credit_card');
+        $cardLastFour = $this->normalizeCardLastFour($_POST['card_last_four'] ?? '');
+
+        if ($bank !== 'icici') {
+            Response::error('Only ICICI statement uploads are supported in this release.', 400);
+        }
+
+        if ($accountType !== 'credit_card') {
+            Response::error('Only credit card statement uploads are supported in this release.', 400);
+        }
+
+        if ($cardLastFour === '') {
+            Response::error('card_last_four is required for credit card statement uploads.', 400);
+        }
+
+        $file = $_FILES['statement_pdf'];
+        $this->validateUploadedPdf($file);
+
+        $passwordRow = $this->db->fetchOne(
+            "SELECT encrypted_password, iv, auth_tag
+             FROM statement_passwords
+             WHERE user_id = ? AND bank = ? AND account_type = ? AND card_last_four = ?
+             LIMIT 1",
+            [$userId, $bank, $accountType, $cardLastFour]
+        );
+
+        if (!$passwordRow) {
+            Response::error('No secure statement password found. Save password first.', 400);
+        }
+
+        $fileHash = hash_file('sha256', $file['tmp_name']);
+        $fileName = basename((string)$file['name']);
+
+        $existingUpload = $this->db->fetchOne(
+            "SELECT id, extracted_count, saved_count, skipped_high_confidence, flagged_possible_duplicates,
+                    ai_checked_transactions, duplicate_fallback_used
+             FROM statement_uploads
+             WHERE user_id = ? AND bank = ? AND account_type = ? AND card_last_four = ?
+               AND file_hash = ? AND status IN ('success', 'duplicate_upload')
+             ORDER BY id DESC
+             LIMIT 1",
+            [$userId, $bank, $accountType, $cardLastFour, $fileHash]
+        );
+
+        if ($existingUpload) {
+            $duplicateUploadId = $this->db->insert(
+                "INSERT INTO statement_uploads
+                 (user_id, bank, account_type, card_last_four, file_name, file_hash, status,
+                  extracted_count, saved_count, skipped_high_confidence, flagged_possible_duplicates,
+                  ai_checked_transactions, duplicate_fallback_used)
+                 VALUES (?, ?, ?, ?, ?, ?, 'duplicate_upload', ?, ?, ?, ?, ?, ?)",
+                [
+                    $userId,
+                    $bank,
+                    $accountType,
+                    $cardLastFour,
+                    $fileName,
+                    $fileHash,
+                    (int)$existingUpload['extracted_count'],
+                    (int)$existingUpload['saved_count'],
+                    (int)$existingUpload['skipped_high_confidence'],
+                    (int)$existingUpload['flagged_possible_duplicates'],
+                    (int)$existingUpload['ai_checked_transactions'],
+                    (int)$existingUpload['duplicate_fallback_used'],
+                ]
+            );
+
+            Response::success([
+                'upload_id' => (int)$duplicateUploadId,
+                'duplicate_upload' => true,
+                'extracted_transactions' => (int)$existingUpload['extracted_count'],
+                'saved_transactions' => (int)$existingUpload['saved_count'],
+                'skipped_high_confidence' => (int)$existingUpload['skipped_high_confidence'],
+                'flagged_possible_duplicates' => (int)$existingUpload['flagged_possible_duplicates'],
+                'ai_checked_transactions' => (int)$existingUpload['ai_checked_transactions'],
+                'duplicate_fallback_used' => (int)$existingUpload['duplicate_fallback_used'],
+            ], 'This statement file was already processed earlier.');
+        }
+
+        $uploadId = (int)$this->db->insert(
+            "INSERT INTO statement_uploads
+             (user_id, bank, account_type, card_last_four, file_name, file_hash, status)
+             VALUES (?, ?, ?, ?, ?, ?, 'processing')",
+            [$userId, $bank, $accountType, $cardLastFour, $fileName, $fileHash]
+        );
+
+        $workingFile = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'statement_' . uniqid() . '.pdf';
+        $cleanupFiles = [$workingFile];
+
+        try {
+            if (!move_uploaded_file($file['tmp_name'], $workingFile)) {
+                throw new Exception('Failed to persist uploaded statement file.');
+            }
+
+            $password = StatementPasswordVault::decrypt(
+                (string)$passwordRow['encrypted_password'],
+                (string)$passwordRow['iv'],
+                (string)$passwordRow['auth_tag']
+            );
+
+            $text = $this->extractPdfText($workingFile, $password, $cleanupFiles);
+            $parsedTransactions = $this->parseIciciTransactions($text, $cardLastFour);
+
+            if (empty($parsedTransactions)) {
+                throw new Exception('No transactions detected in the uploaded ICICI statement.');
+            }
+
+            $accountId = $this->getOrCreateCreditCardAccount($userId, $bank, $cardLastFour);
+            $paymentMethod = strtoupper($bank) . ' Card *' . $cardLastFour;
+
+            $savedCount = 0;
+            $skippedHighConfidence = 0;
+            $flaggedPossibleDuplicates = 0;
+            $aiChecked = 0;
+            $fallbackUsed = 0;
+            $errors = [];
+
+            foreach ($parsedTransactions as $txn) {
+                try {
+                    $transactionPayload = [
+                        'bank' => strtoupper($bank),
+                        'account_number' => $cardLastFour,
+                        'transaction_type' => $txn['transaction_type'],
+                        'amount' => $txn['amount'],
+                        'merchant' => $txn['merchant'],
+                        'description' => $txn['description'],
+                        'date' => $txn['transaction_date'],
+                        'reference_number' => $txn['reference_number'],
+                        'payment_method' => $paymentMethod,
+                    ];
+
+                    $duplicateCheck = $this->duplicateDetector->evaluate($userId, $transactionPayload, [
+                        'account_id' => $accountId,
+                        'ai_enabled' => true,
+                        'skip_threshold' => 76,
+                        'duplicate_threshold' => 51,
+                    ]);
+
+                    if (!empty($duplicateCheck['ai_used'])) {
+                        $aiChecked++;
+                    }
+
+                    if (!empty($duplicateCheck['fallback_used'])) {
+                        $fallbackUsed++;
+                    }
+
+                    if (!empty($duplicateCheck['should_skip'])) {
+                        $skippedHighConfidence++;
+                        continue;
+                    }
+
+                    if (!empty($duplicateCheck['possible_duplicate'])) {
+                        $flaggedPossibleDuplicates++;
+                    }
+
+                    $categoryId = CategoryResolver::resolveTransaction($transactionPayload);
+                    $sourceData = [
+                        'source' => 'statement_pdf',
+                        'parser' => 'icici_v1',
+                        'bank' => $bank,
+                        'card_last_four' => $cardLastFour,
+                        'upload_id' => $uploadId,
+                        'file_hash' => $fileHash,
+                        'raw_line' => $txn['raw_line'],
+                    ];
+
+                    $this->db->insert(
+                        "INSERT INTO transactions
+                         (user_id, account_id, category_id, transaction_type, amount, merchant, description,
+                          transaction_date, reference_number, source, payment_method, source_data, duplicate_score)
+                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'statement_pdf', ?, ?, ?)",
+                        [
+                            $userId,
+                            $accountId,
+                            $categoryId,
+                            $txn['transaction_type'],
+                            $txn['amount'],
+                            $txn['merchant'],
+                            $txn['description'],
+                            $txn['transaction_date'],
+                            $txn['reference_number'],
+                            $paymentMethod,
+                            json_encode($sourceData),
+                            (int)($duplicateCheck['confidence'] ?? 0),
+                        ]
+                    );
+
+                    $savedCount++;
+                } catch (Exception $recordError) {
+                    $errors[] = $recordError->getMessage();
+                }
+            }
+
+            $this->db->execute(
+                "UPDATE statement_uploads
+                 SET status = 'success', extracted_count = ?, saved_count = ?, skipped_high_confidence = ?,
+                     flagged_possible_duplicates = ?, ai_checked_transactions = ?, duplicate_fallback_used = ?,
+                     error_message = ?
+                 WHERE id = ?",
+                [
+                    count($parsedTransactions),
+                    $savedCount,
+                    $skippedHighConfidence,
+                    $flaggedPossibleDuplicates,
+                    $aiChecked,
+                    $fallbackUsed,
+                    !empty($errors) ? implode(' | ', array_slice($errors, 0, 5)) : null,
+                    $uploadId,
+                ]
+            );
+
+            Response::success([
+                'upload_id' => $uploadId,
+                'duplicate_upload' => false,
+                'extracted_transactions' => count($parsedTransactions),
+                'saved_transactions' => $savedCount,
+                'skipped_high_confidence' => $skippedHighConfidence,
+                'flagged_possible_duplicates' => $flaggedPossibleDuplicates,
+                'ai_checked_transactions' => $aiChecked,
+                'duplicate_fallback_used' => $fallbackUsed,
+                'errors' => $errors,
+            ], 'Statement parsed and synced successfully.');
+        } catch (Exception $e) {
+            $this->db->execute(
+                "UPDATE statement_uploads
+                 SET status = 'failed', error_message = ?
+                 WHERE id = ?",
+                [substr($e->getMessage(), 0, 1000), $uploadId]
+            );
+
+            Response::error('Statement upload failed: ' . $e->getMessage(), 500);
+        } finally {
+            foreach ($cleanupFiles as $cleanupPath) {
+                if (is_string($cleanupPath) && file_exists($cleanupPath)) {
+                    @unlink($cleanupPath);
+                }
+            }
+        }
+    }
+
+    private function validateUploadedPdf(array $file): void
+    {
+        if (($file['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK) {
+            Response::error('File upload failed with error code: ' . (int)$file['error'], 400);
+        }
+
+        $maxBytes = 20 * 1024 * 1024;
+        if ((int)$file['size'] <= 0 || (int)$file['size'] > $maxBytes) {
+            Response::error('Statement PDF size must be between 1 byte and 20 MB.', 400);
+        }
+
+        $name = strtolower((string)($file['name'] ?? ''));
+        if (!str_ends_with($name, '.pdf')) {
+            Response::error('Only PDF files are supported.', 400);
+        }
+
+        $fp = fopen($file['tmp_name'], 'rb');
+        if (!$fp) {
+            Response::error('Unable to read uploaded file.', 400);
+        }
+
+        $header = fread($fp, 4);
+        fclose($fp);
+
+        if ($header !== '%PDF') {
+            Response::error('Invalid PDF file header.', 400);
+        }
+    }
+
+    private function extractPdfText(string $inputPath, string $password, array &$cleanupFiles): string
+    {
+        $parser = new \Smalot\PdfParser\Parser();
+
+        try {
+            $pdf = $parser->parseFile($inputPath);
+            $text = $pdf->getText();
+            if (trim($text) !== '') {
+                return $text;
+            }
+        } catch (Exception $ignored) {
+            // Fall through to qpdf decryption path.
+        }
+
+        if (!function_exists('shell_exec')) {
+            throw new Exception('Encrypted statement detected but qpdf is unavailable on server.');
+        }
+
+        $decryptedPath = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'statement_decrypted_' . uniqid() . '.pdf';
+        $cleanupFiles[] = $decryptedPath;
+
+        $command = 'qpdf --password=' . escapeshellarg($password)
+            . ' --decrypt ' . escapeshellarg($inputPath)
+            . ' ' . escapeshellarg($decryptedPath)
+            . ' 2>&1';
+
+        $commandOutput = shell_exec($command);
+        if (!file_exists($decryptedPath) || filesize($decryptedPath) === 0) {
+            throw new Exception('Failed to decrypt statement PDF. Verify stored password and qpdf availability.');
+        }
+
+        try {
+            $pdf = $parser->parseFile($decryptedPath);
+            $text = $pdf->getText();
+        } catch (Exception $e) {
+            throw new Exception('Failed to parse decrypted PDF: ' . $e->getMessage());
+        }
+
+        if (trim($text) === '') {
+            throw new Exception('PDF text extraction returned empty output. qpdf output: ' . trim((string)$commandOutput));
+        }
+
+        return $text;
+    }
+
+    private function parseIciciTransactions(string $text, string $cardLastFour): array
+    {
+        $lines = preg_split('/\r\n|\n|\r/', $text) ?: [];
+        $combinedLines = [];
+        $currentLine = '';
+
+        foreach ($lines as $line) {
+            $line = trim($line);
+            if ($line === '') {
+                continue;
+            }
+
+            if (preg_match('/^\d{2}\/\d{2}\/\d{4}\s+\d{8,}/', $line)) {
+                if ($currentLine !== '') {
+                    $combinedLines[] = $currentLine;
+                }
+                $currentLine = $line;
+                continue;
+            }
+
+            if ($currentLine !== '') {
+                $currentLine .= ' ' . $line;
+            }
+        }
+
+        if ($currentLine !== '') {
+            $combinedLines[] = $currentLine;
+        }
+
+        $transactions = [];
+
+        foreach ($combinedLines as $line) {
+            if (!preg_match('/^(\d{2}\/\d{2}\/\d{4})\s+(\d{8,})\s+(.+?)\s+([\d,]+\.\d{2})\s*(CR)?\s*$/i', $line, $match)) {
+                continue;
+            }
+
+            $dateRaw = $match[1];
+            $serialNo = $match[2];
+            $middlePart = trim($match[3]);
+            $amountRaw = $match[4];
+            $isCredit = !empty($match[5]);
+
+            $amount = (float)str_replace(',', '', $amountRaw);
+            if ($amount <= 0) {
+                continue;
+            }
+
+            if (str_contains(strtolower($middlePart), 'transaction details')) {
+                continue;
+            }
+
+            $description = $middlePart;
+            if (preg_match('/^(.+?)\s+(-?\d+)(?:\s+[\d,]+\.\d{2})?\s*$/', $middlePart, $descMatch)) {
+                $description = trim($descMatch[1]);
+            }
+
+            $normalizedDate = $this->normalizeIciciDate($dateRaw);
+            $merchant = $this->extractMerchant($description);
+
+            $transactions[] = [
+                'transaction_type' => $isCredit ? 'credit' : 'debit',
+                'amount' => round($amount, 2),
+                'merchant' => $merchant,
+                'description' => $description,
+                'transaction_date' => $normalizedDate,
+                'reference_number' => 'ICICI_' . $serialNo,
+                'raw_line' => $line,
+                'card_last_four' => $cardLastFour,
+            ];
+        }
+
+        return $transactions;
+    }
+
+    private function normalizeIciciDate(string $dateRaw): string
+    {
+        $parts = explode('/', $dateRaw);
+        if (count($parts) !== 3) {
+            return date('Y-m-d H:i:s');
+        }
+
+        $day = str_pad($parts[0], 2, '0', STR_PAD_LEFT);
+        $month = str_pad($parts[1], 2, '0', STR_PAD_LEFT);
+        $year = $parts[2];
+
+        if (strlen($year) === 2) {
+            $year = '20' . $year;
+        }
+
+        return $year . '-' . $month . '-' . $day . ' 12:00:00';
+    }
+
+    private function extractMerchant(string $description): string
+    {
+        $merchant = trim($description);
+
+        if (preg_match('/UPI-\d+-(.+?)(?:\sIN\s\d+)?$/i', $merchant, $upiMatch)) {
+            $merchant = trim($upiMatch[1]);
+        }
+
+        $merchant = preg_replace('/\sIN\s\d+$/i', '', $merchant) ?? $merchant;
+        $merchant = preg_replace('/\s+(BANGALORE|BENGALURU|MUMBAI|DELHI|CHENNAI|KOLKATA|PUNE|HYDERABAD|IND|MH|DL|TN)$/i', '', $merchant) ?? $merchant;
+        $merchant = preg_replace('/\s+/', ' ', trim($merchant)) ?? $merchant;
+
+        if ($merchant === '') {
+            $merchant = 'ICICI Card Transaction';
+        }
+
+        return mb_substr($merchant, 0, 500);
+    }
+
+    private function getOrCreateCreditCardAccount(int $userId, string $bank, string $cardLastFour): int
+    {
+        $existing = $this->db->fetchOne(
+            "SELECT id FROM bank_accounts
+             WHERE user_id = ? AND bank = ? AND account_type = 'credit_card'
+               AND (card_last_four = ? OR account_number LIKE ?)
+             ORDER BY id DESC
+             LIMIT 1",
+            [$userId, $bank, $cardLastFour, '%' . $cardLastFour]
+        );
+
+        if ($existing && isset($existing['id'])) {
+            return (int)$existing['id'];
+        }
+
+        return (int)$this->db->insert(
+            "INSERT INTO bank_accounts
+             (user_id, bank, account_type, account_number, account_name, card_last_four, status)
+             VALUES (?, ?, 'credit_card', ?, ?, ?, 'active')",
+            [
+                $userId,
+                $bank,
+                'XXXX' . $cardLastFour,
+                strtoupper($bank) . ' Card',
+                $cardLastFour,
+            ]
+        );
+    }
+
+    private function normalizeBank(string $bank): string
+    {
+        $value = strtolower(trim($bank));
+        $map = [
+            'hdfc' => 'hdfc',
+            'hdfc bank' => 'hdfc',
+            'sbi' => 'sbi',
+            'state bank of india' => 'sbi',
+            'icici' => 'icici',
+            'icici bank' => 'icici',
+            'idfc' => 'idfc',
+            'idfc first bank' => 'idfc',
+            'rbl' => 'rbl',
+            'rbl bank' => 'rbl',
+            'axis' => 'axis',
+            'axis bank' => 'axis',
+            'kotak' => 'kotak',
+            'kotak mahindra bank' => 'kotak',
+        ];
+
+        return $map[$value] ?? 'other';
+    }
+
+    private function normalizeAccountType(string $accountType): string
+    {
+        $value = strtolower(trim($accountType));
+        if (in_array($value, ['credit_card', 'credit card', 'card'], true)) {
+            return 'credit_card';
+        }
+
+        if ($value === 'current') {
+            return 'current';
+        }
+
+        return 'savings';
+    }
+
+    private function normalizeCardLastFour(string $cardLastFour): string
+    {
+        $digits = preg_replace('/\D+/', '', $cardLastFour);
+        if (!$digits) {
+            return '';
+        }
+
+        return substr($digits, -4);
+    }
+}
+
+function handleStatementRoutes(string $uri, string $method): void
+{
+    $controller = new StatementController();
+
+    if ($uri === '/statements/password' && $method === 'POST') {
+        $controller->savePassword();
+        return;
+    }
+
+    if ($uri === '/statements/password' && $method === 'DELETE') {
+        $controller->deletePassword();
+        return;
+    }
+
+    if ($uri === '/statements/upload' && $method === 'POST') {
+        $controller->uploadStatement();
+        return;
+    }
+
+    Response::error('Invalid statements route', 404);
+}

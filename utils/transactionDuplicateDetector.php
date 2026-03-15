@@ -1,0 +1,454 @@
+<?php
+
+require_once __DIR__ . '/azureOpenAI.php';
+
+class TransactionDuplicateDetector
+{
+    private PDO $pdo;
+    private ?AzureOpenAI $ai;
+
+    public function __construct(PDO $pdo, ?AzureOpenAI $ai = null)
+    {
+        $this->pdo = $pdo;
+        $this->ai = $ai;
+    }
+
+    /**
+     * Evaluate whether a transaction is duplicate using hybrid deterministic + AI scoring.
+     *
+     * Result fields:
+     * - confidence: 0-100
+     * - should_skip: true if confidence >= skip_threshold
+     * - possible_duplicate: true if confidence in [duplicate_threshold, skip_threshold)
+     * - ai_used/fallback_used for observability
+     */
+    public function evaluate(int $userId, array $transaction, array $options = []): array
+    {
+        $skipThreshold = (int)($options['skip_threshold'] ?? 76);
+        $duplicateThreshold = (int)($options['duplicate_threshold'] ?? 51);
+        $maxCandidates = max(1, (int)($options['max_candidates'] ?? 20));
+        $aiEnabled = (bool)($options['ai_enabled'] ?? true);
+        $excludeTransactionId = isset($options['exclude_transaction_id']) ? (int)$options['exclude_transaction_id'] : null;
+        $accountId = isset($options['account_id']) ? (int)$options['account_id'] : null;
+
+        $normalized = $this->normalizeIncoming($transaction);
+
+        if ($normalized['amount'] <= 0) {
+            return $this->buildResult(false, false, 0, 'invalid_amount', null, [], false, true);
+        }
+
+        $referenceMatch = $this->findReferenceMatch($userId, $normalized['reference_number'], $excludeTransactionId);
+        if ($referenceMatch !== null) {
+            $match = $this->decorateMatchWithScore($referenceMatch, 100, 'reference_match');
+            return $this->buildResult(true, true, 100, 'reference_match', (int)$referenceMatch['id'], [$match], false, false);
+        }
+
+        $accountIds = [];
+        if ($accountId !== null && $accountId > 0) {
+            $accountIds[] = $accountId;
+        } else {
+            $accountIds = $this->resolveAccountIds($userId, $normalized['account_last4']);
+        }
+
+        $candidates = $this->fetchCandidateTransactions(
+            $userId,
+            $normalized,
+            $accountIds,
+            $maxCandidates,
+            $excludeTransactionId
+        );
+
+        if (empty($candidates)) {
+            return $this->buildResult(false, false, 0, 'no_candidates', null, [], false, false);
+        }
+
+        [$deterministicScore, $bestCandidate, $scoredMatches] = $this->scoreDeterministic($normalized, $candidates, $accountIds);
+
+        $aiUsed = false;
+        $fallbackUsed = false;
+        $finalScore = $deterministicScore;
+        $reason = 'deterministic';
+
+        if ($aiEnabled && $this->ai !== null && $deterministicScore >= 35) {
+            $aiUsed = true;
+            $aiScore = $this->ai->scoreTransactionDuplicate(
+                $this->buildAiTransactionPayload($normalized),
+                array_slice($candidates, 0, 15)
+            );
+
+            if ($aiScore !== null) {
+                $finalScore = $this->clampScore($aiScore);
+                $reason = 'ai_score';
+            } else {
+                // Conservative fallback: skip only if deterministic evidence is very strong.
+                $fallbackUsed = true;
+                if ($deterministicScore >= 90) {
+                    $finalScore = 80;
+                    $reason = 'deterministic_strong_fallback';
+                } else {
+                    $finalScore = min(75, $deterministicScore);
+                    $reason = 'deterministic_conservative_fallback';
+                }
+            }
+        }
+
+        $isDuplicate = $finalScore >= $duplicateThreshold;
+        $shouldSkip = $finalScore >= $skipThreshold;
+
+        return $this->buildResult(
+            $isDuplicate,
+            $shouldSkip,
+            $finalScore,
+            $reason,
+            $bestCandidate !== null ? (int)$bestCandidate['id'] : null,
+            $scoredMatches,
+            $aiUsed,
+            $fallbackUsed
+        );
+    }
+
+    private function normalizeIncoming(array $transaction): array
+    {
+        $accountRaw = (string)($transaction['account_number'] ?? $transaction['account_last4'] ?? '');
+        $accountDigits = preg_replace('/\D+/', '', $accountRaw);
+        $accountLast4 = $accountDigits !== '' ? substr($accountDigits, -4) : '';
+
+        return [
+            'amount' => round((float)($transaction['amount'] ?? 0), 2),
+            'transaction_type' => $this->normalizeTransactionType($transaction['transaction_type'] ?? null),
+            'transaction_date' => $this->normalizeDateTime($transaction['date'] ?? $transaction['transaction_date'] ?? null),
+            'merchant' => trim((string)($transaction['merchant'] ?? '')),
+            'description' => trim((string)($transaction['description'] ?? '')),
+            'reference_number' => trim((string)($transaction['reference_number'] ?? '')),
+            'account_last4' => $accountLast4,
+        ];
+    }
+
+    private function normalizeTransactionType(?string $raw): string
+    {
+        $value = strtolower(trim((string)$raw));
+        if ($value === 'expense') {
+            return 'debit';
+        }
+        if ($value === 'income') {
+            return 'credit';
+        }
+        if (in_array($value, ['debit', 'credit', 'transfer'], true)) {
+            return $value;
+        }
+        return 'debit';
+    }
+
+    private function normalizeDateTime(?string $raw): string
+    {
+        if (!$raw) {
+            return date('Y-m-d H:i:s');
+        }
+
+        $timestamp = strtotime($raw);
+        if ($timestamp === false) {
+            return date('Y-m-d H:i:s');
+        }
+
+        return date('Y-m-d H:i:s', $timestamp);
+    }
+
+    private function findReferenceMatch(int $userId, string $referenceNumber, ?int $excludeTransactionId = null): ?array
+    {
+        if ($referenceNumber === '') {
+            return null;
+        }
+
+        $sql = "SELECT id, account_id, transaction_type, amount, merchant, description, transaction_date, reference_number
+                FROM transactions
+                WHERE user_id = ?
+                  AND deleted_at IS NULL
+                  AND reference_number = ?";
+        $params = [$userId, $referenceNumber];
+
+        if ($excludeTransactionId !== null) {
+            $sql .= " AND id <> ?";
+            $params[] = $excludeTransactionId;
+        }
+
+        $sql .= " ORDER BY id DESC LIMIT 1";
+
+        $stmt = $this->pdo->prepare($sql);
+        $stmt->execute($params);
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+
+        return $row ?: null;
+    }
+
+    private function resolveAccountIds(int $userId, string $accountLast4): array
+    {
+        if ($accountLast4 === '') {
+            return [];
+        }
+
+        $sql = "SELECT id
+                FROM bank_accounts
+                WHERE user_id = ?
+                  AND (
+                    account_number LIKE ?
+                    OR card_last_four = ?
+                  )";
+
+        $stmt = $this->pdo->prepare($sql);
+        $stmt->execute([$userId, '%' . $accountLast4, $accountLast4]);
+
+        $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        if (!$rows) {
+            return [];
+        }
+
+        return array_map(static fn($r) => (int)$r['id'], $rows);
+    }
+
+    private function fetchCandidateTransactions(
+        int $userId,
+        array $normalized,
+        array $accountIds,
+        int $maxCandidates,
+        ?int $excludeTransactionId
+    ): array {
+        $date = $normalized['transaction_date'];
+        $amount = $normalized['amount'];
+        $txnType = $normalized['transaction_type'];
+
+        $dateFrom = date('Y-m-d H:i:s', strtotime($date . ' -2 days'));
+        $dateTo = date('Y-m-d H:i:s', strtotime($date . ' +2 days'));
+
+        $sql = "SELECT id, account_id, transaction_type, amount, merchant, description, transaction_date, reference_number
+                FROM transactions
+                WHERE user_id = ?
+                  AND deleted_at IS NULL
+                  AND amount BETWEEN ? AND ?
+                  AND transaction_date BETWEEN ? AND ?
+                  AND transaction_type = ?";
+
+        $params = [
+            $userId,
+            $amount - 0.01,
+            $amount + 0.01,
+            $dateFrom,
+            $dateTo,
+            $txnType,
+        ];
+
+        if (!empty($accountIds)) {
+            $placeholders = implode(',', array_fill(0, count($accountIds), '?'));
+            $sql .= " AND account_id IN ($placeholders)";
+            foreach ($accountIds as $id) {
+                $params[] = $id;
+            }
+        }
+
+        if ($excludeTransactionId !== null) {
+            $sql .= " AND id <> ?";
+            $params[] = $excludeTransactionId;
+        }
+
+        $sql .= " ORDER BY ABS(TIMESTAMPDIFF(MINUTE, transaction_date, ?)) ASC, id DESC LIMIT " . (int)$maxCandidates;
+        $params[] = $date;
+
+        $stmt = $this->pdo->prepare($sql);
+        $stmt->execute($params);
+        $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+        return $rows ?: [];
+    }
+
+    private function scoreDeterministic(array $normalized, array $candidates, array $accountIds): array
+    {
+        $bestScore = 0;
+        $bestCandidate = null;
+        $scoredMatches = [];
+
+        foreach ($candidates as $candidate) {
+            $score = 0;
+            $reasons = [];
+
+            $amountDiff = abs((float)$candidate['amount'] - (float)$normalized['amount']);
+            if ($amountDiff <= 0.01) {
+                $score += 35;
+                $reasons[] = 'amount';
+            }
+
+            $candidateType = strtolower((string)$candidate['transaction_type']);
+            if ($candidateType === $normalized['transaction_type']) {
+                $score += 15;
+                $reasons[] = 'type';
+            } else {
+                $score -= 20;
+            }
+
+            if (!empty($accountIds) && in_array((int)$candidate['account_id'], $accountIds, true)) {
+                $score += 20;
+                $reasons[] = 'account';
+            }
+
+            $minutesDiff = abs((int)((strtotime($candidate['transaction_date']) - strtotime($normalized['transaction_date'])) / 60));
+            if ($minutesDiff <= 5) {
+                $score += 20;
+                $reasons[] = 'time_5m';
+            } elseif ($minutesDiff <= 30) {
+                $score += 15;
+                $reasons[] = 'time_30m';
+            } elseif ($minutesDiff <= 120) {
+                $score += 8;
+                $reasons[] = 'time_2h';
+            } elseif ($minutesDiff <= 1440) {
+                $score += 4;
+                $reasons[] = 'time_1d';
+            }
+
+            $merchantSimilarity = $this->textSimilarity($normalized['merchant'], (string)($candidate['merchant'] ?? ''));
+            if ($merchantSimilarity >= 0.95) {
+                $score += 25;
+                $reasons[] = 'merchant_exact';
+            } elseif ($merchantSimilarity >= 0.70) {
+                $score += 15;
+                $reasons[] = 'merchant_similar';
+            } elseif ($merchantSimilarity >= 0.45) {
+                $score += 7;
+                $reasons[] = 'merchant_related';
+            } elseif ($normalized['merchant'] !== '' && (string)($candidate['merchant'] ?? '') !== '') {
+                $score -= 10;
+            }
+
+            $descriptionSimilarity = $this->textSimilarity($normalized['description'], (string)($candidate['description'] ?? ''));
+            if ($descriptionSimilarity >= 0.80) {
+                $score += 5;
+                $reasons[] = 'description';
+            }
+
+            $score = $this->clampScore($score);
+            $matchReason = empty($reasons) ? 'amount_window' : implode('+', $reasons);
+            $decoratedMatch = $this->decorateMatchWithScore($candidate, $score, $matchReason);
+            $scoredMatches[] = $decoratedMatch;
+
+            if ($score > $bestScore) {
+                $bestScore = $score;
+                $bestCandidate = $candidate;
+            }
+        }
+
+        usort($scoredMatches, static function ($a, $b) {
+            return ($b['score'] <=> $a['score']);
+        });
+
+        return [$bestScore, $bestCandidate, array_slice($scoredMatches, 0, 5)];
+    }
+
+    private function textSimilarity(string $a, string $b): float
+    {
+        $left = $this->normalizeText($a);
+        $right = $this->normalizeText($b);
+
+        if ($left === '' || $right === '') {
+            return 0.0;
+        }
+
+        if ($left === $right) {
+            return 1.0;
+        }
+
+        if (str_contains($left, $right) || str_contains($right, $left)) {
+            return 0.85;
+        }
+
+        $tokensA = array_values(array_filter(explode(' ', $left), static fn($t) => $t !== ''));
+        $tokensB = array_values(array_filter(explode(' ', $right), static fn($t) => $t !== ''));
+
+        if (empty($tokensA) || empty($tokensB)) {
+            return 0.0;
+        }
+
+        $uniqueA = array_unique($tokensA);
+        $uniqueB = array_unique($tokensB);
+
+        $intersection = array_intersect($uniqueA, $uniqueB);
+        $union = array_unique(array_merge($uniqueA, $uniqueB));
+
+        if (empty($union)) {
+            return 0.0;
+        }
+
+        return count($intersection) / count($union);
+    }
+
+    private function normalizeText(string $value): string
+    {
+        $value = strtolower(trim($value));
+        if ($value === '') {
+            return '';
+        }
+
+        $value = preg_replace('/[^a-z0-9 ]+/', ' ', $value);
+        $value = preg_replace('/\s+/', ' ', $value);
+
+        return trim((string)$value);
+    }
+
+    private function buildAiTransactionPayload(array $normalized): array
+    {
+        return [
+            'amount' => $normalized['amount'],
+            'transaction_type' => $normalized['transaction_type'],
+            'transaction_date' => $normalized['transaction_date'],
+            'merchant' => $normalized['merchant'],
+            'description' => $normalized['description'],
+            'reference_number' => $normalized['reference_number'],
+        ];
+    }
+
+    private function decorateMatchWithScore(array $row, int $score, string $reason): array
+    {
+        return [
+            'id' => (int)$row['id'],
+            'amount' => (float)$row['amount'],
+            'merchant' => $row['merchant'] ?? null,
+            'description' => $row['description'] ?? null,
+            'transaction_date' => $row['transaction_date'],
+            'transaction_type' => $row['transaction_type'] ?? null,
+            'reference_number' => $row['reference_number'] ?? null,
+            'score' => $score,
+            'reason' => $reason,
+        ];
+    }
+
+    private function clampScore(int $score): int
+    {
+        if ($score < 0) {
+            return 0;
+        }
+        if ($score > 100) {
+            return 100;
+        }
+        return $score;
+    }
+
+    private function buildResult(
+        bool $isDuplicate,
+        bool $shouldSkip,
+        int $confidence,
+        string $reason,
+        ?int $matchedTransactionId,
+        array $matches,
+        bool $aiUsed,
+        bool $fallbackUsed
+    ): array {
+        return [
+            'is_duplicate' => $isDuplicate,
+            'should_skip' => $shouldSkip,
+            'possible_duplicate' => $isDuplicate && !$shouldSkip,
+            'confidence' => $this->clampScore($confidence),
+            'reason' => $reason,
+            'matched_transaction_id' => $matchedTransactionId,
+            'matches' => $matches,
+            'ai_used' => $aiUsed,
+            'fallback_used' => $fallbackUsed,
+        ];
+    }
+}

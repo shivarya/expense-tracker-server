@@ -244,4 +244,76 @@ PROMPT;
     public function parseEmailContent(string $emailBody, string $subject): ?array {
         return $this->parseEmailBatch($emailBody, $subject);
     }
+
+    /**
+     * Score duplicate probability for a transaction against candidate transactions.
+     * Returns integer score 0-100 or null when AI is unavailable.
+     */
+    public function scoreTransactionDuplicate(array $newTransaction, array $candidateTransactions): ?int {
+        if (empty($candidateTransactions)) {
+            return 0;
+        }
+
+        $candidateLines = array_map(function ($txn) {
+            $date = $txn['transaction_date'] ?? $txn['date'] ?? '';
+            $merchant = $txn['merchant'] ?? '';
+            $type = $txn['transaction_type'] ?? '';
+            $amount = isset($txn['amount']) ? number_format((float)$txn['amount'], 2, '.', '') : '0.00';
+            $description = $txn['description'] ?? '';
+            $reference = $txn['reference_number'] ?? '';
+
+            return sprintf(
+                '- %s | %s | %s | INR %s | ref=%s | %s',
+                $date,
+                $type,
+                $merchant,
+                $amount,
+                $reference !== '' ? $reference : 'none',
+                $description
+            );
+        }, array_slice($candidateTransactions, 0, 15));
+
+        $messages = [
+            [
+                'role' => 'system',
+                'content' => "You are a strict duplicate detector for financial transactions. Return JSON only: {\"score\": <0-100>}.\n"
+                    . "Rules: same exact reference_number means duplicate.\n"
+                    . "High score only when amount, merchant, transaction type, account-context proxy, and time are strongly aligned.\n"
+                    . "If merchant differs clearly for same amount, score must be low."
+            ],
+            [
+                'role' => 'user',
+                'content' => "NEW TRANSACTION:\n"
+                    . json_encode([
+                        'transaction_date' => $newTransaction['transaction_date'] ?? ($newTransaction['date'] ?? null),
+                        'transaction_type' => $newTransaction['transaction_type'] ?? null,
+                        'amount' => isset($newTransaction['amount']) ? (float)$newTransaction['amount'] : null,
+                        'merchant' => $newTransaction['merchant'] ?? null,
+                        'description' => $newTransaction['description'] ?? null,
+                        'reference_number' => $newTransaction['reference_number'] ?? null,
+                    ], JSON_UNESCAPED_SLASHES)
+                    . "\n\nCANDIDATES:\n"
+                    . implode("\n", $candidateLines)
+                    . "\n\nReturn JSON only: {\"score\": number}."
+            ]
+        ];
+
+        $result = $this->chatCompletion($messages, 0.0, true);
+        if (!is_array($result)) {
+            return null;
+        }
+
+        $score = null;
+        if (isset($result['score'])) {
+            $score = (int)$result['score'];
+        } elseif (isset($result['duplicate_score'])) {
+            $score = (int)$result['duplicate_score'];
+        }
+
+        if ($score === null) {
+            return null;
+        }
+
+        return max(0, min(100, $score));
+    }
 }
