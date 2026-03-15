@@ -277,6 +277,13 @@ Runtime matching uses DB table `category_learning_rules` (per user) and this mar
 <!-- AUTO_LEARNED_MAPPINGS_START -->
 | User | Pattern | Category ID | Category Name | Uses | Last Updated |
 |---|---|---:|---|---:|---|
+| 1 | shradha | 1 | Food & Dining | 1 | 2026-03-14 19:23:12 |
+| 1 | guvvala rupakumar | 6 | Healthcare | 1 | 2026-03-14 19:20:19 |
+| 1 | dsi omr bangalore | 3 | Shopping | 1 | 2026-03-14 19:20:03 |
+| 1 | passport seva project | 8 | Travel | 1 | 2026-03-14 19:11:59 |
+| 1 | amit kumar sahani | 56 | Home Improvement | 1 | 2026-03-14 19:10:56 |
+| 1 | gramiq | 9 | Groceries | 1 | 2026-03-14 19:10:41 |
+| 1 | credpaya | 12 | Personal Care | 1 | 2026-03-14 01:37:26 |
 | 1 | nagalakshmi | 55 | Donation | 1 | 2026-03-11 09:14:58 |
 | 1 | kumara | 2 | Transportation | 1 | 2026-03-11 09:13:09 |
 | 1 | kanti | 1 | Food & Dining | 1 | 2026-03-11 09:09:26 |
@@ -284,7 +291,6 @@ Runtime matching uses DB table `category_learning_rules` (per user) and this mar
 | 1 | nallola munemma | 2 | Transportation | 1 | 2026-03-08 21:17:50 |
 | 1 | jyothi | 9 | Groceries | 1 | 2026-03-08 21:17:31 |
 | 1 | the arun | 9 | Groceries | 1 | 2026-03-08 21:17:00 |
-| 1 | credpaya | 12 | Personal Care | 1 | 2026-03-08 21:15:57 |
 | 1 | sathya | 6 | Healthcare | 3 | 2026-03-08 21:15:38 |
 | 1 | cred | 5 | Bills & Utilities | 1 | 2026-03-08 21:13:23 |
 | 1 | deepak kumar | 1 | Food & Dining | 1 | 2026-03-07 09:22:57 |
