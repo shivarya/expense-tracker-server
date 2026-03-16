@@ -119,7 +119,8 @@ class AzureOpenAI {
     private function parseSMSBatch(array $smsMessages): array {
         $smsTexts = [];
         foreach ($smsMessages as $idx => $msg) {
-            $smsTexts[] = ($idx + 1) . ". From: {$msg['sender']}, Body: {$msg['body']}";
+            $smsDate = $msg['date'] ?? '';
+            $smsTexts[] = ($idx + 1) . ". [sms_index:" . ($idx + 1) . "] From: {$msg['sender']}, Date: {$smsDate}, Body: {$msg['body']}";
         }
 
         $systemPrompt = <<<'PROMPT'
@@ -133,6 +134,7 @@ REQUIRED fields per transaction:
 - transaction_type: "debit" or "credit"
 - amount: numeric value only (no currency symbols)
 - date: "YYYY-MM-DD HH:MM:SS" format
+- sms_index: integer index of source SMS from input list (1-based)
 - category_id: integer from the canonical list below
 - merchant: merchant/payee name (clean, no bank jargon)
 - reference_number: UPI ref, txn ID, chq number (or null)
@@ -175,6 +177,8 @@ RULES:
 - House repair, renovation, home maintenance, decor/furnishing payments → category_id 56
 - When in doubt between 18 and 51, prefer 51
 - Do NOT invent new category names or IDs
+- Preserve exact SMS timestamp in "date" using the SMS Date field provided in each input row.
+- Do NOT default time to 00:00:00 unless the source SMS truly has no time information.
 
 Return ONLY a valid JSON object — no markdown, no explanation.
 PROMPT;
@@ -230,6 +234,14 @@ PROMPT;
                 error_log("Response keys: " . json_encode(array_keys($response)));
                 if (isset($response['transactions']) && is_array($response['transactions'])) {
                     foreach ($response['transactions'] as $transaction) {
+                        $smsIndex = isset($transaction['sms_index']) ? (int)$transaction['sms_index'] : 0;
+                        if ($smsIndex > 0 && isset($batch[$smsIndex - 1]['date'])) {
+                            $normalizedSMSDate = $this->normalizeSmsDate($batch[$smsIndex - 1]['date']);
+                            if ($normalizedSMSDate !== null) {
+                                $transaction['sms_date'] = $normalizedSMSDate;
+                            }
+                        }
+
                         $transaction['source'] = 'sms';
                         $transaction['parsed_at'] = date('Y-m-d H:i:s');
                         $transactions[] = $transaction;
@@ -243,6 +255,19 @@ PROMPT;
 
     public function parseEmailContent(string $emailBody, string $subject): ?array {
         return $this->parseEmailBatch($emailBody, $subject);
+    }
+
+    private function normalizeSmsDate(?string $raw): ?string {
+        if (!$raw) {
+            return null;
+        }
+
+        $timestamp = strtotime($raw);
+        if ($timestamp === false) {
+            return null;
+        }
+
+        return date('Y-m-d H:i:s', $timestamp);
     }
 
     /**

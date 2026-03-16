@@ -77,6 +77,7 @@ class SMSParserController {
         // Save transactions to database
         $savedCount = 0;
         $skippedCount = 0;
+        $updatedDuplicateTimeCount = 0;
         $flaggedPossibleCount = 0;
         $aiCheckedCount = 0;
         $fallbackUsedCount = 0;
@@ -86,6 +87,7 @@ class SMSParserController {
         $savedCreditAmount = 0.0;
 
         foreach ($transactions as $transaction) {
+            $transaction['date'] = $this->resolveTransactionDateTime($transaction);
             $duplicateCheck = $this->evaluateDuplicateTransaction($userId, $transaction, null, true);
 
             if (!empty($duplicateCheck['ai_used'])) {
@@ -96,6 +98,13 @@ class SMSParserController {
             }
 
             if (!empty($duplicateCheck['should_skip'])) {
+                if ($this->updateMatchedDuplicateTimestamp(
+                    $userId,
+                    isset($duplicateCheck['matched_transaction_id']) ? (int)$duplicateCheck['matched_transaction_id'] : null,
+                    $transaction['date']
+                )) {
+                    $updatedDuplicateTimeCount++;
+                }
                 $skippedCount++;
                 continue; // Skip duplicate
             }
@@ -158,6 +167,7 @@ class SMSParserController {
         error_log("Transactions parsed by AI: " . count($transactions));
         error_log("Transactions saved to DB: $savedCount");
         error_log("Duplicates skipped: $skippedCount");
+        error_log("Duplicate rows time-updated: $updatedDuplicateTimeCount");
         error_log("Saved debit txns: $savedDebitCount, amount: $savedDebitAmount");
         error_log("Saved credit txns: $savedCreditCount, amount: $savedCreditAmount");
         error_log("User ID: $userId");
@@ -176,6 +186,7 @@ class SMSParserController {
             'saved_transactions' => $savedCount,
             'skipped_duplicates' => $skippedCount,
             'skipped_high_confidence' => $skippedCount,
+            'updated_duplicate_timestamps' => $updatedDuplicateTimeCount,
             'flagged_possible_duplicates' => $flaggedPossibleCount,
             'ai_checked_transactions' => $aiCheckedCount,
             'duplicate_fallback_used' => $fallbackUsedCount,
@@ -234,14 +245,22 @@ class SMSParserController {
 
         // Save transaction
         $transaction = $transactions[0];
+        $transaction['date'] = $this->resolveTransactionDateTime($transaction, $date);
 
         $duplicateCheck = $this->evaluateDuplicateTransaction($userId, $transaction, null, true);
         if (!empty($duplicateCheck['should_skip'])) {
+            $updatedDuplicateTimestamp = $this->updateMatchedDuplicateTimestamp(
+                $userId,
+                isset($duplicateCheck['matched_transaction_id']) ? (int)$duplicateCheck['matched_transaction_id'] : null,
+                $transaction['date']
+            );
+
             Response::success([
                 'message' => 'Duplicate transaction skipped',
                 'processed' => true,
                 'saved' => false,
                 'duplicate' => true,
+                'updated_duplicate_timestamp' => $updatedDuplicateTimestamp,
                 'duplicate_confidence' => (int)($duplicateCheck['confidence'] ?? 0),
                 'duplicate_reason' => $duplicateCheck['reason'] ?? 'unknown',
                 'saved_transactions' => 0,
@@ -307,6 +326,86 @@ class SMSParserController {
             'skip_threshold' => 76,
             'duplicate_threshold' => 51,
         ]);
+    }
+
+    private function resolveTransactionDateTime(array $transaction, ?string $fallbackSmsDate = null): string
+    {
+        $aiDate = $this->normalizeDateTimeString($transaction['date'] ?? null);
+        $smsDate = $this->normalizeDateTimeString($transaction['sms_date'] ?? $fallbackSmsDate);
+
+        if ($aiDate === null && $smsDate === null) {
+            return date('Y-m-d H:i:s');
+        }
+        if ($aiDate === null) {
+            return $smsDate;
+        }
+        if ($smsDate === null) {
+            return $aiDate;
+        }
+
+        // Prefer SMS time when AI returned date-only midnight.
+        if ($this->hasMidnightTime($aiDate) && !$this->hasMidnightTime($smsDate)) {
+            return $smsDate;
+        }
+
+        return $aiDate;
+    }
+
+    private function normalizeDateTimeString(?string $raw): ?string
+    {
+        if (!$raw) {
+            return null;
+        }
+
+        $timestamp = strtotime($raw);
+        if ($timestamp === false) {
+            return null;
+        }
+
+        return date('Y-m-d H:i:s', $timestamp);
+    }
+
+    private function hasMidnightTime(string $dateTime): bool
+    {
+        return substr($dateTime, 11, 8) === '00:00:00';
+    }
+
+    private function updateMatchedDuplicateTimestamp(int $userId, ?int $matchedTransactionId, ?string $incomingDateTime): bool
+    {
+        if (!$matchedTransactionId || !$incomingDateTime) {
+            return false;
+        }
+
+        $newDateTime = $this->normalizeDateTimeString($incomingDateTime);
+        if ($newDateTime === null) {
+            return false;
+        }
+
+        $existing = $this->db->fetchOne(
+            "SELECT transaction_date FROM transactions WHERE id = ? AND user_id = ? AND deleted_at IS NULL",
+            [$matchedTransactionId, $userId]
+        );
+
+        if (!$existing || empty($existing['transaction_date'])) {
+            return false;
+        }
+
+        $existingDateTime = $this->normalizeDateTimeString($existing['transaction_date']);
+        if ($existingDateTime === null || $existingDateTime === $newDateTime) {
+            return false;
+        }
+
+        // Never downgrade a known precise time to midnight.
+        if (!$this->hasMidnightTime($existingDateTime) && $this->hasMidnightTime($newDateTime)) {
+            return false;
+        }
+
+        $this->db->execute(
+            "UPDATE transactions SET transaction_date = ? WHERE id = ? AND user_id = ? AND deleted_at IS NULL",
+            [$newDateTime, $matchedTransactionId, $userId]
+        );
+
+        return true;
     }
 
     /**
