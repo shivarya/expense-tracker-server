@@ -34,8 +34,8 @@ class StatementController
         $cardLastFour = $this->normalizeCardLastFour($input['card_last_four'] ?? '');
         $password = (string)($input['password'] ?? '');
 
-        if ($bank !== 'icici') {
-            Response::error('Only ICICI statement password setup is supported in this release.', 400);
+        if (!$this->isSupportedBank($bank)) {
+            Response::error('Only SBI and ICICI statement password setup is currently supported.', 400);
         }
 
         if ($accountType !== 'credit_card') {
@@ -122,8 +122,8 @@ class StatementController
         $accountType = $this->normalizeAccountType($_POST['account_type'] ?? 'credit_card');
         $cardLastFour = $this->normalizeCardLastFour($_POST['card_last_four'] ?? '');
 
-        if ($bank !== 'icici') {
-            Response::error('Only ICICI statement uploads are supported in this release.', 400);
+        if (!$this->isSupportedBank($bank)) {
+            Response::error('Only SBI and ICICI statement uploads are currently supported.', 400);
         }
 
         if ($accountType !== 'credit_card') {
@@ -220,10 +220,12 @@ class StatementController
             );
 
             $text = $this->extractPdfText($workingFile, $password, $cleanupFiles);
-            $parsedTransactions = $this->parseIciciTransactions($text, $cardLastFour);
+            $parsedResult = $this->parseTransactionsByBank($bank, $text, $cardLastFour);
+            $parsedTransactions = $parsedResult['transactions'];
+            $parserName = $parsedResult['parser'];
 
             if (empty($parsedTransactions)) {
-                throw new Exception('No transactions detected in the uploaded ICICI statement.');
+                throw new Exception('No transactions detected in the uploaded ' . strtoupper($bank) . ' statement.');
             }
 
             $accountId = $this->getOrCreateCreditCardAccount($userId, $bank, $cardLastFour);
@@ -277,7 +279,7 @@ class StatementController
                     $categoryId = CategoryResolver::resolveTransaction($transactionPayload);
                     $sourceData = [
                         'source' => 'statement_pdf',
-                        'parser' => 'icici_v1',
+                        'parser' => $parserName,
                         'bank' => $bank,
                         'card_last_four' => $cardLastFour,
                         'upload_id' => $uploadId,
@@ -433,6 +435,21 @@ class StatementController
         return $text;
     }
 
+    private function parseTransactionsByBank(string $bank, string $text, string $cardLastFour): array
+    {
+        if ($bank === 'sbi') {
+            return [
+                'transactions' => $this->parseSbiTransactions($text, $cardLastFour),
+                'parser' => 'sbi_v1',
+            ];
+        }
+
+        return [
+            'transactions' => $this->parseIciciTransactions($text, $cardLastFour),
+            'parser' => 'icici_v1',
+        ];
+    }
+
     private function parseIciciTransactions(string $text, string $cardLastFour): array
     {
         $lines = preg_split('/\r\n|\n|\r/', $text) ?: [];
@@ -490,7 +507,7 @@ class StatementController
             }
 
             $normalizedDate = $this->normalizeIciciDate($dateRaw);
-            $merchant = $this->extractMerchant($description);
+            $merchant = $this->extractMerchant($description, 'ICICI Card Transaction');
 
             $transactions[] = [
                 'transaction_type' => $isCredit ? 'credit' : 'debit',
@@ -507,9 +524,130 @@ class StatementController
         return $transactions;
     }
 
+    private function parseSbiTransactions(string $text, string $cardLastFour): array
+    {
+        $lines = preg_split('/\r\n|\n|\r/', $text) ?: [];
+        $transactions = [];
+
+        $currentDateRaw = '';
+        $descriptionParts = [];
+
+        foreach ($lines as $line) {
+            $line = trim((string)$line);
+            if ($line === '') {
+                continue;
+            }
+
+            $line = preg_replace('/\s+/', ' ', $line) ?? $line;
+
+            if (preg_match('/page no\.|statement of account|brought forward|opening balance|closing balance/i', $line)) {
+                continue;
+            }
+
+            if (preg_match('/^(\d{2}\/\d{2}\/\d{4})\d{2}\/\d{2}\/\d{4}$/', $line, $dateMatch)
+                || preg_match('/^(\d{2}\/\d{2}\/\d{4})$/', $line, $dateMatch)) {
+                $currentDateRaw = $dateMatch[1];
+                $descriptionParts = [];
+                continue;
+            }
+
+            if ($currentDateRaw === '') {
+                continue;
+            }
+
+            $tokens = preg_split('/\s+/', $line) ?: [];
+            if (count($tokens) >= 4 && $tokens[0] === '-') {
+                $debitRaw = $tokens[1] ?? '-';
+                $creditRaw = $tokens[2] ?? '-';
+                $balanceRaw = $tokens[3] ?? '';
+
+                $debitAmount = $this->parseSbiAmountToken($debitRaw);
+                $creditAmount = $this->parseSbiAmountToken($creditRaw);
+                $balanceAmount = $this->parseSbiAmountToken($balanceRaw);
+
+                if ($balanceAmount === null || ($debitAmount === null && $creditAmount === null)) {
+                    continue;
+                }
+
+                $description = trim(implode(' ', $descriptionParts));
+                if ($description === '') {
+                    $description = 'SBI account statement transaction';
+                }
+
+                $type = 'debit';
+                $amount = $debitAmount;
+                if ($debitAmount === null && $creditAmount !== null) {
+                    $type = 'credit';
+                    $amount = $creditAmount;
+                } elseif ($debitAmount !== null && $creditAmount !== null) {
+                    $type = $creditAmount >= $debitAmount ? 'credit' : 'debit';
+                    $amount = $type === 'credit' ? $creditAmount : $debitAmount;
+                }
+
+                if ($amount === null || $amount <= 0) {
+                    $currentDateRaw = '';
+                    $descriptionParts = [];
+                    continue;
+                }
+
+                $normalizedDate = $this->normalizeStatementDate($currentDateRaw);
+                $merchant = $this->extractMerchant($description, 'SBI Account Transaction');
+                $referenceValue = $this->extractReferenceFromDescription($description);
+                if ($referenceValue === '') {
+                    $referenceValue = strtoupper(substr(sha1($currentDateRaw . '|' . $description . '|' . $amount . '|' . $cardLastFour), 0, 12));
+                }
+
+                $rawLine = $currentDateRaw . ' | ' . $description . ' | ' . $line;
+                $transactions[] = [
+                    'transaction_type' => $type,
+                    'amount' => round($amount, 2),
+                    'merchant' => $merchant,
+                    'description' => $description,
+                    'transaction_date' => $normalizedDate,
+                    'reference_number' => 'SBI_' . $referenceValue,
+                    'raw_line' => $rawLine,
+                    'card_last_four' => $cardLastFour,
+                ];
+
+                $currentDateRaw = '';
+                $descriptionParts = [];
+                continue;
+            }
+
+            if (preg_match('/^balance$/i', $line)) {
+                continue;
+            }
+
+            $descriptionParts[] = $line;
+        }
+
+        return $transactions;
+    }
+
+    private function parseSbiAmountToken(string $token): ?float
+    {
+        $value = trim($token);
+        if ($value === '-' || $value === '--' || $value === '') {
+            return null;
+        }
+
+        if (!preg_match('/^[\d,]+\.\d{2}$/', $value)) {
+            return null;
+        }
+
+        $amount = (float)str_replace(',', '', $value);
+        return $amount > 0 ? $amount : null;
+    }
+
     private function normalizeIciciDate(string $dateRaw): string
     {
-        $parts = explode('/', $dateRaw);
+        return $this->normalizeStatementDate($dateRaw);
+    }
+
+    private function normalizeStatementDate(string $dateRaw): string
+    {
+        $normalized = str_replace('-', '/', trim($dateRaw));
+        $parts = explode('/', $normalized);
         if (count($parts) !== 3) {
             return date('Y-m-d H:i:s');
         }
@@ -525,7 +663,7 @@ class StatementController
         return $year . '-' . $month . '-' . $day . ' 12:00:00';
     }
 
-    private function extractMerchant(string $description): string
+    private function extractMerchant(string $description, string $fallbackLabel = 'Card Transaction'): string
     {
         $merchant = trim($description);
 
@@ -538,10 +676,45 @@ class StatementController
         $merchant = preg_replace('/\s+/', ' ', trim($merchant)) ?? $merchant;
 
         if ($merchant === '') {
-            $merchant = 'ICICI Card Transaction';
+            $merchant = $fallbackLabel;
         }
 
         return mb_substr($merchant, 0, 500);
+    }
+
+    private function extractReferenceFromDescription(string $description): string
+    {
+        if (preg_match('/(?:ref(?:erence)?|rrn|utr|txn(?:\s*id)?)\s*[:\-]?\s*([A-Z0-9]{6,})/i', $description, $match)) {
+            return strtoupper($match[1]);
+        }
+
+        if (preg_match('/\b([A-Z0-9]{8,})\b/', strtoupper($description), $match)) {
+            return $match[1];
+        }
+
+        return '';
+    }
+
+    private function inferTransactionType(string $description, string $drCr): string
+    {
+        if ($drCr === 'CR') {
+            return 'credit';
+        }
+
+        if ($drCr === 'DR') {
+            return 'debit';
+        }
+
+        if (preg_match('/refund|reversal|cashback|payment received|credit/i', $description)) {
+            return 'credit';
+        }
+
+        return 'debit';
+    }
+
+    private function isSupportedBank(string $bank): bool
+    {
+        return in_array($bank, ['icici', 'sbi'], true);
     }
 
     private function getOrCreateCreditCardAccount(int $userId, string $bank, string $cardLastFour): int
