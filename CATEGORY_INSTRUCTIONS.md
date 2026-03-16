@@ -277,6 +277,8 @@ Runtime matching uses DB table `category_learning_rules` (per user) and this mar
 <!-- AUTO_LEARNED_MAPPINGS_START -->
 | User | Pattern | Category ID | Category Name | Uses | Last Updated |
 |---|---|---:|---|---:|---|
+| 1 | pavithra | 1 | Food & Dining | 2 | 2026-03-16 03:26:33 |
+| 1 | urbancla | 56 | Home Improvement | 1 | 2026-03-16 03:24:02 |
 | 1 | shradha | 1 | Food & Dining | 1 | 2026-03-14 19:23:12 |
 | 1 | guvvala rupakumar | 6 | Healthcare | 1 | 2026-03-14 19:20:19 |
 | 1 | dsi omr bangalore | 3 | Shopping | 1 | 2026-03-14 19:20:03 |
