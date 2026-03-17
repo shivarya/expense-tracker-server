@@ -287,6 +287,8 @@ class StatementController
             $resolvedCardLastFour = $cardLastFour;
             $lastPasswordError = '';
             $attemptedPasswordCandidates = [];
+            $lastParserUsed = '';
+            $lastExtractedPreview = '';
 
             foreach ($passwordRows as $passwordRow) {
                 try {
@@ -308,6 +310,8 @@ class StatementController
 
                     $text = $this->extractPdfText($workingFile, $password, $cleanupFiles);
                     $parsedResult = $this->parseTransactionsByBank($bank, $text, $candidateCardContext);
+                    $lastParserUsed = (string)($parsedResult['parser'] ?? '');
+                    $lastExtractedPreview = $this->buildTextPreview($text);
                     $resolvedCardLastFour = $candidateCardContext;
                     $lastPasswordError = '';
                     break;
@@ -322,6 +326,8 @@ class StatementController
                         . (!empty($attemptedPasswordCandidates)
                             ? ' Tried: ' . implode(', ', array_unique($attemptedPasswordCandidates)) . '.'
                             : '')
+                        . ($lastParserUsed !== '' ? ' Parser: ' . $lastParserUsed . '.' : '')
+                        . ($lastExtractedPreview !== '' ? ' Text preview: ' . $lastExtractedPreview . '.' : '')
                         . ($lastPasswordError !== '' ? ' Last error: ' . $lastPasswordError : '')
                 );
             }
@@ -818,16 +824,191 @@ PY;
     private function parseTransactionsByBank(string $bank, string $text, string $cardLastFour): array
     {
         if ($bank === 'sbi') {
+            $transactions = $this->parseSbiTransactions($text, $cardLastFour);
+            if (!empty($transactions)) {
+                return [
+                    'transactions' => $transactions,
+                    'parser' => 'sbi_v1',
+                ];
+            }
+
             return [
-                'transactions' => $this->parseSbiTransactions($text, $cardLastFour),
-                'parser' => 'sbi_v1',
+                'transactions' => $this->parseGenericStatementTransactions($text, $cardLastFour, 'SBI'),
+                'parser' => 'sbi_generic_v1',
+            ];
+        }
+
+        $transactions = $this->parseIciciTransactions($text, $cardLastFour);
+        if (!empty($transactions)) {
+            return [
+                'transactions' => $transactions,
+                'parser' => 'icici_v1',
             ];
         }
 
         return [
-            'transactions' => $this->parseIciciTransactions($text, $cardLastFour),
-            'parser' => 'icici_v1',
+            'transactions' => $this->parseGenericStatementTransactions($text, $cardLastFour, 'ICICI'),
+            'parser' => 'icici_generic_v1',
         ];
+    }
+
+    private function parseGenericStatementTransactions(string $text, string $cardLastFour, string $bankLabel): array
+    {
+        $lines = preg_split('/\r\n|\n|\r/', $text) ?: [];
+        $records = [];
+        $current = '';
+
+        foreach ($lines as $line) {
+            $line = trim((string)$line);
+            if ($line === '') {
+                continue;
+            }
+
+            $line = preg_replace('/\s+/', ' ', $line) ?? $line;
+
+            if ($this->looksLikeStatementDatePrefix($line)) {
+                if ($current !== '') {
+                    $records[] = $current;
+                }
+                $current = $line;
+                continue;
+            }
+
+            if ($current !== '') {
+                $current .= ' ' . $line;
+            }
+        }
+
+        if ($current !== '') {
+            $records[] = $current;
+        }
+
+        $transactions = [];
+        $index = 0;
+
+        foreach ($records as $record) {
+            $index++;
+
+            $dateInfo = $this->parseStatementDatePrefix($record);
+            if ($dateInfo === null) {
+                continue;
+            }
+
+            $dateRaw = $dateInfo['raw_date'];
+            $transactionDate = $dateInfo['normalized_date'];
+            $rest = $dateInfo['rest'];
+            $restLower = strtolower($rest);
+
+            if (preg_match('/statement|opening balance|closing balance|minimum amount due|total amount due|payment due date|credit limit|available limit|reward/i', $restLower)) {
+                continue;
+            }
+
+            if (!preg_match_all('/-?\d[\d,]*\.\d{2}/', $rest, $amountMatches, PREG_OFFSET_CAPTURE) || empty($amountMatches[0])) {
+                continue;
+            }
+
+            $candidateAmounts = $amountMatches[0];
+            $selectedAmountIndex = count($candidateAmounts) >= 2 ? count($candidateAmounts) - 2 : 0;
+
+            $amountRaw = (string)$candidateAmounts[$selectedAmountIndex][0];
+            $amountOffset = (int)$candidateAmounts[$selectedAmountIndex][1];
+            $amount = (float)str_replace(',', '', str_replace('-', '', $amountRaw));
+
+            if ($amount <= 0) {
+                continue;
+            }
+
+            $description = trim(substr($rest, 0, $amountOffset));
+            if ($description === '') {
+                $description = trim($rest);
+            }
+
+            $tail = strtoupper(trim(substr($rest, $amountOffset + strlen($amountRaw))));
+            $drCr = '';
+            if (preg_match('/\b(CR|DR)\b/i', $tail, $drCrMatch)) {
+                $drCr = strtoupper((string)$drCrMatch[1]);
+            }
+
+            if ($description === '') {
+                continue;
+            }
+
+            $transactionType = $this->inferTransactionType($description, $drCr);
+            $merchant = $this->extractMerchant($description, $bankLabel . ' Card Transaction');
+            $reference = $this->extractReferenceFromDescription($description);
+
+            if ($reference === '') {
+                $reference = strtoupper(substr(sha1($dateRaw . '|' . $description . '|' . $amount . '|' . $cardLastFour . '|' . $index), 0, 12));
+            }
+
+            $transactions[] = [
+                'transaction_type' => $transactionType,
+                'amount' => round($amount, 2),
+                'merchant' => $merchant,
+                'description' => $description,
+                'transaction_date' => $transactionDate,
+                'reference_number' => $bankLabel . '_' . $reference,
+                'raw_line' => $record,
+                'card_last_four' => $cardLastFour,
+            ];
+        }
+
+        return $transactions;
+    }
+
+    private function looksLikeStatementDatePrefix(string $line): bool
+    {
+        return preg_match(
+            '/^(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}|\d{1,2}[\-\s](?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*[\-\s]\d{2,4})\b/i',
+            $line
+        ) === 1;
+    }
+
+    private function parseStatementDatePrefix(string $record): ?array
+    {
+        if (!preg_match(
+            '/^(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}|\d{1,2}[\-\s](?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*[\-\s]\d{2,4})\s+(.+)$/i',
+            trim($record),
+            $match
+        )) {
+            return null;
+        }
+
+        $rawDate = trim((string)$match[1]);
+        $normalizedDate = $this->normalizeStatementDateFlexible($rawDate);
+
+        return [
+            'raw_date' => $rawDate,
+            'normalized_date' => $normalizedDate,
+            'rest' => trim((string)$match[2]),
+        ];
+    }
+
+    private function normalizeStatementDateFlexible(string $dateRaw): string
+    {
+        $clean = trim($dateRaw);
+
+        if (preg_match('/^\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}$/', $clean)) {
+            return $this->normalizeStatementDate($clean);
+        }
+
+        $normalizedText = preg_replace('/\s+/', ' ', str_replace('-', ' ', $clean)) ?? $clean;
+        $parsedTs = strtotime($normalizedText);
+        if ($parsedTs !== false) {
+            return date('Y-m-d 12:00:00', $parsedTs);
+        }
+
+        return date('Y-m-d H:i:s');
+    }
+
+    private function buildTextPreview(string $text): string
+    {
+        $preview = trim((string)preg_replace('/\s+/', ' ', $text));
+        if ($preview === '') {
+            return '';
+        }
+
+        return substr($preview, 0, 220);
     }
 
     private function parseIciciTransactions(string $text, string $cardLastFour): array
