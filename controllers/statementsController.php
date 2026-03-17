@@ -201,7 +201,10 @@ class StatementController
         );
 
         if (empty($passwordRows)) {
-            Response::error('No secure statement password found. Save password first.', 400);
+            $passwordRows = [[
+                'card_last_four' => $cardLastFour !== '' ? $cardLastFour : null,
+                'plain_password' => '',
+            ]];
         }
 
         $fileHash = hash_file('sha256', $file['tmp_name']);
@@ -277,11 +280,16 @@ class StatementController
 
             foreach ($passwordRows as $passwordRow) {
                 try {
-                    $password = StatementPasswordVault::decrypt(
-                        (string)$passwordRow['encrypted_password'],
-                        (string)$passwordRow['iv'],
-                        (string)$passwordRow['auth_tag']
-                    );
+                    $password = '';
+                    if (array_key_exists('plain_password', $passwordRow)) {
+                        $password = (string)$passwordRow['plain_password'];
+                    } else {
+                        $password = StatementPasswordVault::decrypt(
+                            (string)$passwordRow['encrypted_password'],
+                            (string)$passwordRow['iv'],
+                            (string)$passwordRow['auth_tag']
+                        );
+                    }
 
                     $candidateCardLastFour = $this->normalizeCardLastFour((string)($passwordRow['card_last_four'] ?? ''));
                     $candidateCardContext = $cardLastFour !== '' ? $cardLastFour : $candidateCardLastFour;
@@ -298,7 +306,7 @@ class StatementController
 
             if (empty($parsedResult['transactions'])) {
                 throw new Exception(
-                    'Could not parse statement using saved password(s).'
+                    'Could not parse statement using available password(s). Save the correct statement password and retry.'
                         . ($lastPasswordError !== '' ? ' Last error: ' . $lastPasswordError : '')
                 );
             }
