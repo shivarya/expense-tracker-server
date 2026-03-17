@@ -51,6 +51,7 @@ class SMSParserController {
         });
 
         if (empty($bankSMS)) {
+            error_log('[TX_SYNC_SUMMARY][SMS_PARSE] user_id=' . $userId . ' total_tx=0 duplicates_found=0 duplicates_skipped=0 possible_duplicates=0 synced=0 failed_saves=0');
             Response::success([
                 'message' => 'No bank SMS found',
                 'parsed_count' => 0,
@@ -72,7 +73,7 @@ class SMSParserController {
         // Parse using Azure OpenAI
         $transactions = $this->ai->parseBankSMS($bankSMS);
         error_log("AI parsing complete. Extracted " . count($transactions) . " transactions");
-        error_log("Transactions JSON: " . json_encode($transactions));
+        $this->logTransactionsInChunks($transactions);
 
         // Save transactions to database
         $savedCount = 0;
@@ -81,6 +82,7 @@ class SMSParserController {
         $flaggedPossibleCount = 0;
         $aiCheckedCount = 0;
         $fallbackUsedCount = 0;
+        $failedSaveCount = 0;
         $savedDebitCount = 0;
         $savedCreditCount = 0;
         $savedDebitAmount = 0.0;
@@ -156,9 +158,19 @@ class SMSParserController {
 
                 error_log("Transaction saved successfully: Amount={$transaction['amount']}, Merchant=" . ($transaction['merchant'] ?? 'N/A'));
             } catch (Exception $e) {
+                $failedSaveCount++;
                 error_log("Failed to save transaction: " . $e->getMessage());
             }
         }
+
+        $duplicatesFound = $skippedCount + $flaggedPossibleCount;
+        error_log('[TX_SYNC_SUMMARY][SMS_PARSE] user_id=' . $userId
+            . ' total_tx=' . count($transactions)
+            . ' duplicates_found=' . $duplicatesFound
+            . ' duplicates_skipped=' . $skippedCount
+            . ' possible_duplicates=' . $flaggedPossibleCount
+            . ' synced=' . $savedCount
+            . ' failed_saves=' . $failedSaveCount);
 
         // Log success summary
         error_log("=== SMS PARSING COMPLETE ===");
@@ -351,13 +363,68 @@ class SMSParserController {
         return $aiDate;
     }
 
-    private function normalizeDateTimeString(?string $raw): ?string
+    private function logTransactionsInChunks(array $transactions, int $transactionsPerChunk = 10, int $maxCharsPerLine = 3000): void
     {
-        if (!$raw) {
+        if (empty($transactions)) {
+            error_log('Transactions JSON: []');
+            return;
+        }
+
+        $transactionsPerChunk = max(1, $transactionsPerChunk);
+        $maxCharsPerLine = max(500, $maxCharsPerLine);
+        $chunks = array_chunk($transactions, $transactionsPerChunk);
+        $chunkCount = count($chunks);
+
+        error_log("Transactions JSON logging in {$chunkCount} chunks ({$transactionsPerChunk} tx/chunk)");
+
+        foreach ($chunks as $chunkIndex => $chunk) {
+            $encoded = json_encode($chunk);
+            if ($encoded === false) {
+                error_log('Transactions JSON chunk encoding failed: ' . json_last_error_msg());
+                continue;
+            }
+
+            $chunkLabel = ($chunkIndex + 1) . '/' . $chunkCount;
+            if (strlen($encoded) <= $maxCharsPerLine) {
+                error_log("Transactions JSON chunk {$chunkLabel}: " . $encoded);
+                continue;
+            }
+
+            $parts = str_split($encoded, $maxCharsPerLine);
+            $partCount = count($parts);
+            foreach ($parts as $partIndex => $part) {
+                $partLabel = ($partIndex + 1) . '/' . $partCount;
+                error_log("Transactions JSON chunk {$chunkLabel} part {$partLabel}: " . $part);
+            }
+        }
+    }
+
+    private function normalizeDateTimeString($raw): ?string
+    {
+        if ($raw === null) {
             return null;
         }
 
-        $timestamp = strtotime($raw);
+        if (is_int($raw) || is_float($raw)) {
+            $numeric = (int)$raw;
+            // Accept Unix timestamps; reject short numeric values like year-only "2026".
+            if ($numeric >= 1000000000 && $numeric <= 4102444800) {
+                return date('Y-m-d H:i:s', $numeric);
+            }
+            return null;
+        }
+
+        $value = trim((string)$raw);
+        if ($value === '') {
+            return null;
+        }
+
+        // Guard against low-fidelity AI outputs that should defer to sms_date.
+        if (preg_match('/^\d{4}$/', $value) || preg_match('/^\d{4}-\d{2}$/', $value)) {
+            return null;
+        }
+
+        $timestamp = strtotime($value);
         if ($timestamp === false) {
             return null;
         }

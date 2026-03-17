@@ -423,12 +423,23 @@ function syncMutualFunds($userId)
 
 function syncTransactions($userId)
 {
+  $totalTransactions = 0;
+  $created = 0;
+  $skipped = 0;
+  $flaggedPossible = 0;
+  $aiChecked = 0;
+  $fallbackUsed = 0;
+  $failed = 0;
+  $errors = [];
+
   try {
     $input = getJsonInput();
     
     if (!isset($input['transactions']) || !is_array($input['transactions'])) {
       Response::error('Invalid data format. Expected array of transactions', 400);
     }
+
+    $totalTransactions = count($input['transactions']);
 
     $db = getDB();
     $duplicateDetector = new TransactionDuplicateDetector($db->getConnection(), new AzureOpenAI());
@@ -442,14 +453,6 @@ function syncTransactions($userId)
     }
 
     $db->beginTransaction();
-
-    $created = 0;
-    $skipped = 0;
-    $flaggedPossible = 0;
-    $aiChecked = 0;
-    $fallbackUsed = 0;
-    $failed = 0;
-    $errors = [];
 
     foreach ($input['transactions'] as $txn) {
       try {
@@ -549,7 +552,7 @@ function syncTransactions($userId)
       'bank_sms',
       $input['source'] ?? 'sms',
       $failed > 0 ? 'partial' : 'success',
-      count($input['transactions']),
+      $totalTransactions,
       $created,
       0,
       $failed,
@@ -557,6 +560,16 @@ function syncTransactions($userId)
     ]);
 
     $db->commit();
+
+    $duplicatesFound = $skipped + $flaggedPossible;
+    error_log('[TX_SYNC_SUMMARY][SYNC_API] user_id=' . $userId
+      . ' source=' . ($input['source'] ?? 'sms')
+      . ' total_tx=' . $totalTransactions
+      . ' duplicates_found=' . $duplicatesFound
+      . ' duplicates_skipped=' . $skipped
+      . ' possible_duplicates=' . $flaggedPossible
+      . ' synced=' . $created
+      . ' failed=' . $failed);
 
     Response::success([
       'created' => $created,
@@ -570,7 +583,20 @@ function syncTransactions($userId)
       'errors' => $errors
     ], 'Transactions synced successfully');
   } catch (Exception $e) {
-    $db->rollback();
+    if (isset($db) && $db->getConnection()->inTransaction()) {
+      $db->rollback();
+    }
+
+    $duplicatesFound = $skipped + $flaggedPossible;
+    error_log('[TX_SYNC_SUMMARY][SYNC_API][FAILED] user_id=' . $userId
+      . ' total_tx=' . $totalTransactions
+      . ' duplicates_found=' . $duplicatesFound
+      . ' duplicates_skipped=' . $skipped
+      . ' possible_duplicates=' . $flaggedPossible
+      . ' synced=' . $created
+      . ' failed=' . $failed
+      . ' error=' . $e->getMessage());
+
     Response::error('Failed to sync transactions: ' . $e->getMessage(), 500);
   }
 }
