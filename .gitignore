@@ -15,6 +15,7 @@ error_log
 
 # Archives
 vendor.zip
+vendor-*.zip
 
 # OS
 .DS_Store
