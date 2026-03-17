@@ -189,16 +189,25 @@ class StatementController
         $file = $_FILES['statement_pdf'];
         $this->validateUploadedPdf($file);
 
-        $passwordRows = $this->db->fetchAll(
-            "SELECT card_last_four, encrypted_password, iv, auth_tag
-             FROM statement_passwords
-             WHERE user_id = ? AND bank = ? AND account_type = ?"
-                . ($cardLastFour !== '' ? " AND card_last_four = ?" : "")
-                . " ORDER BY updated_at DESC, id DESC",
-            $cardLastFour !== ''
-                ? [$userId, $bank, $accountType, $cardLastFour]
-                : [$userId, $bank, $accountType]
-        );
+        if ($cardLastFour !== '') {
+            // When a card is provided, try both card-specific and generic (NULL) passwords.
+            $passwordRows = $this->db->fetchAll(
+                "SELECT card_last_four, encrypted_password, iv, auth_tag
+                 FROM statement_passwords
+                 WHERE user_id = ? AND bank = ? AND account_type = ?
+                   AND (card_last_four = ? OR card_last_four IS NULL)
+                 ORDER BY (card_last_four = ?) DESC, updated_at DESC, id DESC",
+                [$userId, $bank, $accountType, $cardLastFour, $cardLastFour]
+            );
+        } else {
+            $passwordRows = $this->db->fetchAll(
+                "SELECT card_last_four, encrypted_password, iv, auth_tag
+                 FROM statement_passwords
+                 WHERE user_id = ? AND bank = ? AND account_type = ?
+                 ORDER BY updated_at DESC, id DESC",
+                [$userId, $bank, $accountType]
+            );
+        }
 
         if (empty($passwordRows)) {
             $passwordRows = [[
@@ -277,9 +286,13 @@ class StatementController
             $parsedResult = ['transactions' => [], 'parser' => ''];
             $resolvedCardLastFour = $cardLastFour;
             $lastPasswordError = '';
+            $attemptedPasswordCandidates = [];
 
             foreach ($passwordRows as $passwordRow) {
                 try {
+                    $candidateCardLastFour = $this->normalizeCardLastFour((string)($passwordRow['card_last_four'] ?? ''));
+                    $attemptedPasswordCandidates[] = $candidateCardLastFour !== '' ? $candidateCardLastFour : 'generic';
+
                     $password = '';
                     if (array_key_exists('plain_password', $passwordRow)) {
                         $password = (string)$passwordRow['plain_password'];
@@ -291,7 +304,6 @@ class StatementController
                         );
                     }
 
-                    $candidateCardLastFour = $this->normalizeCardLastFour((string)($passwordRow['card_last_four'] ?? ''));
                     $candidateCardContext = $cardLastFour !== '' ? $cardLastFour : $candidateCardLastFour;
 
                     $text = $this->extractPdfText($workingFile, $password, $cleanupFiles);
@@ -307,6 +319,9 @@ class StatementController
             if (empty($parsedResult['transactions'])) {
                 throw new Exception(
                     'Could not parse statement using available password(s). Save the correct statement password and retry.'
+                        . (!empty($attemptedPasswordCandidates)
+                            ? ' Tried: ' . implode(', ', array_unique($attemptedPasswordCandidates)) . '.'
+                            : '')
                         . ($lastPasswordError !== '' ? ' Last error: ' . $lastPasswordError : '')
                 );
             }
@@ -516,8 +531,10 @@ class StatementController
             . ' 2>&1';
 
         $commandOutput = shell_exec($command);
+        $qpdfOutput = trim((string)$commandOutput);
         if (!file_exists($decryptedPath) || filesize($decryptedPath) === 0) {
-            throw new Exception('Failed to decrypt statement PDF. Verify stored password and qpdf availability.');
+            $diagnostic = $qpdfOutput !== '' ? ' qpdf output: ' . substr($qpdfOutput, 0, 300) : '';
+            throw new Exception('Failed to decrypt statement PDF. Verify stored password and qpdf availability.' . $diagnostic);
         }
 
         try {
@@ -528,7 +545,7 @@ class StatementController
         }
 
         if (trim($text) === '') {
-            throw new Exception('PDF text extraction returned empty output. qpdf output: ' . trim((string)$commandOutput));
+            throw new Exception('PDF text extraction returned empty output. qpdf output: ' . $qpdfOutput);
         }
 
         return $text;
