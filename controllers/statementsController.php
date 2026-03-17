@@ -640,27 +640,53 @@ class StatementController
         $script = <<<'PY'
 import sys
 
+reader_ctor = None
+legacy_reader = False
+
 try:
-    from pypdf import PdfReader
-except Exception:
-    print("__PYPDF_MISSING__")
-    sys.exit(0)
+    from pypdf import PdfReader as _PdfReader
+    reader_ctor = _PdfReader
+except Exception as pypdf_import_error:
+    try:
+        from PyPDF2 import PdfReader as _PdfReader
+        reader_ctor = _PdfReader
+    except Exception as pypdf2_import_error:
+        try:
+            from PyPDF2 import PdfFileReader as _PdfFileReader
+            reader_ctor = _PdfFileReader
+            legacy_reader = True
+        except Exception as legacy_import_error:
+            print("__PYPDF_MISSING__" + str(pypdf_import_error) + " || " + str(pypdf2_import_error) + " || " + str(legacy_import_error))
+            sys.exit(0)
 
 path = sys.argv[1]
 password = sys.argv[2] if len(sys.argv) > 2 else ""
+file_handle = None
 
 try:
-    reader = PdfReader(path)
+    if legacy_reader:
+        file_handle = open(path, "rb")
+        reader = reader_ctor(file_handle)
+        is_encrypted = bool(getattr(reader, "isEncrypted", False))
+    else:
+        reader = reader_ctor(path)
+        is_encrypted = bool(getattr(reader, "is_encrypted", False))
 
-    if getattr(reader, "is_encrypted", False):
+    if is_encrypted:
         decrypt_result = reader.decrypt(password)
-        if decrypt_result == 0:
+        if decrypt_result in (0, False, None):
             print("__PYPDF_BAD_PASSWORD__")
             sys.exit(0)
 
     chunks = []
     for page in reader.pages:
-        text = page.extract_text() or ""
+        if hasattr(page, "extract_text"):
+            text = page.extract_text() or ""
+        elif hasattr(page, "extractText"):
+            text = page.extractText() or ""
+        else:
+            text = ""
+
         if text:
             chunks.append(text)
 
@@ -671,6 +697,12 @@ try:
         print("__PYPDF_EMPTY__")
 except Exception as ex:
     print("__PYPDF_ERROR__" + str(ex))
+finally:
+    if file_handle is not None:
+        try:
+            file_handle.close()
+        except Exception:
+            pass
 PY;
 
         if (@file_put_contents($scriptPath, $script) === false) {
@@ -689,11 +721,11 @@ PY;
 
         $output = trim((string)shell_exec($command));
 
-        if ($output === '__PYPDF_MISSING__') {
+        if (str_starts_with($output, '__PYPDF_MISSING__')) {
             return [
                 'ok' => false,
                 'text' => '',
-                'error' => 'pypdf not installed (run: python3 -m pip install --user pypdf)',
+                'error' => 'Python PDF library missing/incompatible (Python 3.6 usually needs: python3 -m pip install --user "PyPDF2<3")',
             ];
         }
 
