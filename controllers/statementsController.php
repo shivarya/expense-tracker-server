@@ -524,59 +524,242 @@ class StatementController
 
         $diagnostics = [];
 
+        $homeDir = (string)(getenv('HOME') ?: '');
+
+        $qpdfBinary = $this->resolveCliBinary('qpdf', 'STATEMENT_QPDF_BIN', [
+            '/usr/bin/qpdf',
+            '/usr/local/bin/qpdf',
+            $homeDir !== '' ? $homeDir . '/bin/qpdf' : '',
+        ]);
+
+        $pdftotextBinary = $this->resolveCliBinary('pdftotext', 'STATEMENT_PDFTOTEXT_BIN', [
+            '/usr/bin/pdftotext',
+            '/usr/local/bin/pdftotext',
+            $homeDir !== '' ? $homeDir . '/bin/pdftotext' : '',
+        ]);
+
+        $mutoolBinary = $this->resolveCliBinary('mutool', 'STATEMENT_MUTOOL_BIN', [
+            '/usr/bin/mutool',
+            '/usr/local/bin/mutool',
+            $homeDir !== '' ? $homeDir . '/bin/mutool' : '',
+        ]);
+
+        $pythonBinary = $this->resolveCliBinary('python3', 'STATEMENT_PYTHON_BIN', [
+            '/usr/bin/python3',
+            '/usr/local/bin/python3',
+            $homeDir !== '' ? $homeDir . '/bin/python3' : '',
+        ]);
+
         $decryptedPath = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'statement_decrypted_' . uniqid() . '.pdf';
         $cleanupFiles[] = $decryptedPath;
 
-        $command = 'qpdf --password=' . escapeshellarg($password)
-            . ' --decrypt ' . escapeshellarg($inputPath)
-            . ' ' . escapeshellarg($decryptedPath)
-            . ' 2>&1';
+        if ($qpdfBinary !== null) {
+            $command = escapeshellarg($qpdfBinary)
+                . ' --password=' . escapeshellarg($password)
+                . ' --decrypt ' . escapeshellarg($inputPath)
+                . ' ' . escapeshellarg($decryptedPath)
+                . ' 2>&1';
 
-        $commandOutput = shell_exec($command);
-        $qpdfOutput = trim((string)$commandOutput);
-        if (file_exists($decryptedPath) && filesize($decryptedPath) > 0) {
-            try {
-                $pdf = $parser->parseFile($decryptedPath);
-                $text = $pdf->getText();
-                if (trim($text) !== '') {
-                    return $text;
+            $commandOutput = shell_exec($command);
+            $qpdfOutput = trim((string)$commandOutput);
+            if (file_exists($decryptedPath) && filesize($decryptedPath) > 0) {
+                try {
+                    $pdf = $parser->parseFile($decryptedPath);
+                    $text = $pdf->getText();
+                    if (trim($text) !== '') {
+                        return $text;
+                    }
+                    $diagnostics[] = 'qpdf decrypted but parser returned empty text';
+                } catch (Exception $e) {
+                    $diagnostics[] = 'qpdf parse failed: ' . substr($e->getMessage(), 0, 180);
                 }
-                $diagnostics[] = 'qpdf decrypted but parser returned empty text';
-            } catch (Exception $e) {
-                $diagnostics[] = 'qpdf parse failed: ' . substr($e->getMessage(), 0, 180);
+            } else {
+                $diagnostics[] = 'qpdf failed: ' . $this->summarizeCliOutput($qpdfOutput);
             }
         } else {
-            $diagnostics[] = 'qpdf failed: ' . $this->summarizeCliOutput($qpdfOutput);
+            $diagnostics[] = 'qpdf not found (set STATEMENT_QPDF_BIN to absolute path if installed)';
         }
 
         // Fallback 1: pdftotext can decrypt directly with password in many hosts.
-        $pdfToTextCommand = 'pdftotext -upw ' . escapeshellarg($password)
-            . ' ' . escapeshellarg($inputPath)
-            . ' - 2>&1';
-        $pdfToTextOutput = trim((string)shell_exec($pdfToTextCommand));
+        if ($pdftotextBinary !== null) {
+            $pdfToTextCommand = escapeshellarg($pdftotextBinary)
+                . ' -upw ' . escapeshellarg($password)
+                . ' ' . escapeshellarg($inputPath)
+                . ' - 2>&1';
+            $pdfToTextOutput = trim((string)shell_exec($pdfToTextCommand));
 
-        if ($pdfToTextOutput !== '' && !$this->looksLikeCliFailure($pdfToTextOutput)) {
-            return $pdfToTextOutput;
+            if ($pdfToTextOutput !== '' && !$this->looksLikeCliFailure($pdfToTextOutput)) {
+                return $pdfToTextOutput;
+            }
+
+            $diagnostics[] = 'pdftotext failed: ' . $this->summarizeCliOutput($pdfToTextOutput);
+        } else {
+            $diagnostics[] = 'pdftotext not found (set STATEMENT_PDFTOTEXT_BIN to absolute path if installed)';
         }
-
-        $diagnostics[] = 'pdftotext failed: ' . $this->summarizeCliOutput($pdfToTextOutput);
 
         // Fallback 2: mutool text extraction with password.
-        $mutoolCommand = 'mutool draw -F txt -p ' . escapeshellarg($password)
-            . ' ' . escapeshellarg($inputPath)
-            . ' 2>&1';
-        $mutoolOutput = trim((string)shell_exec($mutoolCommand));
+        if ($mutoolBinary !== null) {
+            $mutoolCommand = escapeshellarg($mutoolBinary)
+                . ' draw -F txt -p ' . escapeshellarg($password)
+                . ' ' . escapeshellarg($inputPath)
+                . ' 2>&1';
+            $mutoolOutput = trim((string)shell_exec($mutoolCommand));
 
-        if ($mutoolOutput !== '' && !$this->looksLikeCliFailure($mutoolOutput)) {
-            return $mutoolOutput;
+            if ($mutoolOutput !== '' && !$this->looksLikeCliFailure($mutoolOutput)) {
+                return $mutoolOutput;
+            }
+
+            $diagnostics[] = 'mutool failed: ' . $this->summarizeCliOutput($mutoolOutput);
+        } else {
+            $diagnostics[] = 'mutool not found (set STATEMENT_MUTOOL_BIN to absolute path if installed)';
         }
 
-        $diagnostics[] = 'mutool failed: ' . $this->summarizeCliOutput($mutoolOutput);
+        // Fallback 3: python3 + pypdf (installable in user home on cPanel without root).
+        if ($pythonBinary !== null) {
+            $pythonResult = $this->extractWithPythonPypdf($pythonBinary, $inputPath, $password, $cleanupFiles);
+            if (!empty($pythonResult['ok'])) {
+                return (string)$pythonResult['text'];
+            }
+
+            $diagnostics[] = 'python+pypdf failed: ' . (string)($pythonResult['error'] ?? 'unknown error');
+        } else {
+            $diagnostics[] = 'python3 not found (set STATEMENT_PYTHON_BIN to absolute path if installed)';
+        }
 
         throw new Exception(
             'Failed to decrypt statement PDF. Verify stored password and PDF tools availability. '
             . implode(' | ', $diagnostics)
         );
+    }
+
+    private function extractWithPythonPypdf(string $pythonBinary, string $inputPath, string $password, array &$cleanupFiles): array
+    {
+        $scriptPath = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'statement_extract_' . uniqid() . '.py';
+        $cleanupFiles[] = $scriptPath;
+
+        $script = <<<'PY'
+import sys
+
+try:
+    from pypdf import PdfReader
+except Exception:
+    print("__PYPDF_MISSING__")
+    sys.exit(0)
+
+path = sys.argv[1]
+password = sys.argv[2] if len(sys.argv) > 2 else ""
+
+try:
+    reader = PdfReader(path)
+
+    if getattr(reader, "is_encrypted", False):
+        decrypt_result = reader.decrypt(password)
+        if decrypt_result == 0:
+            print("__PYPDF_BAD_PASSWORD__")
+            sys.exit(0)
+
+    chunks = []
+    for page in reader.pages:
+        text = page.extract_text() or ""
+        if text:
+            chunks.append(text)
+
+    output = "\n".join(chunks).strip()
+    if output:
+        print(output)
+    else:
+        print("__PYPDF_EMPTY__")
+except Exception as ex:
+    print("__PYPDF_ERROR__" + str(ex))
+PY;
+
+        if (@file_put_contents($scriptPath, $script) === false) {
+            return [
+                'ok' => false,
+                'text' => '',
+                'error' => 'unable to write temporary Python script',
+            ];
+        }
+
+        $command = escapeshellarg($pythonBinary)
+            . ' ' . escapeshellarg($scriptPath)
+            . ' ' . escapeshellarg($inputPath)
+            . ' ' . escapeshellarg($password)
+            . ' 2>&1';
+
+        $output = trim((string)shell_exec($command));
+
+        if ($output === '__PYPDF_MISSING__') {
+            return [
+                'ok' => false,
+                'text' => '',
+                'error' => 'pypdf not installed (run: python3 -m pip install --user pypdf)',
+            ];
+        }
+
+        if ($output === '__PYPDF_BAD_PASSWORD__') {
+            return [
+                'ok' => false,
+                'text' => '',
+                'error' => 'incorrect PDF password',
+            ];
+        }
+
+        if ($output === '__PYPDF_EMPTY__') {
+            return [
+                'ok' => false,
+                'text' => '',
+                'error' => 'decrypted but extracted text is empty',
+            ];
+        }
+
+        if (str_starts_with($output, '__PYPDF_ERROR__')) {
+            return [
+                'ok' => false,
+                'text' => '',
+                'error' => substr($output, strlen('__PYPDF_ERROR__')),
+            ];
+        }
+
+        if ($this->looksLikeCliFailure($output)) {
+            return [
+                'ok' => false,
+                'text' => '',
+                'error' => $this->summarizeCliOutput($output),
+            ];
+        }
+
+        return [
+            'ok' => trim($output) !== '',
+            'text' => $output,
+            'error' => trim($output) !== '' ? '' : 'no output',
+        ];
+    }
+
+    private function resolveCliBinary(string $binaryName, string $envVar, array $commonPaths): ?string
+    {
+        $envPath = trim((string)(getenv($envVar) ?: ''));
+        if ($envPath !== '' && is_file($envPath) && is_executable($envPath)) {
+            return $envPath;
+        }
+
+        $whichOutput = trim((string)shell_exec('command -v ' . escapeshellarg($binaryName) . ' 2>/dev/null'));
+        if ($whichOutput !== '' && is_file($whichOutput) && is_executable($whichOutput)) {
+            return $whichOutput;
+        }
+
+        foreach ($commonPaths as $path) {
+            $path = trim((string)$path);
+            if ($path === '') {
+                continue;
+            }
+
+            if (is_file($path) && is_executable($path)) {
+                return $path;
+            }
+        }
+
+        return null;
     }
 
     private function looksLikeCliFailure(string $output): bool
