@@ -522,6 +522,8 @@ class StatementController
             throw new Exception('Encrypted statement detected but qpdf is unavailable on server.');
         }
 
+        $diagnostics = [];
+
         $decryptedPath = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'statement_decrypted_' . uniqid() . '.pdf';
         $cleanupFiles[] = $decryptedPath;
 
@@ -532,23 +534,70 @@ class StatementController
 
         $commandOutput = shell_exec($command);
         $qpdfOutput = trim((string)$commandOutput);
-        if (!file_exists($decryptedPath) || filesize($decryptedPath) === 0) {
-            $diagnostic = $qpdfOutput !== '' ? ' qpdf output: ' . substr($qpdfOutput, 0, 300) : '';
-            throw new Exception('Failed to decrypt statement PDF. Verify stored password and qpdf availability.' . $diagnostic);
+        if (file_exists($decryptedPath) && filesize($decryptedPath) > 0) {
+            try {
+                $pdf = $parser->parseFile($decryptedPath);
+                $text = $pdf->getText();
+                if (trim($text) !== '') {
+                    return $text;
+                }
+                $diagnostics[] = 'qpdf decrypted but parser returned empty text';
+            } catch (Exception $e) {
+                $diagnostics[] = 'qpdf parse failed: ' . substr($e->getMessage(), 0, 180);
+            }
+        } else {
+            $diagnostics[] = 'qpdf failed: ' . $this->summarizeCliOutput($qpdfOutput);
         }
 
-        try {
-            $pdf = $parser->parseFile($decryptedPath);
-            $text = $pdf->getText();
-        } catch (Exception $e) {
-            throw new Exception('Failed to parse decrypted PDF: ' . $e->getMessage());
+        // Fallback 1: pdftotext can decrypt directly with password in many hosts.
+        $pdfToTextCommand = 'pdftotext -upw ' . escapeshellarg($password)
+            . ' ' . escapeshellarg($inputPath)
+            . ' - 2>&1';
+        $pdfToTextOutput = trim((string)shell_exec($pdfToTextCommand));
+
+        if ($pdfToTextOutput !== '' && !$this->looksLikeCliFailure($pdfToTextOutput)) {
+            return $pdfToTextOutput;
         }
 
-        if (trim($text) === '') {
-            throw new Exception('PDF text extraction returned empty output. qpdf output: ' . $qpdfOutput);
+        $diagnostics[] = 'pdftotext failed: ' . $this->summarizeCliOutput($pdfToTextOutput);
+
+        // Fallback 2: mutool text extraction with password.
+        $mutoolCommand = 'mutool draw -F txt -p ' . escapeshellarg($password)
+            . ' ' . escapeshellarg($inputPath)
+            . ' 2>&1';
+        $mutoolOutput = trim((string)shell_exec($mutoolCommand));
+
+        if ($mutoolOutput !== '' && !$this->looksLikeCliFailure($mutoolOutput)) {
+            return $mutoolOutput;
         }
 
-        return $text;
+        $diagnostics[] = 'mutool failed: ' . $this->summarizeCliOutput($mutoolOutput);
+
+        throw new Exception(
+            'Failed to decrypt statement PDF. Verify stored password and PDF tools availability. '
+            . implode(' | ', $diagnostics)
+        );
+    }
+
+    private function looksLikeCliFailure(string $output): bool
+    {
+        if ($output === '') {
+            return true;
+        }
+
+        return preg_match(
+            '/command not found|not recognized as an internal or external command|cannot authenticate password|incorrect password|command line error|unable to open|failed to open|no such file/i',
+            $output
+        ) === 1;
+    }
+
+    private function summarizeCliOutput(string $output): string
+    {
+        if (trim($output) === '') {
+            return 'no output';
+        }
+
+        return substr(trim($output), 0, 220);
     }
 
     private function parseTransactionsByBank(string $bank, string $text, string $cardLastFour): array
