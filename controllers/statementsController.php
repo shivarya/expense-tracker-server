@@ -31,7 +31,8 @@ class StatementController
         $input = getJsonInput();
         $bank = $this->normalizeBank($input['bank'] ?? '');
         $accountType = $this->normalizeAccountType($input['account_type'] ?? 'credit_card');
-        $cardLastFour = $this->normalizeCardLastFour($input['card_last_four'] ?? '');
+        $rawCardLastFour = (string)($input['card_last_four'] ?? '');
+        $cardLastFour = $this->normalizeCardLastFour($rawCardLastFour);
         $password = (string)($input['password'] ?? '');
 
         if (!$this->isSupportedBank($bank)) {
@@ -42,8 +43,8 @@ class StatementController
             Response::error('Only credit card statements are supported in this release.', 400);
         }
 
-        if ($cardLastFour === '') {
-            Response::error('card_last_four is required for credit card statements.', 400);
+        if (trim($rawCardLastFour) !== '' && strlen($cardLastFour) !== 4) {
+            Response::error('card_last_four must contain 4 digits when provided.', 400);
         }
 
         if (trim($password) === '') {
@@ -52,31 +53,73 @@ class StatementController
 
         $encrypted = StatementPasswordVault::encrypt($password);
 
-        $sql = "INSERT INTO statement_passwords
-                (user_id, bank, account_type, card_last_four, encrypted_password, iv, auth_tag, encryption_version)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ON DUPLICATE KEY UPDATE
-                    encrypted_password = VALUES(encrypted_password),
-                    iv = VALUES(iv),
-                    auth_tag = VALUES(auth_tag),
-                    encryption_version = VALUES(encryption_version),
-                    updated_at = CURRENT_TIMESTAMP";
+        $cardLastFourValue = $cardLastFour !== '' ? $cardLastFour : null;
 
-        $this->db->execute($sql, [
-            $userId,
-            $bank,
-            $accountType,
-            $cardLastFour,
-            $encrypted['encrypted_password'],
-            $encrypted['iv'],
-            $encrypted['auth_tag'],
-            $encrypted['encryption_version'],
-        ]);
+        if ($cardLastFourValue === null) {
+            $existing = $this->db->fetchOne(
+                "SELECT id FROM statement_passwords
+                 WHERE user_id = ? AND bank = ? AND account_type = ? AND card_last_four IS NULL
+                 ORDER BY id DESC
+                 LIMIT 1",
+                [$userId, $bank, $accountType]
+            );
+
+            if ($existing && isset($existing['id'])) {
+                $this->db->execute(
+                    "UPDATE statement_passwords
+                     SET encrypted_password = ?, iv = ?, auth_tag = ?, encryption_version = ?, updated_at = CURRENT_TIMESTAMP
+                     WHERE id = ?",
+                    [
+                        $encrypted['encrypted_password'],
+                        $encrypted['iv'],
+                        $encrypted['auth_tag'],
+                        $encrypted['encryption_version'],
+                        (int)$existing['id'],
+                    ]
+                );
+            } else {
+                $this->db->insert(
+                    "INSERT INTO statement_passwords
+                     (user_id, bank, account_type, card_last_four, encrypted_password, iv, auth_tag, encryption_version)
+                     VALUES (?, ?, ?, NULL, ?, ?, ?, ?)",
+                    [
+                        $userId,
+                        $bank,
+                        $accountType,
+                        $encrypted['encrypted_password'],
+                        $encrypted['iv'],
+                        $encrypted['auth_tag'],
+                        $encrypted['encryption_version'],
+                    ]
+                );
+            }
+        } else {
+            $sql = "INSERT INTO statement_passwords
+                    (user_id, bank, account_type, card_last_four, encrypted_password, iv, auth_tag, encryption_version)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON DUPLICATE KEY UPDATE
+                        encrypted_password = VALUES(encrypted_password),
+                        iv = VALUES(iv),
+                        auth_tag = VALUES(auth_tag),
+                        encryption_version = VALUES(encryption_version),
+                        updated_at = CURRENT_TIMESTAMP";
+
+            $this->db->execute($sql, [
+                $userId,
+                $bank,
+                $accountType,
+                $cardLastFourValue,
+                $encrypted['encrypted_password'],
+                $encrypted['iv'],
+                $encrypted['auth_tag'],
+                $encrypted['encryption_version'],
+            ]);
+        }
 
         Response::success([
             'bank' => $bank,
             'account_type' => $accountType,
-            'card_last_four' => $cardLastFour,
+            'card_last_four' => $cardLastFourValue,
             'stored' => true,
         ], 'Statement password saved securely.');
     }
@@ -89,20 +132,28 @@ class StatementController
         $input = getJsonInput();
         $bank = $this->normalizeBank($input['bank'] ?? '');
         $accountType = $this->normalizeAccountType($input['account_type'] ?? 'credit_card');
-        $cardLastFour = $this->normalizeCardLastFour($input['card_last_four'] ?? '');
+        $rawCardLastFour = (string)($input['card_last_four'] ?? '');
+        $cardLastFour = $this->normalizeCardLastFour($rawCardLastFour);
 
         if ($bank === '') {
             Response::error('bank is required.', 400);
         }
 
-        if ($accountType === 'credit_card' && $cardLastFour === '') {
-            Response::error('card_last_four is required for credit card statements.', 400);
+        if (trim($rawCardLastFour) !== '' && strlen($cardLastFour) !== 4) {
+            Response::error('card_last_four must contain 4 digits when provided.', 400);
         }
 
-        $deleted = $this->db->execute(
-            "DELETE FROM statement_passwords WHERE user_id = ? AND bank = ? AND account_type = ? AND card_last_four <=> ?",
-            [$userId, $bank, $accountType, $cardLastFour !== '' ? $cardLastFour : null]
-        );
+        if ($cardLastFour !== '') {
+            $deleted = $this->db->execute(
+                "DELETE FROM statement_passwords WHERE user_id = ? AND bank = ? AND account_type = ? AND card_last_four = ?",
+                [$userId, $bank, $accountType, $cardLastFour]
+            );
+        } else {
+            $deleted = $this->db->execute(
+                "DELETE FROM statement_passwords WHERE user_id = ? AND bank = ? AND account_type = ?",
+                [$userId, $bank, $accountType]
+            );
+        }
 
         Response::success([
             'deleted' => $deleted > 0,
@@ -120,7 +171,8 @@ class StatementController
 
         $bank = $this->normalizeBank($_POST['bank'] ?? '');
         $accountType = $this->normalizeAccountType($_POST['account_type'] ?? 'credit_card');
-        $cardLastFour = $this->normalizeCardLastFour($_POST['card_last_four'] ?? '');
+        $rawCardLastFour = (string)($_POST['card_last_four'] ?? '');
+        $cardLastFour = $this->normalizeCardLastFour($rawCardLastFour);
 
         if (!$this->isSupportedBank($bank)) {
             Response::error('Only SBI and ICICI statement uploads are currently supported.', 400);
@@ -130,37 +182,42 @@ class StatementController
             Response::error('Only credit card statement uploads are supported in this release.', 400);
         }
 
-        if ($cardLastFour === '') {
-            Response::error('card_last_four is required for credit card statement uploads.', 400);
+        if (trim($rawCardLastFour) !== '' && strlen($cardLastFour) !== 4) {
+            Response::error('card_last_four must contain 4 digits when provided.', 400);
         }
 
         $file = $_FILES['statement_pdf'];
         $this->validateUploadedPdf($file);
 
-        $passwordRow = $this->db->fetchOne(
-            "SELECT encrypted_password, iv, auth_tag
+        $passwordRows = $this->db->fetchAll(
+            "SELECT card_last_four, encrypted_password, iv, auth_tag
              FROM statement_passwords
-             WHERE user_id = ? AND bank = ? AND account_type = ? AND card_last_four = ?
-             LIMIT 1",
-            [$userId, $bank, $accountType, $cardLastFour]
+             WHERE user_id = ? AND bank = ? AND account_type = ?"
+                . ($cardLastFour !== '' ? " AND card_last_four = ?" : "")
+                . " ORDER BY updated_at DESC, id DESC",
+            $cardLastFour !== ''
+                ? [$userId, $bank, $accountType, $cardLastFour]
+                : [$userId, $bank, $accountType]
         );
 
-        if (!$passwordRow) {
+        if (empty($passwordRows)) {
             Response::error('No secure statement password found. Save password first.', 400);
         }
 
         $fileHash = hash_file('sha256', $file['tmp_name']);
         $fileName = basename((string)$file['name']);
+        $cardLastFourFilter = $cardLastFour !== '' ? $cardLastFour : null;
 
         $existingUpload = $this->db->fetchOne(
-            "SELECT id, extracted_count, saved_count, skipped_high_confidence, flagged_possible_duplicates,
+            "SELECT id, card_last_four, extracted_count, saved_count, skipped_high_confidence, flagged_possible_duplicates,
                     ai_checked_transactions, duplicate_fallback_used
              FROM statement_uploads
-             WHERE user_id = ? AND bank = ? AND account_type = ? AND card_last_four = ?
+             WHERE user_id = ? AND bank = ? AND account_type = ?
+               AND (? IS NULL OR card_last_four <=> ?)
                AND file_hash = ? AND status IN ('success', 'duplicate_upload')
              ORDER BY id DESC
              LIMIT 1",
-            [$userId, $bank, $accountType, $cardLastFour, $fileHash]
+            [$userId, $bank, $accountType, $cardLastFourFilter, $cardLastFourFilter, $fileHash]
         );
 
         if ($existingUpload) {
@@ -174,7 +231,7 @@ class StatementController
                     $userId,
                     $bank,
                     $accountType,
-                    $cardLastFour,
+                    $existingUpload['card_last_four'] ?? $cardLastFourFilter,
                     $fileName,
                     $fileHash,
                     (int)$existingUpload['extracted_count'],
@@ -202,7 +259,7 @@ class StatementController
             "INSERT INTO statement_uploads
              (user_id, bank, account_type, card_last_four, file_name, file_hash, status)
              VALUES (?, ?, ?, ?, ?, ?, 'processing')",
-            [$userId, $bank, $accountType, $cardLastFour, $fileName, $fileHash]
+            [$userId, $bank, $accountType, $cardLastFourFilter, $fileName, $fileHash]
         );
 
         $workingFile = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'statement_' . uniqid() . '.pdf';
@@ -213,14 +270,48 @@ class StatementController
                 throw new Exception('Failed to persist uploaded statement file.');
             }
 
-            $password = StatementPasswordVault::decrypt(
-                (string)$passwordRow['encrypted_password'],
-                (string)$passwordRow['iv'],
-                (string)$passwordRow['auth_tag']
-            );
+            $text = '';
+            $parsedResult = ['transactions' => [], 'parser' => ''];
+            $resolvedCardLastFour = $cardLastFour;
+            $lastPasswordError = '';
 
-            $text = $this->extractPdfText($workingFile, $password, $cleanupFiles);
-            $parsedResult = $this->parseTransactionsByBank($bank, $text, $cardLastFour);
+            foreach ($passwordRows as $passwordRow) {
+                try {
+                    $password = StatementPasswordVault::decrypt(
+                        (string)$passwordRow['encrypted_password'],
+                        (string)$passwordRow['iv'],
+                        (string)$passwordRow['auth_tag']
+                    );
+
+                    $candidateCardLastFour = $this->normalizeCardLastFour((string)($passwordRow['card_last_four'] ?? ''));
+                    $candidateCardContext = $cardLastFour !== '' ? $cardLastFour : $candidateCardLastFour;
+
+                    $text = $this->extractPdfText($workingFile, $password, $cleanupFiles);
+                    $parsedResult = $this->parseTransactionsByBank($bank, $text, $candidateCardContext);
+                    $resolvedCardLastFour = $candidateCardContext;
+                    $lastPasswordError = '';
+                    break;
+                } catch (Exception $passwordError) {
+                    $lastPasswordError = $passwordError->getMessage();
+                }
+            }
+
+            if (empty($parsedResult['transactions'])) {
+                throw new Exception(
+                    'Could not parse statement using saved password(s).'
+                        . ($lastPasswordError !== '' ? ' Last error: ' . $lastPasswordError : '')
+                );
+            }
+
+            $effectiveCardLastFour = $resolvedCardLastFour !== '' ? $resolvedCardLastFour : '0000';
+
+            if ($effectiveCardLastFour !== ($cardLastFourFilter ?? '')) {
+                $this->db->execute(
+                    "UPDATE statement_uploads SET card_last_four = ? WHERE id = ?",
+                    [$effectiveCardLastFour, $uploadId]
+                );
+            }
+
             $parsedTransactions = $parsedResult['transactions'];
             $parserName = $parsedResult['parser'];
 
@@ -228,8 +319,8 @@ class StatementController
                 throw new Exception('No transactions detected in the uploaded ' . strtoupper($bank) . ' statement.');
             }
 
-            $accountId = $this->getOrCreateCreditCardAccount($userId, $bank, $cardLastFour);
-            $paymentMethod = strtoupper($bank) . ' Card *' . $cardLastFour;
+            $accountId = $this->getOrCreateCreditCardAccount($userId, $bank, $effectiveCardLastFour);
+            $paymentMethod = strtoupper($bank) . ' Card *' . $effectiveCardLastFour;
 
             $savedCount = 0;
             $skippedHighConfidence = 0;
@@ -281,7 +372,7 @@ class StatementController
                         'source' => 'statement_pdf',
                         'parser' => $parserName,
                         'bank' => $bank,
-                        'card_last_four' => $cardLastFour,
+                        'card_last_four' => $effectiveCardLastFour,
                         'upload_id' => $uploadId,
                         'file_hash' => $fileHash,
                         'raw_line' => $txn['raw_line'],

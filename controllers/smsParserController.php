@@ -37,9 +37,9 @@ class SMSParserController {
         }
 
         $messages = $input['messages'];
-        
+
         // Filter bank SMS
-        $bankSMS = array_filter($messages, function($msg) {
+        $bankSMS = array_values(array_filter($messages, function($msg) {
             $sender = strtolower($msg['sender'] ?? '');
             return str_contains($sender, 'hdfc') ||
                    str_contains($sender, 'sbi') ||
@@ -48,7 +48,7 @@ class SMSParserController {
                    str_contains($sender, 'rbl') ||
                    str_contains($sender, 'axis') ||
                    str_contains($sender, 'kotak');
-        });
+        }));
 
         if (empty($bankSMS)) {
             error_log('[TX_SYNC_SUMMARY][SMS_PARSE] user_id=' . $userId . ' total_tx=0 duplicates_found=0 duplicates_skipped=0 possible_duplicates=0 synced=0 failed_saves=0');
@@ -68,14 +68,82 @@ class SMSParserController {
             return;
         }
 
+        if ($this->isAsyncManualRequest($input)) {
+            $jobId = null;
+            $payloadPath = null;
+
+            try {
+                $jobId = $this->createSmsSyncJob($userId, count($bankSMS));
+                $payloadPath = $this->writeSmsJobPayload($jobId, $userId, $bankSMS);
+                $this->launchSmsBackgroundWorker($jobId, $payloadPath);
+
+                Response::success([
+                    'message' => 'Manual SMS re-sync started in background',
+                    'async' => true,
+                    'job_id' => $jobId,
+                    'status' => 'pending',
+                    'total_sms' => count($bankSMS),
+                ]);
+                return;
+            } catch (Exception $e) {
+                if ($jobId !== null) {
+                    $this->markSyncJobFailed($jobId, 'Failed to start background SMS sync: ' . $e->getMessage());
+                }
+
+                if ($payloadPath !== null) {
+                    $this->safeUnlink($payloadPath);
+                }
+
+                Response::error('Failed to start background SMS sync: ' . $e->getMessage(), 500);
+                return;
+            }
+        }
+
+        $result = $this->processBankMessagesForUser($userId, $bankSMS, [
+            'summary_tag' => 'SMS_PARSE',
+            'chunk_size' => 20,
+            'sleep_ms' => 0,
+        ]);
+
+        // Self-heal: remove any rogue categories this sync may have created
+        $autoFixResult = CategoryResolver::autoFix($this->db, $userId);
+        if ($autoFixResult['deleted'] > 0) {
+            error_log("[CategoryResolver] Auto-fix after SMS sync: {$autoFixResult['fixed']} txns remapped, {$autoFixResult['deleted']} rogues deleted");
+        }
+
+        Response::success([
+            'message' => 'SMS parsing complete',
+            'total_sms' => count($bankSMS),
+            'parsed_transactions' => $result['parsed_transactions'],
+            'saved_transactions' => $result['saved_transactions'],
+            'skipped_duplicates' => $result['skipped_duplicates'],
+            'skipped_high_confidence' => $result['skipped_duplicates'],
+            'updated_duplicate_timestamps' => $result['updated_duplicate_timestamps'],
+            'flagged_possible_duplicates' => $result['flagged_possible_duplicates'],
+            'ai_checked_transactions' => $result['ai_checked_transactions'],
+            'duplicate_fallback_used' => $result['duplicate_fallback_used'],
+            'saved_debit_count' => $result['saved_debit_count'],
+            'saved_credit_count' => $result['saved_credit_count'],
+            'saved_debit_amount' => round($result['saved_debit_amount'], 2),
+            'saved_credit_amount' => round($result['saved_credit_amount'], 2),
+            'transactions' => $result['transactions']
+        ]);
+    }
+
+    public function processBankMessagesForUser(int $userId, array $bankSMS, array $options = []): array
+    {
+        $summaryTag = strtoupper((string)($options['summary_tag'] ?? 'SMS_PARSE'));
+        $chunkSize = max(1, (int)($options['chunk_size'] ?? 20));
+        $sleepMs = max(0, (int)($options['sleep_ms'] ?? 0));
+        $jobId = isset($options['job_id']) ? (int)$options['job_id'] : null;
+
         error_log("Processing " . count($bankSMS) . " bank SMS messages");
 
-        // Parse using Azure OpenAI
         $transactions = $this->ai->parseBankSMS($bankSMS);
-        error_log("AI parsing complete. Extracted " . count($transactions) . " transactions");
+        $totalTransactions = count($transactions);
+        error_log("AI parsing complete. Extracted " . $totalTransactions . " transactions");
         $this->logTransactionsInChunks($transactions);
 
-        // Save transactions to database
         $savedCount = 0;
         $skippedCount = 0;
         $updatedDuplicateTimeCount = 0;
@@ -87,126 +155,303 @@ class SMSParserController {
         $savedCreditCount = 0;
         $savedDebitAmount = 0.0;
         $savedCreditAmount = 0.0;
+        $processedCount = 0;
 
-        foreach ($transactions as $transaction) {
-            $transaction['date'] = $this->resolveTransactionDateTime($transaction);
-            $duplicateCheck = $this->evaluateDuplicateTransaction($userId, $transaction, null, true);
+        if ($jobId !== null) {
+            $this->updateSyncJobProgress(
+                $jobId,
+                [
+                    'status' => 'processing',
+                    'progress' => 0,
+                    'total_items' => $totalTransactions,
+                    'processed_items' => 0,
+                    'saved_items' => 0,
+                    'skipped_items' => 0,
+                    'error_message' => null,
+                ]
+            );
+        }
 
-            if (!empty($duplicateCheck['ai_used'])) {
-                $aiCheckedCount++;
-            }
-            if (!empty($duplicateCheck['fallback_used'])) {
-                $fallbackUsedCount++;
-            }
+        foreach (array_chunk($transactions, $chunkSize) as $chunkIndex => $chunk) {
+            foreach ($chunk as $transaction) {
+                $transaction['date'] = $this->resolveTransactionDateTime($transaction);
+                $duplicateCheck = $this->evaluateDuplicateTransactionSafely($userId, $transaction, null, true);
 
-            if (!empty($duplicateCheck['should_skip'])) {
-                if ($this->updateMatchedDuplicateTimestamp(
-                    $userId,
-                    isset($duplicateCheck['matched_transaction_id']) ? (int)$duplicateCheck['matched_transaction_id'] : null,
-                    $transaction['date']
-                )) {
-                    $updatedDuplicateTimeCount++;
+                if (!empty($duplicateCheck['ai_used'])) {
+                    $aiCheckedCount++;
                 }
-                $skippedCount++;
-                continue; // Skip duplicate
-            }
-
-            if (!empty($duplicateCheck['possible_duplicate'])) {
-                $flaggedPossibleCount++;
-            }
-
-            // Get or create bank account
-            $accountId = $this->getOrCreateBankAccount($userId, $transaction);
-            error_log("Bank account ID: $accountId");
-            
-            // Resolve to canonical category — never creates rogue categories
-            $categoryId = $this->resolveCategoryId($userId, $transaction);
-
-            // Insert transaction
-            $insertQuery = "
-                INSERT INTO transactions (
-                    user_id, account_id, category_id, transaction_type, 
-                    amount, merchant, description, transaction_date, reference_number, payment_method, source, duplicate_score
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'sms', ?)
-            ";
-
-            try {
-                $this->db->execute($insertQuery, [
-                    $userId,
-                    $accountId,
-                    $categoryId,
-                    $transaction['transaction_type'],
-                    $transaction['amount'],
-                    $transaction['merchant'] ?? null,
-                    $transaction['merchant'] ?? 'SMS Transaction',
-                    $transaction['date'] ?? date('Y-m-d H:i:s'),
-                    $transaction['reference_number'] ?? null,
-                    $transaction['payment_method'] ?? null,
-                    (int)($duplicateCheck['confidence'] ?? 0),
-                ]);
-                $savedCount++;
-
-                $txnType = strtolower((string)($transaction['transaction_type'] ?? 'debit'));
-                $txnAmount = (float)($transaction['amount'] ?? 0);
-                if ($txnType === 'credit') {
-                    $savedCreditCount++;
-                    $savedCreditAmount += $txnAmount;
-                } else {
-                    $savedDebitCount++;
-                    $savedDebitAmount += $txnAmount;
+                if (!empty($duplicateCheck['fallback_used'])) {
+                    $fallbackUsedCount++;
                 }
 
-                error_log("Transaction saved successfully: Amount={$transaction['amount']}, Merchant=" . ($transaction['merchant'] ?? 'N/A'));
-            } catch (Exception $e) {
-                $failedSaveCount++;
-                error_log("Failed to save transaction: " . $e->getMessage());
+                if (!empty($duplicateCheck['should_skip'])) {
+                    if ($this->updateMatchedDuplicateTimestamp(
+                        $userId,
+                        isset($duplicateCheck['matched_transaction_id']) ? (int)$duplicateCheck['matched_transaction_id'] : null,
+                        $transaction['date']
+                    )) {
+                        $updatedDuplicateTimeCount++;
+                    }
+                    $skippedCount++;
+                    $processedCount++;
+                    continue;
+                }
+
+                if (!empty($duplicateCheck['possible_duplicate'])) {
+                    $flaggedPossibleCount++;
+                }
+
+                $accountId = $this->getOrCreateBankAccount($userId, $transaction);
+                $categoryId = $this->resolveCategoryId($userId, $transaction);
+
+                $insertQuery = "
+                    INSERT INTO transactions (
+                        user_id, account_id, category_id, transaction_type,
+                        amount, merchant, description, transaction_date, reference_number, payment_method, source, duplicate_score
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'sms', ?)
+                ";
+
+                try {
+                    $this->db->execute($insertQuery, [
+                        $userId,
+                        $accountId,
+                        $categoryId,
+                        $transaction['transaction_type'],
+                        $transaction['amount'],
+                        $transaction['merchant'] ?? null,
+                        $transaction['merchant'] ?? 'SMS Transaction',
+                        $transaction['date'] ?? date('Y-m-d H:i:s'),
+                        $transaction['reference_number'] ?? null,
+                        $transaction['payment_method'] ?? null,
+                        (int)($duplicateCheck['confidence'] ?? 0),
+                    ]);
+
+                    $savedCount++;
+
+                    $txnType = strtolower((string)($transaction['transaction_type'] ?? 'debit'));
+                    $txnAmount = (float)($transaction['amount'] ?? 0);
+                    if ($txnType === 'credit') {
+                        $savedCreditCount++;
+                        $savedCreditAmount += $txnAmount;
+                    } else {
+                        $savedDebitCount++;
+                        $savedDebitAmount += $txnAmount;
+                    }
+                } catch (Exception $e) {
+                    $failedSaveCount++;
+                    error_log("Failed to save transaction: " . $e->getMessage());
+                }
+
+                $processedCount++;
+            }
+
+            if ($jobId !== null) {
+                $progress = $totalTransactions > 0 ? (int)round(($processedCount / $totalTransactions) * 100) : 100;
+                $this->updateSyncJobProgress(
+                    $jobId,
+                    [
+                        'status' => 'processing',
+                        'progress' => min(100, max(0, $progress)),
+                        'total_items' => $totalTransactions,
+                        'processed_items' => $processedCount,
+                        'saved_items' => $savedCount,
+                        'skipped_items' => $skippedCount,
+                    ]
+                );
+            }
+
+            error_log('[TX_SYNC_CHUNK][' . $summaryTag . '] user_id=' . $userId
+                . ' chunk=' . ($chunkIndex + 1)
+                . ' processed=' . $processedCount . '/' . $totalTransactions
+                . ' saved=' . $savedCount
+                . ' skipped=' . $skippedCount
+                . ' failed=' . $failedSaveCount);
+
+            if ($sleepMs > 0) {
+                usleep($sleepMs * 1000);
             }
         }
 
         $duplicatesFound = $skippedCount + $flaggedPossibleCount;
-        error_log('[TX_SYNC_SUMMARY][SMS_PARSE] user_id=' . $userId
-            . ' total_tx=' . count($transactions)
+        error_log('[TX_SYNC_SUMMARY][' . $summaryTag . '] user_id=' . $userId
+            . ' total_tx=' . $totalTransactions
             . ' duplicates_found=' . $duplicatesFound
             . ' duplicates_skipped=' . $skippedCount
             . ' possible_duplicates=' . $flaggedPossibleCount
             . ' synced=' . $savedCount
             . ' failed_saves=' . $failedSaveCount);
 
-        // Log success summary
-        error_log("=== SMS PARSING COMPLETE ===");
-        error_log("Total messages received: " . count($messages));
-        error_log("Bank SMS filtered: " . count($bankSMS));
-        error_log("Transactions parsed by AI: " . count($transactions));
-        error_log("Transactions saved to DB: $savedCount");
-        error_log("Duplicates skipped: $skippedCount");
-        error_log("Duplicate rows time-updated: $updatedDuplicateTimeCount");
-        error_log("Saved debit txns: $savedDebitCount, amount: $savedDebitAmount");
-        error_log("Saved credit txns: $savedCreditCount, amount: $savedCreditAmount");
-        error_log("User ID: $userId");
-        error_log("===========================");
+        if ($jobId !== null) {
+            $errorMessage = null;
+            if ($failedSaveCount > 0) {
+                $errorMessage = 'Completed with ' . $failedSaveCount . ' failed transaction inserts';
+            }
 
-        // Self-heal: remove any rogue categories this sync may have created
-        $autoFixResult = CategoryResolver::autoFix($this->db, $userId);
-        if ($autoFixResult['deleted'] > 0) {
-            error_log("[CategoryResolver] Auto-fix after SMS sync: {$autoFixResult['fixed']} txns remapped, {$autoFixResult['deleted']} rogues deleted");
+            $this->updateSyncJobProgress(
+                $jobId,
+                [
+                    'status' => 'completed',
+                    'progress' => 100,
+                    'total_items' => $totalTransactions,
+                    'processed_items' => $processedCount,
+                    'saved_items' => $savedCount,
+                    'skipped_items' => $skippedCount,
+                    'error_message' => $errorMessage,
+                    'completed' => true,
+                ]
+            );
         }
 
-        Response::success([
-            'message' => 'SMS parsing complete',
-            'total_sms' => count($bankSMS),
-            'parsed_transactions' => count($transactions),
+        return [
+            'parsed_transactions' => $totalTransactions,
             'saved_transactions' => $savedCount,
             'skipped_duplicates' => $skippedCount,
-            'skipped_high_confidence' => $skippedCount,
             'updated_duplicate_timestamps' => $updatedDuplicateTimeCount,
             'flagged_possible_duplicates' => $flaggedPossibleCount,
             'ai_checked_transactions' => $aiCheckedCount,
             'duplicate_fallback_used' => $fallbackUsedCount,
+            'failed_saves' => $failedSaveCount,
             'saved_debit_count' => $savedDebitCount,
             'saved_credit_count' => $savedCreditCount,
-            'saved_debit_amount' => round($savedDebitAmount, 2),
-            'saved_credit_amount' => round($savedCreditAmount, 2),
-            'transactions' => $transactions
+            'saved_debit_amount' => $savedDebitAmount,
+            'saved_credit_amount' => $savedCreditAmount,
+            'transactions' => $transactions,
+        ];
+    }
+
+    private function isAsyncManualRequest(array $input): bool
+    {
+        $asyncRequested = filter_var($input['async'] ?? false, FILTER_VALIDATE_BOOLEAN);
+        $mode = strtolower((string)($input['mode'] ?? 'manual'));
+        $forceLookbackDays = (int)($input['force_lookback_days'] ?? 0);
+
+        return $asyncRequested && $mode === 'manual' && $forceLookbackDays >= 30;
+    }
+
+    private function createSmsSyncJob(int $userId, int $totalSms): int
+    {
+        $sql = "INSERT INTO sync_jobs (user_id, type, status, progress, total_items, processed_items, saved_items, skipped_items, created_at)
+                VALUES (?, 'sms', 'pending', 0, ?, 0, 0, 0, NOW())";
+        return (int)$this->db->insert($sql, [$userId, $totalSms]);
+    }
+
+    private function markSyncJobFailed(int $jobId, string $errorMessage): void
+    {
+        $sql = "UPDATE sync_jobs
+                SET status = 'failed', completed_at = NOW(), error_message = ?
+                WHERE id = ?";
+        $this->db->execute($sql, [substr($errorMessage, 0, 500), $jobId]);
+    }
+
+    private function writeSmsJobPayload(int $jobId, int $userId, array $bankSMS): string
+    {
+        $dir = __DIR__ . '/../tmp/sms-sync-jobs';
+        if (!is_dir($dir) && !mkdir($dir, 0775, true) && !is_dir($dir)) {
+            throw new Exception('Failed to create SMS sync temp directory');
+        }
+
+        $payloadPath = $dir . '/sms-sync-job-' . $jobId . '-' . time() . '.json';
+        $payload = [
+            'job_id' => $jobId,
+            'user_id' => $userId,
+            'messages' => $bankSMS,
+            'created_at' => date('c'),
+        ];
+
+        $encoded = json_encode($payload);
+        if ($encoded === false) {
+            throw new Exception('Failed to encode SMS sync job payload');
+        }
+
+        if (file_put_contents($payloadPath, $encoded) === false) {
+            throw new Exception('Failed to persist SMS sync job payload');
+        }
+
+        return $payloadPath;
+    }
+
+    private function launchSmsBackgroundWorker(int $jobId, string $payloadPath): void
+    {
+        $phpBinary = PHP_BINARY ?: 'php';
+        $scriptPath = __DIR__ . '/background_sms_sync.php';
+
+        if (strncasecmp(PHP_OS, 'WIN', 3) === 0) {
+            $command = sprintf(
+                'start /B "" %s %s %d %s',
+                escapeshellarg($phpBinary),
+                escapeshellarg($scriptPath),
+                $jobId,
+                escapeshellarg($payloadPath)
+            );
+
+            if (function_exists('popen') && function_exists('pclose')) {
+                @pclose(@popen($command, 'r'));
+                return;
+            }
+
+            exec($command);
+            return;
+        }
+
+        $command = sprintf(
+            '%s %s %d %s > /dev/null 2>&1 &',
+            escapeshellarg($phpBinary),
+            escapeshellarg($scriptPath),
+            $jobId,
+            escapeshellarg($payloadPath)
+        );
+        exec($command);
+    }
+
+    private function safeUnlink(string $path): void
+    {
+        if (is_file($path)) {
+            @unlink($path);
+        }
+    }
+
+    private function updateSyncJobProgress(int $jobId, array $fields): void
+    {
+        $status = $fields['status'] ?? 'processing';
+        $progress = (int)($fields['progress'] ?? 0);
+        $totalItems = (int)($fields['total_items'] ?? 0);
+        $processedItems = (int)($fields['processed_items'] ?? 0);
+        $savedItems = (int)($fields['saved_items'] ?? 0);
+        $skippedItems = (int)($fields['skipped_items'] ?? 0);
+        $errorMessage = array_key_exists('error_message', $fields) ? $fields['error_message'] : null;
+        $completed = !empty($fields['completed']);
+
+        if ($completed) {
+            $sql = "UPDATE sync_jobs
+                    SET status = ?, progress = ?, total_items = ?, processed_items = ?, saved_items = ?, skipped_items = ?,
+                        error_message = ?, started_at = COALESCE(started_at, NOW()), completed_at = NOW()
+                    WHERE id = ?";
+            $this->db->execute($sql, [
+                $status,
+                $progress,
+                $totalItems,
+                $processedItems,
+                $savedItems,
+                $skippedItems,
+                $errorMessage !== null ? substr((string)$errorMessage, 0, 500) : null,
+                $jobId,
+            ]);
+            return;
+        }
+
+        $sql = "UPDATE sync_jobs
+                SET status = ?, progress = ?, total_items = ?, processed_items = ?, saved_items = ?, skipped_items = ?,
+                    error_message = ?, started_at = COALESCE(started_at, NOW())
+                WHERE id = ?";
+        $this->db->execute($sql, [
+            $status,
+            $progress,
+            $totalItems,
+            $processedItems,
+            $savedItems,
+            $skippedItems,
+            $errorMessage !== null ? substr((string)$errorMessage, 0, 500) : null,
+            $jobId,
         ]);
     }
 
@@ -259,7 +504,7 @@ class SMSParserController {
         $transaction = $transactions[0];
         $transaction['date'] = $this->resolveTransactionDateTime($transaction, $date);
 
-        $duplicateCheck = $this->evaluateDuplicateTransaction($userId, $transaction, null, true);
+        $duplicateCheck = $this->evaluateDuplicateTransactionSafely($userId, $transaction, null, true);
         if (!empty($duplicateCheck['should_skip'])) {
             $updatedDuplicateTimestamp = $this->updateMatchedDuplicateTimestamp(
                 $userId,
@@ -338,6 +583,29 @@ class SMSParserController {
             'skip_threshold' => 76,
             'duplicate_threshold' => 51,
         ]);
+    }
+
+    private function evaluateDuplicateTransactionSafely(int $userId, array $transaction, ?int $accountId = null, bool $useAi = true): array
+    {
+        try {
+            return $this->evaluateDuplicateTransaction($userId, $transaction, $accountId, $useAi);
+        } catch (Exception $e) {
+            if (!$this->isGoneAwayMessage($e->getMessage())) {
+                throw $e;
+            }
+
+            error_log('[DB] Duplicate evaluation failed due to dropped connection. Reconnecting and retrying once.');
+            $this->db->forceReconnect();
+            $this->duplicateDetector = new TransactionDuplicateDetector($this->db->getConnection(), $this->ai);
+
+            return $this->evaluateDuplicateTransaction($userId, $transaction, $accountId, $useAi);
+        }
+    }
+
+    private function isGoneAwayMessage(string $message): bool
+    {
+        $normalized = strtolower($message);
+        return str_contains($normalized, 'server has gone away') || str_contains($normalized, 'lost connection');
     }
 
     private function resolveTransactionDateTime(array $transaction, ?string $fallbackSmsDate = null): string
