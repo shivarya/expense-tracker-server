@@ -356,17 +356,38 @@ class StatementController
             $flaggedPossibleDuplicates = 0;
             $aiChecked = 0;
             $fallbackUsed = 0;
+            $savedDebitCount = 0;
+            $savedCreditCount = 0;
+            $savedDebitAmount = 0.0;
+            $savedCreditAmount = 0.0;
+            $savedDateMin = null;
+            $savedDateMax = null;
             $errors = [];
 
             foreach ($parsedTransactions as $txn) {
                 try {
+                    $normalizedType = $this->normalizeStatementTransactionType(
+                        (string)($txn['transaction_type'] ?? ''),
+                        (string)($txn['description'] ?? '')
+                    );
+                    $normalizedDescription = $this->normalizeStatementDescription(
+                        (string)($txn['description'] ?? ''),
+                        (string)($txn['merchant'] ?? ''),
+                        strtoupper($bank)
+                    );
+                    $normalizedMerchant = $this->normalizeStatementMerchant(
+                        (string)($txn['merchant'] ?? ''),
+                        $normalizedDescription,
+                        strtoupper($bank) . ' Card Transaction'
+                    );
+
                     $transactionPayload = [
                         'bank' => strtoupper($bank),
                         'account_number' => $cardLastFour,
-                        'transaction_type' => $txn['transaction_type'],
+                        'transaction_type' => $normalizedType,
                         'amount' => $txn['amount'],
-                        'merchant' => $txn['merchant'],
-                        'description' => $txn['description'],
+                        'merchant' => $normalizedMerchant,
+                        'description' => $normalizedDescription,
                         'date' => $txn['transaction_date'],
                         'reference_number' => $txn['reference_number'],
                         'payment_method' => $paymentMethod,
@@ -416,10 +437,10 @@ class StatementController
                             $userId,
                             $accountId,
                             $categoryId,
-                            $txn['transaction_type'],
+                            $normalizedType,
                             $txn['amount'],
-                            $txn['merchant'],
-                            $txn['description'],
+                            $normalizedMerchant,
+                            $normalizedDescription,
                             $txn['transaction_date'],
                             $txn['reference_number'],
                             $paymentMethod,
@@ -429,6 +450,25 @@ class StatementController
                     );
 
                     $savedCount++;
+
+                    $txnAmount = (float)$txn['amount'];
+                    if ($normalizedType === 'credit') {
+                        $savedCreditCount++;
+                        $savedCreditAmount += $txnAmount;
+                    } else {
+                        $savedDebitCount++;
+                        $savedDebitAmount += $txnAmount;
+                    }
+
+                    $txnDate = (string)($txn['transaction_date'] ?? '');
+                    if ($txnDate !== '') {
+                        if ($savedDateMin === null || strtotime($txnDate) < strtotime($savedDateMin)) {
+                            $savedDateMin = $txnDate;
+                        }
+                        if ($savedDateMax === null || strtotime($txnDate) > strtotime($savedDateMax)) {
+                            $savedDateMax = $txnDate;
+                        }
+                    }
                 } catch (Exception $recordError) {
                     $errors[] = $recordError->getMessage();
                 }
@@ -461,6 +501,12 @@ class StatementController
                 'flagged_possible_duplicates' => $flaggedPossibleDuplicates,
                 'ai_checked_transactions' => $aiChecked,
                 'duplicate_fallback_used' => $fallbackUsed,
+                'saved_debit_count' => $savedDebitCount,
+                'saved_credit_count' => $savedCreditCount,
+                'saved_debit_amount' => round($savedDebitAmount, 2),
+                'saved_credit_amount' => round($savedCreditAmount, 2),
+                'saved_date_min' => $savedDateMin,
+                'saved_date_max' => $savedDateMax,
                 'errors' => $errors,
             ], 'Statement parsed and synced successfully.');
         } catch (Exception $e) {
@@ -1266,11 +1312,65 @@ PY;
             return 'debit';
         }
 
-        if (preg_match('/refund|reversal|cashback|payment received|credit/i', $description)) {
+        if (preg_match('/\b(refund|reversal|cashback|payment\s+received|credited|credit\s+interest|interest\s+credited|salary\s+credit|amount\s+received|received)\b/i', $description)) {
             return 'credit';
         }
 
+        if (preg_match('/\b(debit(?:ed)?|purchase|spent|withdrawal|atm|bill\s+paid|charged)\b/i', $description)) {
+            return 'debit';
+        }
+
         return 'debit';
+    }
+
+    private function normalizeStatementTransactionType(string $rawType, string $description = ''): string
+    {
+        $value = strtolower(trim($rawType));
+        if ($value === 'expense') {
+            return 'debit';
+        }
+        if ($value === 'income') {
+            return 'credit';
+        }
+        if (in_array($value, ['debit', 'credit', 'transfer'], true)) {
+            return $value;
+        }
+
+        return $this->inferTransactionType($description, '');
+    }
+
+    private function normalizeStatementMerchant(string $merchant, string $description, string $fallbackLabel): string
+    {
+        $value = trim($merchant);
+        if ($value === '') {
+            $value = $this->extractMerchant($description, $fallbackLabel);
+        }
+
+        $value = preg_replace('/\s+/', ' ', trim($value)) ?? trim($value);
+        if ($value !== '' && strtoupper($value) === $value) {
+            $value = ucwords(strtolower($value));
+        }
+
+        if ($value === '') {
+            $value = $fallbackLabel;
+        }
+
+        return mb_substr($value, 0, 500);
+    }
+
+    private function normalizeStatementDescription(string $description, string $merchant, string $bankLabel): string
+    {
+        $value = preg_replace('/\s+/', ' ', trim($description)) ?? trim($description);
+        if ($value === '') {
+            $merchantValue = trim($merchant);
+            if ($merchantValue !== '') {
+                $value = 'Transaction at ' . $merchantValue;
+            } else {
+                $value = $bankLabel . ' card transaction';
+            }
+        }
+
+        return mb_substr($value, 0, 1000);
     }
 
     private function isSupportedBank(string $bank): bool

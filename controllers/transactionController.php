@@ -25,6 +25,8 @@ function handleTransactionRoutes($uri, $method)
     updateTransactionRefundAllocations($userId, (int)$matches[1]);
   } elseif (preg_match('/^\/transactions\/(\d+)\/category$/', $uri, $matches) && ($method === 'PATCH' || $method === 'PUT')) {
     updateTransactionCategory($userId, $matches[1]);
+  } elseif (preg_match('/^\/transactions\/(\d+)$/', $uri, $matches) && ($method === 'PUT' || $method === 'PATCH')) {
+    updateTransaction($userId, (int)$matches[1]);
   } elseif (preg_match('/^\/transactions\/(\d+)$/', $uri, $matches) && $method === 'DELETE') {
     deleteTransaction($userId, $matches[1]);
   } else {
@@ -45,6 +47,15 @@ function getTransactions($userId)
     $groupId = isset($_GET['group_id']) ? (int)$_GET['group_id'] : null;
     $type = $_GET['type'] ?? null;
     $limit = $_GET['limit'] ?? 100;
+    $offset = isset($_GET['offset']) ? (int)$_GET['offset'] : 0;
+
+    if ((int)$limit <= 0) {
+      Response::error('Invalid limit', 422);
+    }
+
+    if ($offset < 0) {
+      Response::error('Invalid offset', 422);
+    }
 
     if ($groupId) {
       $group = $db->fetchOne(
@@ -88,8 +99,9 @@ function getTransactions($userId)
 
     $sql .= buildGroupFilterSql($groupId, $params, 't');
 
-    $sql .= " ORDER BY t.transaction_date DESC LIMIT ?";
+    $sql .= " ORDER BY t.transaction_date DESC, t.id DESC LIMIT ? OFFSET ?";
     $params[] = (int)$limit;
+    $params[] = $offset;
 
     $transactions = $db->fetchAll($sql, $params);
     enrichTransactionsWithOverlayMeta($db, (int)$userId, $transactions);
@@ -172,6 +184,49 @@ function createTransaction($userId)
     Response::success(['id' => $id], 'Transaction created successfully', 201);
   } catch (Exception $e) {
     Response::error('Failed to create transaction: ' . $e->getMessage(), 500);
+  }
+}
+
+function updateTransaction($userId, $id)
+{
+  try {
+    $input = getJsonInput();
+
+    if (!array_key_exists('merchant', $input)) {
+      Response::error('merchant is required', 422);
+    }
+
+    $merchant = trim((string)$input['merchant']);
+    if ($merchant === '') {
+      Response::error('merchant cannot be empty', 422);
+    }
+
+    if (strlen($merchant) > 500) {
+      Response::error('merchant must be 500 characters or less', 422);
+    }
+
+    $db = getDB();
+
+    $existing = $db->fetchOne(
+      "SELECT id FROM transactions WHERE id = ? AND user_id = ? AND deleted_at IS NULL",
+      [$id, $userId]
+    );
+
+    if (!$existing) {
+      Response::error('Transaction not found', 404);
+    }
+
+    $db->execute(
+      "UPDATE transactions SET merchant = ? WHERE id = ? AND user_id = ? AND deleted_at IS NULL",
+      [$merchant, $id, $userId]
+    );
+
+    Response::success([
+      'id' => (int)$id,
+      'merchant' => $merchant,
+    ], 'Transaction name updated successfully');
+  } catch (Exception $e) {
+    Response::error('Failed to update transaction: ' . $e->getMessage(), 500);
   }
 }
 

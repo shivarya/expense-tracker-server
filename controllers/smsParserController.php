@@ -175,6 +175,13 @@ class SMSParserController {
         foreach (array_chunk($transactions, $chunkSize) as $chunkIndex => $chunk) {
             foreach ($chunk as $transaction) {
                 $transaction['date'] = $this->resolveTransactionDateTime($transaction);
+                $transaction['transaction_type'] = $this->normalizeTransactionTypeValue(
+                    (string)($transaction['transaction_type'] ?? ''),
+                    (string)($transaction['description'] ?? '')
+                );
+                $transaction['merchant'] = $this->normalizeMerchantName((string)($transaction['merchant'] ?? ''));
+                $transaction['description'] = $this->resolveTransactionDescription($transaction);
+
                 $duplicateCheck = $this->evaluateDuplicateTransactionSafely($userId, $transaction, null, true);
 
                 if (!empty($duplicateCheck['ai_used'])) {
@@ -219,7 +226,7 @@ class SMSParserController {
                         $transaction['transaction_type'],
                         $transaction['amount'],
                         $transaction['merchant'] ?? null,
-                        $transaction['merchant'] ?? 'SMS Transaction',
+                        $transaction['description'] ?? 'SMS Transaction',
                         $transaction['date'] ?? date('Y-m-d H:i:s'),
                         $transaction['reference_number'] ?? null,
                         $transaction['payment_method'] ?? null,
@@ -703,6 +710,51 @@ class SMSParserController {
     private function hasMidnightTime(string $dateTime): bool
     {
         return substr($dateTime, 11, 8) === '00:00:00';
+    }
+
+    private function normalizeTransactionTypeValue(string $rawType, string $description = ''): string
+    {
+        $value = strtolower(trim($rawType));
+        if ($value === 'expense') {
+            return 'debit';
+        }
+        if ($value === 'income') {
+            return 'credit';
+        }
+        if (in_array($value, ['debit', 'credit', 'transfer'], true)) {
+            return $value;
+        }
+
+        if (preg_match('/\b(refund|reversal|cashback|credited|credit\s+interest|interest\s+credited|salary\s+credit|received)\b/i', $description)) {
+            return 'credit';
+        }
+
+        return 'debit';
+    }
+
+    private function normalizeMerchantName(string $merchant): string
+    {
+        $value = preg_replace('/\s+/', ' ', trim($merchant)) ?? trim($merchant);
+        if ($value !== '' && strtoupper($value) === $value) {
+            $value = ucwords(strtolower($value));
+        }
+
+        return mb_substr($value, 0, 500);
+    }
+
+    private function resolveTransactionDescription(array $transaction): string
+    {
+        $description = preg_replace('/\s+/', ' ', trim((string)($transaction['description'] ?? ''))) ?? trim((string)($transaction['description'] ?? ''));
+        if ($description !== '') {
+            return mb_substr($description, 0, 1000);
+        }
+
+        $merchant = trim((string)($transaction['merchant'] ?? ''));
+        if ($merchant !== '') {
+            return mb_substr('Transaction at ' . $merchant, 0, 1000);
+        }
+
+        return 'SMS transaction';
     }
 
     private function updateMatchedDuplicateTimestamp(int $userId, ?int $matchedTransactionId, ?string $incomingDateTime): bool

@@ -137,6 +137,7 @@ REQUIRED fields per transaction:
 - sms_index: integer index of source SMS from input list (1-based)
 - category_id: integer from the canonical list below
 - merchant: merchant/payee name (clean, no bank jargon)
+- description: short human-friendly description (include action + merchant context)
 - reference_number: UPI ref, txn ID, chq number (or null)
 
 CANONICAL CATEGORY LIST — you MUST return one of these integer category_id values only:
@@ -167,6 +168,9 @@ CANONICAL CATEGORY LIST — you MUST return one of these integer category_id val
 
 RULES:
 - For credit transactions: apply income categories first (14/15/16/17)
+- transaction_type MUST be exactly debit or credit (never expense/income/other labels)
+- Messages with credited/received/refund/reversal/cashback/payment received/interest credited => transaction_type=credit
+- Messages with debited/spent/withdrawn/charged/purchase => transaction_type=debit
 - Interest credited (FD, savings, bond) → category_id 16 (Other Income)
 - ATM withdrawals → category_id 51
 - UPI to a person's name (not a business) → category_id 51
@@ -177,6 +181,8 @@ RULES:
 - House repair, renovation, home maintenance, decor/furnishing payments → category_id 56
 - When in doubt between 18 and 51, prefer 51
 - Do NOT invent new category names or IDs
+- Keep merchant concise and clean; avoid bank prefixes, txn IDs, and location suffixes when possible
+- description should not be generic; avoid values like "transaction" or "payment"
 - Preserve exact SMS timestamp in "date" using the SMS Date field provided in each input row.
 - Do NOT default time to 00:00:00 unless the source SMS truly has no time information.
 
