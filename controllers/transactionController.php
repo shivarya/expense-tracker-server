@@ -956,11 +956,29 @@ function overlayTableExists($db, string $table): bool
     return $cache[$table];
   }
 
-  try {
-    $result = $db->fetchOne("SHOW TABLES LIKE ?", [$table]);
-    $cache[$table] = !empty($result);
-  } catch (Exception $e) {
+  if (!preg_match('/^[a-zA-Z0-9_]+$/', $table)) {
     $cache[$table] = false;
+    return false;
+  }
+
+  try {
+    $result = $db->fetchOne(
+      "SELECT COUNT(*) as table_count
+       FROM information_schema.tables
+       WHERE table_schema = DATABASE()
+         AND table_name = ?",
+      [$table]
+    );
+
+    $cache[$table] = ((int)($result['table_count'] ?? 0)) > 0;
+  } catch (Exception $e) {
+    try {
+      // Fallback probe for environments where information_schema visibility is restricted.
+      $db->fetchOne("SELECT 1 FROM `{$table}` LIMIT 1");
+      $cache[$table] = true;
+    } catch (Exception $inner) {
+      $cache[$table] = false;
+    }
   }
 
   return $cache[$table];
