@@ -277,6 +277,17 @@ Runtime matching uses DB table `category_learning_rules` (per user) and this mar
 <!-- AUTO_LEARNED_MAPPINGS_START -->
 | User | Pattern | Category ID | Category Name | Uses | Last Updated |
 |---|---|---:|---|---:|---|
+| 1 | 13 03 2026wdl tfr upi dr | 5 | Bills & Utilities | 1 | 2026-03-17 09:39:57 |
+| 1 | muniraju | 3 | Shopping | 1 | 2026-03-17 09:37:19 |
+| 1 | ente | 2 | Transportation | 1 | 2026-03-17 09:34:51 |
+| 1 | treasure | 1 | Food & Dining | 1 | 2026-03-17 09:10:58 |
+| 1 | raja kumar sahu | 9 | Groceries | 1 | 2026-03-17 09:05:13 |
+| 1 | kanti | 1 | Food & Dining | 1 | 2026-03-17 09:05:13 |
+| 1 | cred | 5 | Bills & Utilities | 1 | 2026-03-17 09:04:59 |
+| 1 | district | 1 | Food & Dining | 1 | 2026-03-17 09:04:29 |
+| 1 | amazon pay in | 12 | Personal Care | 1 | 2026-03-17 09:04:09 |
+| 1 | venugopa | 9 | Groceries | 1 | 2026-03-17 05:43:42 |
+| 1 | credpaya | 12 | Personal Care | 1 | 2026-03-16 23:30:07 |
 | 1 | pavithra | 1 | Food & Dining | 2 | 2026-03-16 03:26:33 |
 | 1 | urbancla | 56 | Home Improvement | 1 | 2026-03-16 03:24:02 |
 | 1 | shradha | 1 | Food & Dining | 1 | 2026-03-14 19:23:12 |
@@ -285,23 +296,18 @@ Runtime matching uses DB table `category_learning_rules` (per user) and this mar
 | 1 | passport seva project | 8 | Travel | 1 | 2026-03-14 19:11:59 |
 | 1 | amit kumar sahani | 56 | Home Improvement | 1 | 2026-03-14 19:10:56 |
 | 1 | gramiq | 9 | Groceries | 1 | 2026-03-14 19:10:41 |
-| 1 | credpaya | 12 | Personal Care | 1 | 2026-03-14 01:37:26 |
 | 1 | nagalakshmi | 55 | Donation | 1 | 2026-03-11 09:14:58 |
 | 1 | kumara | 2 | Transportation | 1 | 2026-03-11 09:13:09 |
-| 1 | kanti | 1 | Food & Dining | 1 | 2026-03-11 09:09:26 |
 | 1 | ramaling dundappa belakud | 2 | Transportation | 1 | 2026-03-11 09:09:22 |
 | 1 | nallola munemma | 2 | Transportation | 1 | 2026-03-08 21:17:50 |
 | 1 | jyothi | 9 | Groceries | 1 | 2026-03-08 21:17:31 |
 | 1 | the arun | 9 | Groceries | 1 | 2026-03-08 21:17:00 |
 | 1 | sathya | 6 | Healthcare | 3 | 2026-03-08 21:15:38 |
-| 1 | cred | 5 | Bills & Utilities | 1 | 2026-03-08 21:13:23 |
 | 1 | deepak kumar | 1 | Food & Dining | 1 | 2026-03-07 09:22:57 |
 | 1 | vivek kumar rai | 1 | Food & Dining | 1 | 2026-03-07 09:22:50 |
 | 1 | hemanth singh | 53 | Kids Activities | 1 | 2026-03-07 09:22:05 |
-| 1 | district | 1 | Food & Dining | 1 | 2026-03-07 09:21:36 |
 | 1 | vijiyamm | 9 | Groceries | 1 | 2026-03-06 21:49:09 |
 | 1 | piku sukanya | 13 | Investments | 1 | 2026-03-06 10:42:08 |
-| 1 | raja kumar sahu | 9 | Groceries | 1 | 2026-03-06 10:41:16 |
 | 1 | kamala devi | 56 | Home Improvement | 1 | 2026-03-06 10:40:48 |
 | 1 | rajashekar | 52 | Household Help | 1 | 2026-03-05 22:56:06 |
 | 1 | rajnish kumar singh | 55 | Donation | 1 | 2026-03-05 22:55:53 |
