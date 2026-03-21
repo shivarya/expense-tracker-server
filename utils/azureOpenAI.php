@@ -263,6 +263,103 @@ PROMPT;
         return $this->parseEmailBatch($emailBody, $subject);
     }
 
+    /**
+     * Clean statement transactions with AI and map likely category IDs.
+     * Returns indexed rows keyed by input index for safe merge in caller.
+     *
+     * Output shape per index:
+     * [
+     *   index => [
+     *     'merchant' => string|null,
+     *     'description' => string|null,
+     *     'category_id' => int|null,
+     *   ]
+     * ]
+     */
+    public function refineStatementTransactions(array $transactions, string $bankLabel = 'CARD'): array {
+        if (empty($transactions)) {
+            return [];
+        }
+
+        $canonicalIds = [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,51,52,53,54,55,56];
+        $items = [];
+
+        foreach (array_values($transactions) as $index => $txn) {
+            $items[] = [
+                'index' => $index,
+                'transaction_type' => (string)($txn['transaction_type'] ?? 'debit'),
+                'amount' => (float)($txn['amount'] ?? 0),
+                'merchant' => (string)($txn['merchant'] ?? ''),
+                'description' => (string)($txn['description'] ?? ''),
+                'raw_line' => (string)($txn['raw_line'] ?? ''),
+            ];
+        }
+
+        $systemPrompt = <<<'PROMPT'
+You clean card-statement transactions for an Indian expense tracker.
+
+Task:
+1. Improve merchant and description text.
+2. Assign canonical category_id from this list only:
+1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,51,52,53,54,55,56
+
+Rules:
+- Keep merchant short, readable, and human-friendly.
+- Remove IDs/codes/location clutter from merchant when obvious.
+- Description should be concise and useful (not generic single word).
+- For credit transactions use income IDs when appropriate (14/15/16), transfers as 17.
+- Fuel/petrol/parking should map to 2.
+- Pooja material / religious shopping purchases should map to 3 unless clearly donation intent (55).
+- If uncertain on debit, prefer 51 over 18.
+- Never invent categories outside canonical IDs.
+
+Return ONLY JSON object:
+{
+  "items": [
+    {"index": 0, "merchant": "...", "description": "...", "category_id": 2}
+  ]
+}
+PROMPT;
+
+        $userPrompt = "Bank context: {$bankLabel}\n";
+        $userPrompt .= "Normalize the following parsed statement transactions:\n";
+        $userPrompt .= json_encode($items, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+
+        $messages = [
+            ['role' => 'system', 'content' => $systemPrompt],
+            ['role' => 'user', 'content' => $userPrompt],
+        ];
+
+        $response = $this->chatCompletion($messages, 0.1, true);
+        if (!is_array($response) || !isset($response['items']) || !is_array($response['items'])) {
+            return [];
+        }
+
+        $normalized = [];
+        foreach ($response['items'] as $row) {
+            if (!is_array($row)) {
+                continue;
+            }
+
+            $index = isset($row['index']) ? (int)$row['index'] : -1;
+            if ($index < 0 || !array_key_exists($index, $items)) {
+                continue;
+            }
+
+            $merchant = isset($row['merchant']) ? trim((string)$row['merchant']) : '';
+            $description = isset($row['description']) ? trim((string)$row['description']) : '';
+            $categoryId = isset($row['category_id']) ? (int)$row['category_id'] : 0;
+
+            $normalized[$index] = [
+                'merchant' => $merchant !== '' ? mb_substr($merchant, 0, 500) : null,
+                'description' => $description !== '' ? mb_substr($description, 0, 1000) : null,
+                'category_id' => in_array($categoryId, $canonicalIds, true) ? $categoryId : null,
+            ];
+        }
+
+        return $normalized;
+    }
+
     private function normalizeSmsDate(?string $raw): ?string {
         if (!$raw) {
             return null;

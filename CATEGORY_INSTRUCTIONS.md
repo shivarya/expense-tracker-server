@@ -80,7 +80,8 @@ These old names are now merged and should **not** be reused as separate categori
 
 - `Bill Payment`, `Bills`, `utilities` → **Bills & Utilities (5)**
 - `food`, `Food & Beverage`, `food_and_beverage`, `food_delivery`, `dining`, `Restaurant` → **Food & Dining (1)**
-- `fuel`, `Transport` → **Transportation (2)**
+- `fuel`, `Transport`, `Parking`, `Parking Fee`, `Petrol Fee` → **Transportation (2)**
+- `Pooja Material`, `Pooja Materials`, `Puja Material`, `Puja Materials` → **Shopping (3)**
 - `Health` → **Healthcare (6)**
 - `Streaming`, `Tata Play`, `OTT` → **Entertainment (4)**
 - `EMI`, `EMI Principal/Amortization`, `loan_payment` → **Rent/EMI (11)**
@@ -113,6 +114,7 @@ Use for: delivery apps, restaurants, cafes, dessert outlets.
 
 - Known: `AMAZON`, `FLIPKART`, `MYNTRA`, `AJIO`, `RELIANCE RETAIL`
 - Keywords: `STORE`, `RETAIL`, `FASHION`, `BOUTIQUE`
+- Include religious shopping purchases like `pooja material` under Shopping unless intent clearly indicates donation.
 
 ### Travel (ID 8)
 
@@ -123,6 +125,7 @@ Use for: delivery apps, restaurants, cafes, dessert outlets.
 
 - Known: `OLA`, `UBER`, `RAPIDO`, fuel stations
 - Keywords: `CAB`, `TAXI`, `METRO`, `BUS`, `PETROL`, `DIESEL`
+- Include `parking fee`, `parking charges`, and `petrol fee` under Transportation.
 
 ### Bills & Utilities (ID 5)
 

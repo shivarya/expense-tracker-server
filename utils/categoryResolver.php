@@ -58,12 +58,17 @@ class CategoryResolver
         'transportation'             => 2, 'transport'             => 2,
         'fuel'                       => 2, 'cab'                   => 2,
         'petrol'                     => 2, 'taxi'                  => 2,
+        'petrol fee'                 => 2, 'fuel fee'              => 2,
+        'parking'                    => 2, 'parking fee'           => 2,
+        'parking charges'            => 2,
 
         // ── Shopping (3) ────────────────────────────────────────────────
         'shopping'                   => 3, 'retail'                => 3,
         'e-commerce'                 => 3, 'ecommerce'             => 3,
         'purchase'                   => 3, 'card_purchase'         => 3,
         'card purchase'              => 3,
+        'pooja material'             => 3, 'pooja materials'       => 3,
+        'puja material'              => 3, 'puja materials'        => 3,
 
         // ── Entertainment (4) ───────────────────────────────────────────
         'entertainment'              => 4, 'streaming'             => 4,

@@ -348,6 +348,29 @@ class StatementController
                 throw new Exception('No transactions detected in the uploaded ' . strtoupper($bank) . ' statement.');
             }
 
+            // Best-effort AI cleanup for merchant/description/category before dedupe + insert.
+            // Upload must still succeed if AI is unavailable or returns partial output.
+            $statementAi = new AzureOpenAI();
+            $aiRefinements = $statementAi->refineStatementTransactions($parsedTransactions, strtoupper($bank));
+            if (!empty($aiRefinements)) {
+                foreach ($parsedTransactions as $idx => $parsedTxn) {
+                    if (!isset($aiRefinements[$idx]) || !is_array($aiRefinements[$idx])) {
+                        continue;
+                    }
+
+                    $refined = $aiRefinements[$idx];
+                    if (!empty($refined['merchant'])) {
+                        $parsedTransactions[$idx]['merchant'] = (string)$refined['merchant'];
+                    }
+                    if (!empty($refined['description'])) {
+                        $parsedTransactions[$idx]['description'] = (string)$refined['description'];
+                    }
+                    if (!empty($refined['category_id'])) {
+                        $parsedTransactions[$idx]['category_id'] = (int)$refined['category_id'];
+                    }
+                }
+            }
+
             $accountId = $this->getOrCreateCreditCardAccount($userId, $bank, $effectiveCardLastFour);
             $paymentMethod = strtoupper($bank) . ' Card *' . $effectiveCardLastFour;
 
@@ -383,11 +406,12 @@ class StatementController
 
                     $transactionPayload = [
                         'bank' => strtoupper($bank),
-                        'account_number' => $cardLastFour,
+                        'account_number' => $effectiveCardLastFour,
                         'transaction_type' => $normalizedType,
                         'amount' => $txn['amount'],
                         'merchant' => $normalizedMerchant,
                         'description' => $normalizedDescription,
+                        'category_id' => isset($txn['category_id']) ? (int)$txn['category_id'] : null,
                         'date' => $txn['transaction_date'],
                         'reference_number' => $txn['reference_number'],
                         'payment_method' => $paymentMethod,
