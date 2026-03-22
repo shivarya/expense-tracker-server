@@ -65,6 +65,7 @@ function getWidgetSummary($userId)
 
     $topCategoriesStmt = $db->prepare(
       "SELECT
+          c.id AS category_id,
           COALESCE(c.name, 'Uncategorized') AS name,
           COALESCE(c.color, '#9E9E9E') AS color,
           COALESCE(c.icon, 'help-circle-outline') AS icon,
@@ -165,6 +166,7 @@ function widgetDetectColumn(PDO $db, $table, $column)
 function widgetMapCategorySummary($row)
 {
   return [
+    'category_id' => isset($row['category_id']) ? (int)$row['category_id'] : null,
     'name' => $row['name'] ?? 'Uncategorized',
     'color' => $row['color'] ?? '#9E9E9E',
     'icon' => $row['icon'] ?? 'help-circle-outline',

@@ -2,6 +2,7 @@
 
 require_once __DIR__ . '/../utils/categoryLearning.php';
 require_once __DIR__ . '/groupController.php';
+require_once __DIR__ . '/manualGroupController.php';
 
 function handleTransactionRoutes($uri, $method)
 {
@@ -15,6 +16,10 @@ function handleTransactionRoutes($uri, $method)
     getDuplicateTransactions($userId);
   } elseif ($uri === '/transactions' && $method === 'POST') {
     createTransaction($userId);
+  } elseif (preg_match('/^\/transactions\/(\d+)\/manual-groups$/', $uri, $matches) && $method === 'GET') {
+    getTransactionManualGroups($userId, (int)$matches[1]);
+  } elseif (preg_match('/^\/transactions\/(\d+)\/manual-groups$/', $uri, $matches) && ($method === 'PUT' || $method === 'PATCH')) {
+    updateTransactionManualGroups($userId, (int)$matches[1]);
   } elseif (preg_match('/^\/transactions\/(\d+)\/splits$/', $uri, $matches) && $method === 'GET') {
     getTransactionSplits($userId, (int)$matches[1]);
   } elseif (preg_match('/^\/transactions\/(\d+)\/splits$/', $uri, $matches) && ($method === 'PUT' || $method === 'PATCH')) {
@@ -45,6 +50,7 @@ function getTransactions($userId)
     $accountId = $_GET['account_id'] ?? null;
     $categoryId = $_GET['category_id'] ?? null;
     $groupId = isset($_GET['group_id']) ? (int)$_GET['group_id'] : null;
+    $manualGroupId = isset($_GET['manual_group_id']) ? (int)$_GET['manual_group_id'] : null;
     $type = $_GET['type'] ?? null;
     $limit = $_GET['limit'] ?? 100;
     $offset = isset($_GET['offset']) ? (int)$_GET['offset'] : 0;
@@ -65,6 +71,21 @@ function getTransactions($userId)
 
       if (!$group) {
         Response::error('Invalid group_id', 422);
+      }
+    }
+
+    if ($manualGroupId) {
+      if (!manualGroupTableExists($db, 'manual_transaction_groups')) {
+        Response::error('Invalid manual_group_id', 422);
+      }
+
+      $manualGroup = $db->fetchOne(
+        "SELECT id FROM manual_transaction_groups WHERE id = ? AND user_id = ? AND deleted_at IS NULL",
+        [$manualGroupId, $userId]
+      );
+
+      if (!$manualGroup) {
+        Response::error('Invalid manual_group_id', 422);
       }
     }
 
@@ -98,6 +119,7 @@ function getTransactions($userId)
     }
 
     $sql .= buildGroupFilterSql($groupId, $params, 't');
+    $sql .= buildManualGroupFilterSql($manualGroupId, $params, 't');
 
     $sql .= " ORDER BY t.transaction_date DESC, t.id DESC LIMIT ? OFFSET ?";
     $params[] = (int)$limit;
@@ -105,6 +127,8 @@ function getTransactions($userId)
 
     $transactions = $db->fetchAll($sql, $params);
     enrichTransactionsWithOverlayMeta($db, (int)$userId, $transactions);
+    enrichTransactionsWithManualGroups($db, (int)$userId, $transactions);
+    normalizeTransactionDateFields($transactions);
 
     // Get summary
     $summaryParams = [$userId];
@@ -137,6 +161,7 @@ function getTransactions($userId)
     }
 
     $summarySQL .= buildGroupFilterSql($groupId, $summaryParams, 't');
+    $summarySQL .= buildManualGroupFilterSql($manualGroupId, $summaryParams, 't');
 
     $summary = $db->fetchOne($summarySQL, $summaryParams);
 
@@ -304,8 +329,11 @@ function getDuplicateTransactions($userId)
       'low_confidence' => [] // 21-50
     ];
 
-    foreach ($transactions as $txn) {
+    foreach ($transactions as &$txn) {
       $score = $txn['duplicate_score'];
+      if (!empty($txn['transaction_date'])) {
+        $txn['transaction_date'] = normalizeIstDateTimeString($txn['transaction_date']);
+      }
       if ($score >= 76) {
         $grouped['high_confidence'][] = $txn;
       } elseif ($score >= 51) {
@@ -327,6 +355,116 @@ function getDuplicateTransactions($userId)
     ], 'Duplicate transactions retrieved successfully');
   } catch (Exception $e) {
     Response::error('Failed to fetch duplicate transactions: ' . $e->getMessage(), 500);
+  }
+}
+
+function getTransactionManualGroups($userId, $transactionId)
+{
+  try {
+    $db = getDB();
+    $txn = getOwnedTransactionOrNull($db, (int)$userId, (int)$transactionId);
+
+    if (!$txn) {
+      Response::error('Transaction not found', 404);
+    }
+
+    if (!manualGroupTableExists($db, 'manual_transaction_groups') || !manualGroupTableExists($db, 'manual_transaction_group_transactions')) {
+      Response::success([
+        'transaction_id' => (int)$transactionId,
+        'manual_groups' => [],
+      ], 'Manual groups are not initialized yet');
+    }
+
+    $rows = $db->fetchAll(
+      "SELECT g.id, g.name, g.icon, g.color
+       FROM manual_transaction_group_transactions mgt
+       JOIN manual_transaction_groups g ON g.id = mgt.manual_group_id
+       WHERE mgt.user_id = ?
+         AND mgt.transaction_id = ?
+         AND g.deleted_at IS NULL
+       ORDER BY g.name ASC",
+      [(int)$userId, (int)$transactionId]
+    );
+
+    foreach ($rows as &$row) {
+      $row['id'] = (int)$row['id'];
+    }
+
+    Response::success([
+      'transaction_id' => (int)$transactionId,
+      'manual_groups' => $rows,
+    ], 'Transaction manual groups retrieved successfully');
+  } catch (Exception $e) {
+    Response::error('Failed to fetch transaction manual groups: ' . $e->getMessage(), 500);
+  }
+}
+
+function updateTransactionManualGroups($userId, $transactionId)
+{
+  try {
+    $db = getDB();
+    $txn = getOwnedTransactionOrNull($db, (int)$userId, (int)$transactionId);
+
+    if (!$txn) {
+      Response::error('Transaction not found', 404);
+    }
+
+    if (!manualGroupTableExists($db, 'manual_transaction_groups') || !manualGroupTableExists($db, 'manual_transaction_group_transactions')) {
+      Response::error('Manual groups are not initialized yet. Run latest migration.', 409);
+    }
+
+    $input = getJsonInput();
+    $incoming = $input['group_ids'] ?? [];
+    if (!is_array($incoming)) {
+      Response::error('group_ids must be an array', 422);
+    }
+
+    $normalized = [];
+    foreach ($incoming as $groupId) {
+      $id = (int)$groupId;
+      if ($id > 0) {
+        $normalized[$id] = true;
+      }
+    }
+    $targetIds = array_keys($normalized);
+
+    if (!empty($targetIds)) {
+      $in = implode(',', array_fill(0, count($targetIds), '?'));
+      $owned = $db->fetchAll(
+        "SELECT id FROM manual_transaction_groups
+         WHERE user_id = ? AND deleted_at IS NULL AND id IN ($in)",
+        array_merge([(int)$userId], $targetIds)
+      );
+
+      if (count($owned) !== count($targetIds)) {
+        Response::error('One or more manual groups are invalid', 422);
+      }
+    }
+
+    $db->beginTransaction();
+
+    $db->execute(
+      "DELETE FROM manual_transaction_group_transactions
+       WHERE user_id = ? AND transaction_id = ?",
+      [(int)$userId, (int)$transactionId]
+    );
+
+    foreach ($targetIds as $manualGroupId) {
+      $db->insert(
+        "INSERT INTO manual_transaction_group_transactions (user_id, manual_group_id, transaction_id)
+         VALUES (?, ?, ?)",
+        [(int)$userId, (int)$manualGroupId, (int)$transactionId]
+      );
+    }
+
+    $db->commit();
+
+    getTransactionManualGroups($userId, $transactionId);
+  } catch (Exception $e) {
+    if (isset($db)) {
+      $db->rollback();
+    }
+    Response::error('Failed to save transaction manual groups: ' . $e->getMessage(), 500);
   }
 }
 
@@ -902,6 +1040,115 @@ function enrichTransactionsWithOverlayMeta($db, int $userId, array &$transaction
 
     $txn['refund_targets_count'] = (int)$outgoingRefundMeta['allocation_count'];
     $txn['refund_allocated_out'] = round((float)$outgoingRefundMeta['allocated_amount'], 2);
+  }
+}
+
+function enrichTransactionsWithManualGroups($db, int $userId, array &$transactions): void
+{
+  if (empty($transactions)) {
+    return;
+  }
+
+  if (!manualGroupTableExists($db, 'manual_transaction_group_transactions') || !manualGroupTableExists($db, 'manual_transaction_groups')) {
+    foreach ($transactions as &$txn) {
+      $txn['manual_groups'] = [];
+    }
+    return;
+  }
+
+  $ids = array_values(array_map(static fn($txn) => (int)$txn['id'], $transactions));
+  $ids = array_values(array_filter($ids, static fn($id) => $id > 0));
+
+  if (empty($ids)) {
+    return;
+  }
+
+  $in = implode(',', array_fill(0, count($ids), '?'));
+  $rows = $db->fetchAll(
+    "SELECT mgt.transaction_id, g.id, g.name, g.icon, g.color
+     FROM manual_transaction_group_transactions mgt
+     JOIN manual_transaction_groups g ON g.id = mgt.manual_group_id
+     WHERE mgt.user_id = ?
+       AND g.deleted_at IS NULL
+       AND mgt.transaction_id IN ($in)
+     ORDER BY g.name ASC",
+    array_merge([(int)$userId], $ids)
+  );
+
+  $map = [];
+  foreach ($rows as $row) {
+    $txnId = (int)$row['transaction_id'];
+    if (!isset($map[$txnId])) {
+      $map[$txnId] = [];
+    }
+    $map[$txnId][] = [
+      'id' => (int)$row['id'],
+      'name' => $row['name'],
+      'icon' => $row['icon'],
+      'color' => $row['color'],
+    ];
+  }
+
+  foreach ($transactions as &$txn) {
+    $txnId = (int)$txn['id'];
+    $txn['manual_groups'] = $map[$txnId] ?? [];
+  }
+}
+
+function buildManualGroupFilterSql($manualGroupId, &$params, $transactionAlias = 't')
+{
+  if (!$manualGroupId) {
+    return '';
+  }
+
+  $params[] = (int)$manualGroupId;
+
+  return "
+    AND EXISTS (
+      SELECT 1
+      FROM manual_transaction_group_transactions mgt
+      JOIN manual_transaction_groups mg ON mg.id = mgt.manual_group_id
+      WHERE mgt.user_id = {$transactionAlias}.user_id
+        AND mgt.transaction_id = {$transactionAlias}.id
+        AND mg.deleted_at IS NULL
+        AND mgt.manual_group_id = ?
+    )
+  ";
+}
+
+function normalizeTransactionDateFields(array &$transactions): void
+{
+  foreach ($transactions as &$txn) {
+    if (!empty($txn['transaction_date'])) {
+      $txn['transaction_date'] = normalizeIstDateTimeString($txn['transaction_date']);
+    }
+  }
+}
+
+function normalizeIstDateTimeString(?string $value): ?string
+{
+  if ($value === null || trim($value) === '') {
+    return $value;
+  }
+
+  try {
+    $tz = new DateTimeZone('Asia/Kolkata');
+
+    if (preg_match('/(Z|[+\-]\d{2}:?\d{2})$/', $value)) {
+      $dt = new DateTime($value);
+      $dt->setTimezone($tz);
+      return $dt->format('Y-m-d\\TH:i:sP');
+    }
+
+    $dt = DateTime::createFromFormat('Y-m-d H:i:s', $value, $tz);
+    if ($dt instanceof DateTime) {
+      return $dt->format('Y-m-d\\TH:i:sP');
+    }
+
+    $fallback = new DateTime($value, $tz);
+    return $fallback->format('Y-m-d\\TH:i:sP');
+  } catch (Exception $e) {
+    return $value;
   }
 }
 

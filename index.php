@@ -2,6 +2,7 @@
 // Set error reporting
 error_reporting(E_ALL);
 ini_set('display_errors', '0');
+date_default_timezone_set('Asia/Kolkata');
 
 // Load configuration
 require_once __DIR__ . '/config/config.php';
@@ -133,6 +134,13 @@ try {
   if (strpos($requestUri, '/groups') === 0) {
     require_once __DIR__ . '/controllers/groupController.php';
     handleGroupRoutes($requestUri, $requestMethod);
+    exit;
+  }
+
+  // Manual transaction groups (transaction-linked collections)
+  if (strpos($requestUri, '/manual-groups') === 0) {
+    require_once __DIR__ . '/controllers/manualGroupController.php';
+    handleManualGroupRoutes($requestUri, $requestMethod);
     exit;
   }
 
