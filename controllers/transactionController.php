@@ -1132,21 +1132,24 @@ function normalizeIstDateTimeString(?string $value): ?string
   }
 
   try {
-    $tz = new DateTimeZone('Asia/Kolkata');
+    $indiaTz = new DateTimeZone('Asia/Kolkata');
 
     if (preg_match('/(Z|[+\-]\d{2}:?\d{2})$/', $value)) {
       $dt = new DateTime($value);
-      $dt->setTimezone($tz);
+      $dt->setTimezone($indiaTz);
       return $dt->format('Y-m-d\\TH:i:sP');
     }
 
-    $dt = DateTime::createFromFormat('Y-m-d H:i:s', $value, $tz);
+    // Legacy rows were saved without timezone context; treat them as UTC so
+    // India display adds +05:30 correctly instead of showing times 5h30 behind.
+    $utcTz = new DateTimeZone('UTC');
+    $dt = DateTime::createFromFormat('Y-m-d H:i:s', $value, $utcTz);
     if ($dt instanceof DateTime) {
-      return $dt->format('Y-m-d\\TH:i:sP');
+      return $dt->format('Y-m-d\\TH:i:s\\Z');
     }
 
-    $fallback = new DateTime($value, $tz);
-    return $fallback->format('Y-m-d\\TH:i:sP');
+    $fallback = new DateTime($value, $utcTz);
+    return $fallback->format('Y-m-d\\TH:i:s\\Z');
   } catch (Exception $e) {
     return $value;
   }
