@@ -280,6 +280,14 @@ Runtime matching uses DB table `category_learning_rules` (per user) and this mar
 <!-- AUTO_LEARNED_MAPPINGS_START -->
 | User | Pattern | Category ID | Category Name | Uses | Last Updated |
 |---|---|---:|---|---:|---|
+| 1 | amazon pay | 8 | Travel | 1 | 2026-03-22 08:24:54 |
+| 1 | urbancla | 56 | Home Improvement | 1 | 2026-03-22 08:22:47 |
+| 1 | amazon pay in | 12 | Personal Care | 1 | 2026-03-22 08:22:47 |
+| 1 | saumya blinkit | 9 | Groceries | 1 | 2026-03-22 08:22:47 |
+| 1 | gramiq | 9 | Groceries | 1 | 2026-03-21 09:04:33 |
+| 1 | bharatpe | 1 | Food & Dining | 1 | 2026-03-21 09:04:10 |
+| 1 | shrwan | 1 | Food & Dining | 1 | 2026-03-21 09:03:58 |
+| 1 | vijayala | 55 | Donation | 1 | 2026-03-21 09:01:36 |
 | 1 | 12 03 2026dep tfr upi cr | 6 | Healthcare | 2 | 2026-03-20 11:23:50 |
 | 1 | zakeer | 2 | Transportation | 1 | 2026-03-20 11:22:01 |
 | 1 | ashok | 3 | Shopping | 1 | 2026-03-20 11:21:49 |
@@ -288,10 +296,8 @@ Runtime matching uses DB table `category_learning_rules` (per user) and this mar
 | 1 | altaf | 2 | Transportation | 1 | 2026-03-20 11:17:12 |
 | 1 | gandla | 2 | Transportation | 1 | 2026-03-20 11:16:33 |
 | 1 | sowndary | 1 | Food & Dining | 1 | 2026-03-20 11:16:22 |
-| 1 | gramiq | 9 | Groceries | 1 | 2026-03-20 09:15:06 |
 | 1 | 09 03 2026wdl tfr upi dr | 53 | Kids Activities | 2 | 2026-03-18 11:13:54 |
 | 1 | purse saumya | 55 | Donation | 1 | 2026-03-18 11:10:29 |
-| 1 | saumya blinkit | 9 | Groceries | 1 | 2026-03-18 11:10:08 |
 | 1 | 13 03 2026wdl tfr upi dr | 5 | Bills & Utilities | 1 | 2026-03-17 09:39:57 |
 | 1 | muniraju | 3 | Shopping | 1 | 2026-03-17 09:37:19 |
 | 1 | ente | 2 | Transportation | 1 | 2026-03-17 09:34:51 |
@@ -300,11 +306,9 @@ Runtime matching uses DB table `category_learning_rules` (per user) and this mar
 | 1 | kanti | 1 | Food & Dining | 1 | 2026-03-17 09:05:13 |
 | 1 | cred | 5 | Bills & Utilities | 1 | 2026-03-17 09:04:59 |
 | 1 | district | 1 | Food & Dining | 1 | 2026-03-17 09:04:29 |
-| 1 | amazon pay in | 12 | Personal Care | 1 | 2026-03-17 09:04:09 |
 | 1 | venugopa | 9 | Groceries | 1 | 2026-03-17 05:43:42 |
 | 1 | credpaya | 12 | Personal Care | 1 | 2026-03-16 23:30:07 |
 | 1 | pavithra | 1 | Food & Dining | 2 | 2026-03-16 03:26:33 |
-| 1 | urbancla | 56 | Home Improvement | 1 | 2026-03-16 03:24:02 |
 | 1 | shradha | 1 | Food & Dining | 1 | 2026-03-14 19:23:12 |
 | 1 | guvvala rupakumar | 6 | Healthcare | 1 | 2026-03-14 19:20:19 |
 | 1 | dsi omr bangalore | 3 | Shopping | 1 | 2026-03-14 19:20:03 |
