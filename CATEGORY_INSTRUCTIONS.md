@@ -280,6 +280,7 @@ Runtime matching uses DB table `category_learning_rules` (per user) and this mar
 <!-- AUTO_LEARNED_MAPPINGS_START -->
 | User | Pattern | Category ID | Category Name | Uses | Last Updated |
 |---|---|---:|---|---:|---|
+| 1 | kishan | 3 | Shopping | 1 | 2026-03-23 09:10:31 |
 | 1 | amazon pay | 8 | Travel | 1 | 2026-03-22 08:24:54 |
 | 1 | urbancla | 56 | Home Improvement | 1 | 2026-03-22 08:22:47 |
 | 1 | amazon pay in | 12 | Personal Care | 1 | 2026-03-22 08:22:47 |
