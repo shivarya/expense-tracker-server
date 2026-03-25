@@ -52,6 +52,9 @@ function getTransactions($userId)
     $groupId = isset($_GET['group_id']) ? (int)$_GET['group_id'] : null;
     $manualGroupId = isset($_GET['manual_group_id']) ? (int)$_GET['manual_group_id'] : null;
     $type = $_GET['type'] ?? null;
+    $keyword = normalizeTransactionSearchKeyword($_GET['keyword'] ?? null);
+    $minAmount = parseOptionalTransactionAmountFilter($_GET['min_amount'] ?? null, 'min_amount');
+    $maxAmount = parseOptionalTransactionAmountFilter($_GET['max_amount'] ?? null, 'max_amount');
     $limit = $_GET['limit'] ?? 100;
     $offset = isset($_GET['offset']) ? (int)$_GET['offset'] : 0;
 
@@ -61,6 +64,10 @@ function getTransactions($userId)
 
     if ($offset < 0) {
       Response::error('Invalid offset', 422);
+    }
+
+    if ($minAmount !== null && $maxAmount !== null && $minAmount > $maxAmount) {
+      Response::error('min_amount cannot be greater than max_amount', 422);
     }
 
     if ($groupId) {
@@ -117,6 +124,25 @@ function getTransactions($userId)
       $sql .= " AND t.transaction_type = ?";
       $params[] = $type;
     }
+    if ($keyword !== null) {
+      $keywordPattern = '%' . $keyword . '%';
+      $sql .= " AND (COALESCE(t.merchant, '') LIKE ?
+                     OR COALESCE(t.description, '') LIKE ?
+                     OR COALESCE(ba.account_name, '') LIKE ?
+                     OR COALESCE(ba.bank, '') LIKE ?)";
+      $params[] = $keywordPattern;
+      $params[] = $keywordPattern;
+      $params[] = $keywordPattern;
+      $params[] = $keywordPattern;
+    }
+    if ($minAmount !== null) {
+      $sql .= " AND t.amount >= ?";
+      $params[] = $minAmount;
+    }
+    if ($maxAmount !== null) {
+      $sql .= " AND t.amount <= ?";
+      $params[] = $maxAmount;
+    }
 
     $sql .= buildGroupFilterSql($groupId, $params, 't');
     $sql .= buildManualGroupFilterSql($manualGroupId, $params, 't');
@@ -136,7 +162,13 @@ function getTransactions($userId)
                     SUM(CASE WHEN t.transaction_type = 'debit' THEN t.amount ELSE 0 END) as total_debit,
                     SUM(CASE WHEN t.transaction_type = 'credit' THEN t.amount ELSE 0 END) as total_credit,
                     COUNT(*) as total_count
-                   FROM transactions t
+                   FROM transactions t";
+
+    if ($keyword !== null) {
+      $summarySQL .= " JOIN bank_accounts ba ON t.account_id = ba.id";
+    }
+
+    $summarySQL .= "
                    WHERE t.user_id = ? AND t.deleted_at IS NULL";
 
     if ($startDate) {
@@ -159,6 +191,25 @@ function getTransactions($userId)
       $summarySQL .= " AND t.transaction_type = ?";
       $summaryParams[] = $type;
     }
+    if ($keyword !== null) {
+      $keywordPattern = '%' . $keyword . '%';
+      $summarySQL .= " AND (COALESCE(t.merchant, '') LIKE ?
+                          OR COALESCE(t.description, '') LIKE ?
+                          OR COALESCE(ba.account_name, '') LIKE ?
+                          OR COALESCE(ba.bank, '') LIKE ?)";
+      $summaryParams[] = $keywordPattern;
+      $summaryParams[] = $keywordPattern;
+      $summaryParams[] = $keywordPattern;
+      $summaryParams[] = $keywordPattern;
+    }
+    if ($minAmount !== null) {
+      $summarySQL .= " AND t.amount >= ?";
+      $summaryParams[] = $minAmount;
+    }
+    if ($maxAmount !== null) {
+      $summarySQL .= " AND t.amount <= ?";
+      $summaryParams[] = $maxAmount;
+    }
 
     $summarySQL .= buildGroupFilterSql($groupId, $summaryParams, 't');
     $summarySQL .= buildManualGroupFilterSql($manualGroupId, $summaryParams, 't');
@@ -172,6 +223,34 @@ function getTransactions($userId)
   } catch (Exception $e) {
     Response::error('Failed to fetch transactions: ' . $e->getMessage(), 500);
   }
+}
+
+function normalizeTransactionSearchKeyword($keyword)
+{
+  if ($keyword === null) {
+    return null;
+  }
+
+  $normalized = trim((string)$keyword);
+  return $normalized === '' ? null : $normalized;
+}
+
+function parseOptionalTransactionAmountFilter($value, $fieldName)
+{
+  if ($value === null || $value === '') {
+    return null;
+  }
+
+  if (!is_numeric($value)) {
+    Response::error($fieldName . ' must be a valid number', 422);
+  }
+
+  $amount = (float)$value;
+  if (!is_finite($amount) || $amount < 0) {
+    Response::error($fieldName . ' must be a non-negative number', 422);
+  }
+
+  return round($amount, 2);
 }
 
 function createTransaction($userId)
