@@ -74,18 +74,26 @@ function getOrCreateBankAccount($db, $userId, $bankName, $accountNumber, $accoun
   $accountType = normalizeAccountType($accountType);
   $lastFour = substr($cleanAccountNumber, -4);
 
+  // Reuse the exact unique-account row first, regardless of any legacy account_type mismatch.
+  $existing = $db->fetchOne(
+    "SELECT id, account_type, card_last_four
+     FROM bank_accounts
+     WHERE user_id = ? AND bank = ? AND account_number = ?",
+    [$userId, $bank, $cleanAccountNumber]
+  );
+
   // Check if account exists
-  if ($accountType === 'credit_card' && $cardLastFour) {
+  if (!$existing && $accountType === 'credit_card' && $cardLastFour) {
     $existing = $db->fetchOne(
-      "SELECT id, card_last_four
+      "SELECT id, account_type, card_last_four
        FROM bank_accounts
-       WHERE user_id = ? AND bank = ? AND account_type = 'credit_card'
+       WHERE user_id = ? AND bank = ?
          AND (card_last_four = ? OR account_number LIKE ?)",
       [$userId, $bank, $cardLastFour, '%' . $cardLastFour]
     );
-  } else {
+  } elseif (!$existing) {
     $existing = $db->fetchOne(
-      "SELECT id, card_last_four
+      "SELECT id, account_type, card_last_four
        FROM bank_accounts
        WHERE user_id = ? AND bank = ? AND account_type = ? AND account_number LIKE ?",
       [$userId, $bank, $accountType, '%' . $lastFour]
@@ -93,7 +101,23 @@ function getOrCreateBankAccount($db, $userId, $bankName, $accountNumber, $accoun
   }
   
   if ($existing) {
-    if ($accountType === 'credit_card' && $cardLastFour && empty($existing['card_last_four'])) {
+    if ($accountType === 'credit_card') {
+      if (($existing['account_type'] ?? '') !== 'credit_card') {
+        $db->execute(
+          "UPDATE bank_accounts SET account_type = 'credit_card' WHERE id = ?",
+          [$existing['id']]
+        );
+      }
+
+      if ($cardLastFour && empty($existing['card_last_four'])) {
+        $db->execute(
+          "UPDATE bank_accounts SET card_last_four = ? WHERE id = ?",
+          [$cardLastFour, $existing['id']]
+        );
+      }
+    }
+
+    if ($accountType !== 'credit_card' && $cardLastFour && empty($existing['card_last_four'])) {
       $db->execute(
         "UPDATE bank_accounts SET card_last_four = ? WHERE id = ?",
         [$cardLastFour, $existing['id']]
