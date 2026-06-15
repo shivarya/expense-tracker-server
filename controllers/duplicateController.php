@@ -179,10 +179,15 @@ class DuplicateController {
     }
 
     private function previewTransactionEvaluation($userId, $item) {
+        $sourceHint = strtolower(trim((string)($item['source_data']['sync_origin'] ?? $item['source'] ?? '')));
+        $isCreditCardScraperSource = $sourceHint === 'credit_card_scraper_ai';
+
         $evaluation = $this->duplicateDetector->evaluate((int)$userId, $item, [
+            'expand_linked_accounts' => true,
+            'source_hint' => $sourceHint,
             'ai_enabled' => false,
-            'skip_threshold' => 76,
-            'duplicate_threshold' => 51,
+            'skip_threshold' => $isCreditCardScraperSource ? 70 : 76,
+            'duplicate_threshold' => $isCreditCardScraperSource ? 45 : 51,
         ]);
 
         return [

@@ -243,6 +243,11 @@ function syncStocks($userId)
     $db = getDB();
     $db->beginTransaction();
 
+    $sourceHint = (string)($input['source'] ?? '');
+    $isCreditCardScraperSource = $sourceHint === 'credit_card_scraper_ai';
+    $skipThreshold = $isCreditCardScraperSource ? 70 : 76;
+    $duplicateThreshold = $isCreditCardScraperSource ? 45 : 51;
+
     $created = 0;
     $updated = 0;
     $failed = 0;
@@ -478,10 +483,29 @@ function syncTransactions($userId)
 
     $db->beginTransaction();
 
+    $sourceHint = (string)($input['source'] ?? '');
+    $isCreditCardScraperSource = $sourceHint === 'credit_card_scraper_ai';
+    $skipThreshold = $isCreditCardScraperSource ? 70 : 76;
+    $duplicateThreshold = $isCreditCardScraperSource ? 45 : 51;
+
     foreach ($input['transactions'] as $txn) {
       try {
         // Get or create bank account with account type/card metadata when available.
         [$accountType, $cardLastFour] = detectAccountTypeAndCardLastFour($txn);
+
+        // Verify card identity before resolving the account: the card last4 derived
+        // from source_data must agree with the declared account_number. A mismatch is
+        // the fingerprint of a batch-level identity bleeding onto the wrong card, so
+        // surface it for observability before it silently mis-attributes the row.
+        $declaredLast4 = preg_replace('/\D+/', '', (string)($txn['account_number'] ?? ''));
+        $declaredLast4 = $declaredLast4 !== '' ? substr($declaredLast4, -4) : '';
+        if ($cardLastFour && $declaredLast4 && $cardLastFour !== $declaredLast4) {
+          error_log('[TX_SYNC][CARD_IDENTITY_MISMATCH] user_id=' . $userId
+            . ' account_number_last4=' . $declaredLast4
+            . ' source_data_card_last4=' . $cardLastFour
+            . ' ref=' . (string)($txn['reference_number'] ?? ''));
+        }
+
         $accountId = getOrCreateBankAccount(
           $db,
           $userId,
@@ -497,9 +521,11 @@ function syncTransactions($userId)
         // Re-run with resolved account id for higher confidence, but keep conservative fallback.
         $duplicateCheck = $duplicateDetector->evaluate($userId, $txn, [
           'account_id' => $accountId,
+          'expand_linked_accounts' => true,
+          'source_hint' => $sourceHint,
           'ai_enabled' => true,
-          'skip_threshold' => 76,
-          'duplicate_threshold' => 51,
+          'skip_threshold' => $skipThreshold,
+          'duplicate_threshold' => $duplicateThreshold,
         ]);
 
         if (!empty($duplicateCheck['ai_used'])) {
@@ -520,8 +546,9 @@ function syncTransactions($userId)
 
         // Insert transaction
         $sql = "INSERT INTO transactions (user_id, account_id, category_id, transaction_type, amount,
+                  currency, original_amount, original_currency,
                   merchant, description, transaction_date, reference_number, source, payment_method, source_data, duplicate_score)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
         
         // Determine source enum value
         $sourceEnum = 'web_scrape'; // Default for scraped transactions
@@ -544,13 +571,24 @@ function syncTransactions($userId)
         
         // Prepare source_data JSON (without payment_method since it's now a separate column)
         $sourceDataArray = isset($txn['source_data']) ? json_decode(json_encode($txn['source_data']), true) : [];
-        
+
+        // Currency: amount is stored in INR (home currency). For foreign spend the
+        // scraper/parser supplies original_amount + original_currency for display.
+        $currency = strtoupper(trim((string)($txn['currency'] ?? 'INR'))) ?: 'INR';
+        $originalCurrency = isset($txn['original_currency']) && trim((string)$txn['original_currency']) !== ''
+          ? strtoupper(trim((string)$txn['original_currency'])) : null;
+        $originalAmount = $originalCurrency !== null && isset($txn['original_amount']) && is_numeric($txn['original_amount'])
+          ? round((float)$txn['original_amount'], 2) : null;
+
         $db->insert($sql, [
           $userId,
           $accountId,
           $categoryId,
           $transactionType,
           $txn['amount'],
+          $currency,
+          $originalAmount,
+          $originalCurrency,
           $txn['merchant'] ?? null,
           $txn['description'] ?? null,
           $txn['date'] ?? $txn['transaction_date'] ?? date('Y-m-d'),

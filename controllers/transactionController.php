@@ -266,9 +266,18 @@ function createTransaction($userId)
 
     $db = getDB();
 
+    // Currency: amount is stored in INR (home currency). original_amount /
+    // original_currency preserve the foreign figure for foreign transactions.
+    $currency = strtoupper(trim((string)($input['currency'] ?? 'INR'))) ?: 'INR';
+    $originalCurrency = isset($input['original_currency']) && trim((string)$input['original_currency']) !== ''
+      ? strtoupper(trim((string)$input['original_currency'])) : null;
+    $originalAmount = $originalCurrency !== null && isset($input['original_amount']) && is_numeric($input['original_amount'])
+      ? round((float)$input['original_amount'], 2) : null;
+
     $sql = "INSERT INTO transactions (user_id, account_id, category_id, transaction_type, amount,
+              currency, original_amount, original_currency,
               merchant, description, transaction_date, reference_number, source, source_data, notes)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
 
     $id = $db->insert($sql, [
       $userId,
@@ -276,6 +285,9 @@ function createTransaction($userId)
       $input['category_id'],
       $input['transaction_type'],
       $input['amount'],
+      $currency,
+      $originalAmount,
+      $originalCurrency,
       $input['merchant'] ?? null,
       $input['description'] ?? null,
       $input['transaction_date'],

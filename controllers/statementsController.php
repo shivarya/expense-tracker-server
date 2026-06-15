@@ -4,6 +4,7 @@ require_once __DIR__ . '/../utils/response.php';
 require_once __DIR__ . '/../utils/jwt.php';
 require_once __DIR__ . '/../config/database.php';
 require_once __DIR__ . '/../utils/azureOpenAI.php';
+require_once __DIR__ . '/../utils/fxConverter.php';
 require_once __DIR__ . '/../utils/transactionDuplicateDetector.php';
 require_once __DIR__ . '/../utils/categoryResolver.php';
 require_once __DIR__ . '/../utils/statementPasswordVault.php';
@@ -452,17 +453,25 @@ class StatementController
                         'raw_line' => $txn['raw_line'],
                     ];
 
+                    // Card statements bill in INR (amount already converted). If the
+                    // raw line carries the original foreign figure, preserve it.
+                    $foreign = fxExtractForeign((string)($txn['raw_line'] ?? '') . ' ' . (string)($txn['description'] ?? ''));
+                    $origAmount = $foreign['amount'] ?? null;
+                    $origCurrency = $foreign['currency'] ?? null;
+
                     $this->db->insert(
                         "INSERT INTO transactions
-                         (user_id, account_id, category_id, transaction_type, amount, merchant, description,
-                          transaction_date, reference_number, source, payment_method, source_data, duplicate_score)
-                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'statement_pdf', ?, ?, ?)",
+                         (user_id, account_id, category_id, transaction_type, amount, currency, original_amount, original_currency,
+                          merchant, description, transaction_date, reference_number, source, payment_method, source_data, duplicate_score)
+                         VALUES (?, ?, ?, ?, ?, 'INR', ?, ?, ?, ?, ?, ?, 'statement_pdf', ?, ?, ?)",
                         [
                             $userId,
                             $accountId,
                             $categoryId,
                             $normalizedType,
                             $txn['amount'],
+                            $origAmount,
+                            $origCurrency,
                             $normalizedMerchant,
                             $normalizedDescription,
                             $txn['transaction_date'],

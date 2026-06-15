@@ -211,11 +211,15 @@ class SMSParserController {
                 $accountId = $this->getOrCreateBankAccount($userId, $transaction);
                 $categoryId = $this->resolveCategoryId($userId, $transaction);
 
+                // amount is INR (home currency); original_* set by the parser for foreign spend.
+                [$txnCurrency, $txnOrigAmount, $txnOrigCurrency] = $this->resolveCurrencyFields($transaction);
+
                 $insertQuery = "
                     INSERT INTO transactions (
                         user_id, account_id, category_id, transaction_type,
-                        amount, merchant, description, transaction_date, reference_number, payment_method, source, duplicate_score
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'sms', ?)
+                        amount, currency, original_amount, original_currency,
+                        merchant, description, transaction_date, reference_number, payment_method, source, duplicate_score
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'sms', ?)
                 ";
 
                 try {
@@ -225,6 +229,9 @@ class SMSParserController {
                         $categoryId,
                         $transaction['transaction_type'],
                         $transaction['amount'],
+                        $txnCurrency,
+                        $txnOrigAmount,
+                        $txnOrigCurrency,
                         $transaction['merchant'] ?? null,
                         $transaction['description'] ?? 'SMS Transaction',
                         $transaction['date'] ?? date('Y-m-d H:i:s'),
@@ -540,11 +547,15 @@ class SMSParserController {
         $accountId = $this->getOrCreateBankAccount($userId, $transaction);
         $categoryId = $this->resolveCategoryId($userId, $transaction);
 
+        // amount is INR (home currency); original_* set by the parser for foreign spend.
+        [$txnCurrency, $txnOrigAmount, $txnOrigCurrency] = $this->resolveCurrencyFields($transaction);
+
         $insertQuery = "
             INSERT INTO transactions (
-                user_id, account_id, category_id, transaction_type, 
-                amount, merchant, description, transaction_date, reference_number, payment_method, source, duplicate_score
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'sms_webhook', ?)
+                user_id, account_id, category_id, transaction_type,
+                amount, currency, original_amount, original_currency,
+                merchant, description, transaction_date, reference_number, payment_method, source, duplicate_score
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'sms_webhook', ?)
         ";
 
         $this->db->execute($insertQuery, [
@@ -553,6 +564,9 @@ class SMSParserController {
             $categoryId,
             $transaction['transaction_type'],
             $transaction['amount'],
+            $txnCurrency,
+            $txnOrigAmount,
+            $txnOrigCurrency,
             $transaction['merchant'] ?? null,
             $transaction['merchant'] ?? 'SMS Transaction',
             $transaction['date'] ?? $date,
@@ -586,6 +600,8 @@ class SMSParserController {
     {
         return $this->duplicateDetector->evaluate($userId, $transaction, [
             'account_id' => $accountId,
+            'expand_linked_accounts' => true,
+            'source_hint' => 'sms_parser',
             'ai_enabled' => $useAi,
             'skip_threshold' => 76,
             'duplicate_threshold' => 51,
@@ -800,6 +816,24 @@ class SMSParserController {
      * First checks trusted contacts (own UPI IDs / account names) → Transfer (17).
      * Falls back to shared CategoryResolver — never creates new category rows.
      */
+    /**
+     * Resolve the currency columns for a parsed transaction.
+     * `amount` is always stored in INR; for foreign spend the parser supplies
+     * original_amount + original_currency (the foreign figure, for display).
+     *
+     * @return array{0: string, 1: float|null, 2: string|null} [currency, original_amount, original_currency]
+     */
+    private function resolveCurrencyFields(array $transaction): array
+    {
+        $currency = strtoupper(trim((string)($transaction['currency'] ?? 'INR'))) ?: 'INR';
+        $originalCurrency = isset($transaction['original_currency']) && trim((string)$transaction['original_currency']) !== ''
+            ? strtoupper(trim((string)$transaction['original_currency'])) : null;
+        $originalAmount = $originalCurrency !== null && isset($transaction['original_amount']) && is_numeric($transaction['original_amount'])
+            ? round((float)$transaction['original_amount'], 2) : null;
+
+        return [$currency, $originalAmount, $originalCurrency];
+    }
+
     private function resolveCategoryId(int $userId, array $transaction): int
     {
         // Highest priority: user-provided learning from manual recategorization.

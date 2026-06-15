@@ -30,6 +30,8 @@ class TransactionDuplicateDetector
         $aiEnabled = (bool)($options['ai_enabled'] ?? true);
         $excludeTransactionId = isset($options['exclude_transaction_id']) ? (int)$options['exclude_transaction_id'] : null;
         $accountId = isset($options['account_id']) ? (int)$options['account_id'] : null;
+        $expandLinkedAccounts = (bool)($options['expand_linked_accounts'] ?? false);
+        $sourceHint = strtolower(trim((string)($options['source_hint'] ?? '')));
 
         $normalized = $this->normalizeIncoming($transaction);
 
@@ -43,11 +45,26 @@ class TransactionDuplicateDetector
             return $this->buildResult(true, true, 100, 'reference_match', (int)$referenceMatch['id'], [$match], false, false);
         }
 
+        // Cross-card guard: the same statement line already imported under a DIFFERENT
+        // card account is the same physical transaction mis-attributed (the reference
+        // number differs only because the card last4 was wrong). Catch it by
+        // (calendar date, amount, type, normalized raw description) instead of the ref.
+        $crossCardMatch = $this->findStatementLineDuplicate($userId, $normalized, $accountId, $excludeTransactionId);
+        if ($crossCardMatch !== null) {
+            $match = $this->decorateMatchWithScore($crossCardMatch, 100, 'cross_card_statement_match');
+            return $this->buildResult(true, true, 100, 'cross_card_statement_match', (int)$crossCardMatch['id'], [$match], false, false);
+        }
+
         $accountIds = [];
         if ($accountId !== null && $accountId > 0) {
             $accountIds[] = $accountId;
-        } else {
-            $accountIds = $this->resolveAccountIds($userId, $normalized['account_last4']);
+        }
+
+        if ($expandLinkedAccounts || empty($accountIds)) {
+            $linkedAccountIds = $this->resolveAccountIds($userId, $normalized['account_last4']);
+            if (!empty($linkedAccountIds)) {
+                $accountIds = array_values(array_unique(array_merge($accountIds, $linkedAccountIds)));
+            }
         }
 
         $candidates = $this->fetchCandidateTransactions(
@@ -62,7 +79,12 @@ class TransactionDuplicateDetector
             return $this->buildResult(false, false, 0, 'no_candidates', null, [], false, false);
         }
 
-        [$deterministicScore, $bestCandidate, $scoredMatches] = $this->scoreDeterministic($normalized, $candidates, $accountIds);
+        [$deterministicScore, $bestCandidate, $scoredMatches] = $this->scoreDeterministic(
+            $normalized,
+            $candidates,
+            $accountIds,
+            $sourceHint
+        );
 
         $aiUsed = false;
         $fallbackUsed = false;
@@ -121,7 +143,27 @@ class TransactionDuplicateDetector
             'description' => trim((string)($transaction['description'] ?? '')),
             'reference_number' => trim((string)($transaction['reference_number'] ?? '')),
             'account_last4' => $accountLast4,
+            'raw_description' => $this->extractRawDescription($transaction),
         ];
+    }
+
+    /**
+     * Pull the original statement/SMS line out of source_data (accepts either an
+     * already-decoded array or a JSON string).
+     */
+    private function extractRawDescription(array $transaction): string
+    {
+        $sourceData = $transaction['source_data'] ?? null;
+        if (is_string($sourceData)) {
+            $decoded = json_decode($sourceData, true);
+            $sourceData = is_array($decoded) ? $decoded : [];
+        }
+        if (!is_array($sourceData)) {
+            $sourceData = [];
+        }
+
+        $raw = $sourceData['raw_description'] ?? $sourceData['raw_text'] ?? '';
+        return trim((string)$raw);
     }
 
     private function normalizeTransactionType(?string $raw): string
@@ -153,6 +195,16 @@ class TransactionDuplicateDetector
         return date('Y-m-d H:i:s', $timestamp);
     }
 
+    private function hasMidnightTime(string $dateTime): bool
+    {
+        $timestamp = strtotime($dateTime);
+        if ($timestamp === false) {
+            return false;
+        }
+
+        return date('H:i:s', $timestamp) === '00:00:00';
+    }
+
     private function findReferenceMatch(int $userId, string $referenceNumber, ?int $excludeTransactionId = null): ?array
     {
         if ($referenceNumber === '') {
@@ -178,6 +230,86 @@ class TransactionDuplicateDetector
         $row = $stmt->fetch(PDO::FETCH_ASSOC);
 
         return $row ?: null;
+    }
+
+    /**
+     * Detect the same statement line already imported under another card account.
+     *
+     * Credit-card statements carry an exact raw line and an exact calendar date. If a
+     * non-deleted transaction with the same (date, amount, type, normalized raw
+     * description) already exists under a DIFFERENT account, the incoming row is that
+     * same transaction re-filed onto the wrong card — skip it. This is independent of
+     * reference_number, which differs when the card last4 was mis-detected.
+     *
+     * Same-account matches are deliberately ignored here: legitimate same-day repeats
+     * on one card are left to the normal deterministic/AI scoring. When the resolved
+     * account is unknown (e.g. preview), we require an exact raw-line match to stay
+     * conservative.
+     */
+    private function findStatementLineDuplicate(int $userId, array $normalized, ?int $accountId, ?int $excludeTransactionId): ?array
+    {
+        $incomingRaw = $this->normalizeText($normalized['raw_description']);
+        $incomingMerchant = $this->normalizeText($normalized['merchant']);
+        $incomingDescription = $this->normalizeText($normalized['description']);
+
+        // Need at least one textual signal to avoid matching unrelated same-amount rows.
+        if ($incomingRaw === '' && $incomingMerchant === '' && $incomingDescription === '') {
+            return null;
+        }
+
+        $day = date('Y-m-d', strtotime($normalized['transaction_date']));
+        $amount = $normalized['amount'];
+
+        $sql = "SELECT id, account_id, transaction_type, amount, merchant, description, transaction_date, reference_number, source,
+                       JSON_UNQUOTE(JSON_EXTRACT(source_data, '\$.raw_description')) AS raw_description
+                FROM transactions
+                WHERE user_id = ?
+                  AND deleted_at IS NULL
+                  AND transaction_type = ?
+                  AND amount BETWEEN ? AND ?
+                  AND DATE(transaction_date) = ?";
+        $params = [$userId, $normalized['transaction_type'], $amount - 0.01, $amount + 0.01, $day];
+
+        if ($excludeTransactionId !== null) {
+            $sql .= " AND id <> ?";
+            $params[] = $excludeTransactionId;
+        }
+
+        $sql .= " ORDER BY id DESC LIMIT 25";
+
+        $stmt = $this->pdo->prepare($sql);
+        $stmt->execute($params);
+        $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        if (!$rows) {
+            return null;
+        }
+
+        // When we know the incoming account, a different-account match can rely on the
+        // merchant+description agreeing. With an unknown account, demand the raw line.
+        $requireRawLineMatch = ($accountId === null);
+
+        foreach ($rows as $row) {
+            if ($accountId !== null && (int)$row['account_id'] === $accountId) {
+                continue; // same card — not a cross-card mis-attribution
+            }
+
+            $candRaw = $this->normalizeText((string)($row['raw_description'] ?? ''));
+            if ($incomingRaw !== '' && $candRaw !== '' && $incomingRaw === $candRaw) {
+                return $row;
+            }
+
+            if (!$requireRawLineMatch) {
+                $candMerchant = $this->normalizeText((string)($row['merchant'] ?? ''));
+                $candDescription = $this->normalizeText((string)($row['description'] ?? ''));
+                $merchantAgrees = $incomingMerchant !== '' && $incomingMerchant === $candMerchant;
+                $descriptionAgrees = $incomingDescription !== '' && $incomingDescription === $candDescription;
+                if ($merchantAgrees && $descriptionAgrees) {
+                    return $row;
+                }
+            }
+        }
+
+        return null;
     }
 
     private function resolveAccountIds(int $userId, string $accountLast4): array
@@ -219,7 +351,7 @@ class TransactionDuplicateDetector
         $dateFrom = date('Y-m-d H:i:s', strtotime($date . ' -2 days'));
         $dateTo = date('Y-m-d H:i:s', strtotime($date . ' +2 days'));
 
-        $sql = "SELECT id, account_id, transaction_type, amount, merchant, description, transaction_date, reference_number
+        $sql = "SELECT id, account_id, transaction_type, amount, merchant, description, transaction_date, reference_number, source
                 FROM transactions
                 WHERE user_id = ?
                   AND deleted_at IS NULL
@@ -259,15 +391,19 @@ class TransactionDuplicateDetector
         return $rows ?: [];
     }
 
-    private function scoreDeterministic(array $normalized, array $candidates, array $accountIds): array
+    private function scoreDeterministic(array $normalized, array $candidates, array $accountIds, string $sourceHint = ''): array
     {
         $bestScore = 0;
         $bestCandidate = null;
         $scoredMatches = [];
+        $isCreditCardScraper = $sourceHint === 'credit_card_scraper_ai';
+        $incomingIsMidnight = $this->hasMidnightTime($normalized['transaction_date']);
 
         foreach ($candidates as $candidate) {
             $score = 0;
             $reasons = [];
+            $candidateSource = strtolower(trim((string)($candidate['source'] ?? '')));
+            $isSmsCandidate = in_array($candidateSource, ['sms', 'sms_webhook'], true);
 
             $amountDiff = abs((float)$candidate['amount'] - (float)$normalized['amount']);
             if ($amountDiff <= 0.01) {
@@ -321,6 +457,33 @@ class TransactionDuplicateDetector
             if ($descriptionSimilarity >= 0.80) {
                 $score += 5;
                 $reasons[] = 'description';
+            }
+
+            // Statement imports often have date-only midnight timestamps.
+            // Boost likely CC statement-to-SMS matches when amount/type/merchant align within the same day.
+            if (
+                $isCreditCardScraper
+                && $incomingIsMidnight
+                && $minutesDiff <= 1440
+                && $merchantSimilarity >= 0.70
+                && $amountDiff <= 0.01
+            ) {
+                $score += 12;
+                $reasons[] = 'cc_statement_day_match';
+            }
+
+            // For statement imports, same-day same-amount on the same linked card account is usually an SMS+statement duplicate.
+            if (
+                $isCreditCardScraper
+                && $incomingIsMidnight
+                && $isSmsCandidate
+                && $minutesDiff <= 1440
+                && $amountDiff <= 0.01
+                && !empty($accountIds)
+                && in_array((int)$candidate['account_id'], $accountIds, true)
+            ) {
+                $score += 16;
+                $reasons[] = 'cc_statement_same_day_account';
             }
 
             $score = $this->clampScore($score);
@@ -413,6 +576,7 @@ class TransactionDuplicateDetector
             'transaction_date' => $row['transaction_date'],
             'transaction_type' => $row['transaction_type'] ?? null,
             'reference_number' => $row['reference_number'] ?? null,
+            'source' => $row['source'] ?? null,
             'score' => $score,
             'reason' => $reason,
         ];

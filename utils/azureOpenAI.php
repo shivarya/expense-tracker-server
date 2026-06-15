@@ -1,5 +1,7 @@
 <?php
 
+require_once __DIR__ . '/fxConverter.php';
+
 class AzureOpenAI {
     private string $endpoint;
     private string $apiKey;
@@ -132,7 +134,8 @@ REQUIRED fields per transaction:
 - bank: (hdfc|sbi|icici|idfc|rbl|axis|kotak|other)
 - account_number: last 4 digits only (string)
 - transaction_type: "debit" or "credit"
-- amount: numeric value only (no currency symbols)
+- amount: numeric value only (no currency symbols) — exactly as written in the SMS, in the currency named by the "currency" field below
+- currency: ISO 4217 code of the amount as stated in the SMS. Default "INR". Use the foreign code (e.g. MYR, USD, EUR, AED, THB, SGD, GBP) ONLY when the SMS explicitly shows a foreign currency such as "MYR 30.00", "RM 30", "USD 12.50". Do NOT convert; report the number and its stated currency.
 - date: "YYYY-MM-DD HH:MM:SS" format
 - sms_index: integer index of source SMS from input list (1-based)
 - category_id: integer from the canonical list below
@@ -167,6 +170,7 @@ CANONICAL CATEGORY LIST — you MUST return one of these integer category_id val
 56 = Home Improvement    (home repairs, renovation, plumbing, electrician work, home decor, furnishings)
 
 RULES:
+- Most SMS are INR; set "currency" to a foreign code only when the SMS clearly shows one.
 - For credit transactions: apply income categories first (14/15/16/17)
 - transaction_type MUST be exactly debit or credit (never expense/income/other labels)
 - Messages with credited/received/refund/reversal/cashback/payment received/interest credited => transaction_type=credit
@@ -247,6 +251,8 @@ PROMPT;
                                 $transaction['sms_date'] = $normalizedSMSDate;
                             }
                         }
+
+                        $transaction = $this->applyCurrencyConversion($transaction);
 
                         $transaction['source'] = 'sms';
                         $transaction['parsed_at'] = date('Y-m-d H:i:s');
@@ -358,6 +364,35 @@ PROMPT;
         }
 
         return $normalized;
+    }
+
+    /**
+     * Normalize currency on a parsed SMS transaction.
+     *
+     * Home currency is INR. When the SMS reported a foreign currency, keep the
+     * foreign figure in original_amount/original_currency and overwrite `amount`
+     * with the INR value converted at the transaction date's reference rate.
+     * Domestic INR transactions are left unchanged (currency defaults to INR).
+     */
+    private function applyCurrencyConversion(array $transaction): array {
+        $currency = strtoupper(trim((string)($transaction['currency'] ?? 'INR')));
+        $amount = isset($transaction['amount']) ? (float)$transaction['amount'] : 0.0;
+
+        if ($currency === '' || $currency === 'INR') {
+            $transaction['currency'] = 'INR';
+            return $transaction;
+        }
+
+        $date = $transaction['sms_date'] ?? ($transaction['date'] ?? null);
+        $conv = fxConvertToInr($amount, $currency, $date);
+
+        $transaction['original_amount'] = round($amount, 2);
+        $transaction['original_currency'] = $currency;
+        $transaction['amount'] = $conv['inr'];
+        $transaction['currency'] = 'INR';
+        $transaction['fx_rate'] = $conv['rate'];
+
+        return $transaction;
     }
 
     private function normalizeSmsDate(?string $raw): ?string {

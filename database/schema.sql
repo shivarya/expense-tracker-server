@@ -231,6 +231,9 @@ CREATE TABLE IF NOT EXISTS transactions (
     category_id INT NOT NULL,
     transaction_type ENUM('debit', 'credit', 'transfer') NOT NULL,
     amount DECIMAL(15, 2) NOT NULL,
+    currency CHAR(3) NOT NULL DEFAULT 'INR' COMMENT 'Currency of `amount` (home currency, always INR)',
+    original_amount DECIMAL(15, 2) NULL COMMENT 'Foreign-currency figure for foreign txns (e.g. 30.00 MYR)',
+    original_currency CHAR(3) NULL COMMENT 'ISO code of original currency; NULL = domestic INR',
     merchant VARCHAR(500),
     description TEXT,
     transaction_date DATETIME NOT NULL,
@@ -256,7 +259,22 @@ CREATE TABLE IF NOT EXISTS transactions (
     INDEX idx_source (source),
     INDEX idx_payment_method (payment_method),
     INDEX idx_duplicate_score (duplicate_score),
-    INDEX idx_deleted_at (deleted_at)
+    INDEX idx_deleted_at (deleted_at),
+    INDEX idx_original_currency (original_currency)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================
+-- FX RATE CACHE (daily reference rates for foreign-currency conversion)
+-- ============================================
+CREATE TABLE IF NOT EXISTS fx_rates (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    base CHAR(3) NOT NULL,
+    quote CHAR(3) NOT NULL,
+    rate_date DATE NOT NULL,
+    rate DECIMAL(18, 8) NOT NULL,
+    source VARCHAR(40) NOT NULL DEFAULT 'frankfurter',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uniq_base_quote_date (base, quote, rate_date)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================
