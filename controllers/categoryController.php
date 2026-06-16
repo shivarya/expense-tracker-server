@@ -28,12 +28,19 @@ function getCategories($userId)
   try {
     $db = getDB();
     
-    // Get all categories (system + user-specific)
+    // Get all categories (system + user-specific). For each row, a per-user budget
+    // override (category_budgets) takes precedence over the shared default so that one
+    // user's budget on a system category never leaks to other users.
     $categories = $db->fetchAll(
-      "SELECT * FROM categories 
-       WHERE user_id IS NULL OR user_id = ?
-       ORDER BY display_order ASC, name ASC",
-      [$userId]
+      "SELECT c.id, c.user_id, c.name, c.icon, c.color, c.type,
+              COALESCE(cb.monthly_budget, c.monthly_budget) AS monthly_budget,
+              c.is_system, c.parent_category_id, c.display_order,
+              c.created_at, c.updated_at
+       FROM categories c
+       LEFT JOIN category_budgets cb ON cb.category_id = c.id AND cb.user_id = ?
+       WHERE c.user_id IS NULL OR c.user_id = ?
+       ORDER BY c.display_order ASC, c.name ASC",
+      [$userId, $userId]
     );
 
     Response::success($categories, 'Categories retrieved successfully');
@@ -83,9 +90,12 @@ function updateCategory($userId, $categoryId)
     // Check if it's a system category
     $category = $db->fetchOne("SELECT is_system FROM categories WHERE id = ?", [$categoryId]);
     if ($category && $category['is_system']) {
-      // Only allow updating budget for system categories
-      $sql = "UPDATE categories SET monthly_budget = ? WHERE id = ?";
-      $db->execute($sql, [$input['monthly_budget'] ?? 0, $categoryId]);
+      // System categories are shared across all users — never mutate the shared row.
+      // Store this user's budget as a per-user override instead.
+      $sql = "INSERT INTO category_budgets (user_id, category_id, monthly_budget)
+              VALUES (?, ?, ?)
+              ON DUPLICATE KEY UPDATE monthly_budget = VALUES(monthly_budget)";
+      $db->execute($sql, [$userId, $categoryId, $input['monthly_budget'] ?? 0]);
     } else {
       // Full update for user categories
       $sql = "UPDATE categories SET 

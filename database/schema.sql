@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS sync_jobs (
     id INT AUTO_INCREMENT PRIMARY KEY,
     user_id INT NOT NULL,
     type ENUM('sms', 'gmail', 'stocks', 'mutual_funds', 'all') NOT NULL,
+    params JSON NULL COMMENT 'Job parameters, e.g. {"range":"6m","types":["mutual_funds"]}',
     status ENUM('pending', 'processing', 'completed', 'failed') DEFAULT 'pending',
     progress INT DEFAULT 0 COMMENT 'Progress percentage (0-100)',
     total_items INT DEFAULT 0,
@@ -222,6 +223,25 @@ CREATE TABLE IF NOT EXISTS categories (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================
+-- CATEGORY BUDGETS TABLE (Per-user budget overrides)
+-- ============================================
+-- System categories (categories.user_id IS NULL) are shared across all users,
+-- so their monthly_budget column must never be mutated per user. Each user gets
+-- their own budget override here instead; reads COALESCE this over the default.
+CREATE TABLE IF NOT EXISTS category_budgets (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    user_id INT NOT NULL,
+    category_id INT NOT NULL,
+    monthly_budget DECIMAL(15, 2) NOT NULL DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE CASCADE,
+    UNIQUE KEY uniq_user_category_budget (user_id, category_id),
+    INDEX idx_category_budgets_user (user_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================
 -- TRANSACTIONS TABLE (All expenses/income)
 -- ============================================
 CREATE TABLE IF NOT EXISTS transactions (
@@ -338,6 +358,24 @@ CREATE TABLE IF NOT EXISTS statement_passwords (
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
     UNIQUE KEY uniq_statement_password (user_id, bank, account_type, card_last_four),
     INDEX idx_statement_password_lookup (user_id, bank, account_type)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Per-user pool of candidate statement PDF passwords (tried during decryption,
+-- in addition to any card-specific password in statement_passwords).
+CREATE TABLE IF NOT EXISTS statement_password_candidates (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    user_id INT NOT NULL,
+    label VARCHAR(100) NULL COMMENT 'Optional user-facing hint, e.g. "DOB" or "PAN"',
+    password_hash CHAR(64) NOT NULL COMMENT 'HMAC-SHA256(password) for dedupe only',
+    encrypted_password TEXT NOT NULL,
+    iv VARCHAR(64) NOT NULL,
+    auth_tag VARCHAR(64) NOT NULL,
+    encryption_version TINYINT NOT NULL DEFAULT 1,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    UNIQUE KEY uniq_user_password (user_id, password_hash),
+    INDEX idx_candidate_user (user_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS statement_uploads (
@@ -659,19 +697,20 @@ CREATE PROCEDURE sp_monthly_expenses_by_category(
     IN p_end_date DATE
 )
 BEGIN
-    SELECT 
+    SELECT
         c.name AS category_name,
         c.color AS category_color,
         c.icon AS category_icon,
         COUNT(t.id) AS transaction_count,
         SUM(t.amount) AS total_amount,
-        c.monthly_budget
+        COALESCE(cb.monthly_budget, c.monthly_budget) AS monthly_budget
     FROM transactions t
     INNER JOIN categories c ON t.category_id = c.id
-    WHERE t.user_id = p_user_id 
+    LEFT JOIN category_budgets cb ON cb.category_id = c.id AND cb.user_id = p_user_id
+    WHERE t.user_id = p_user_id
         AND t.transaction_type = 'debit'
         AND t.transaction_date BETWEEN p_start_date AND p_end_date
-    GROUP BY c.id, c.name, c.color, c.icon, c.monthly_budget
+    GROUP BY c.id, c.name, c.color, c.icon, c.monthly_budget, cb.monthly_budget
     ORDER BY total_amount DESC;
 END //
 DELIMITER ;

@@ -7,6 +7,7 @@ require_once __DIR__ . '/../utils/azureOpenAI.php';
 require_once __DIR__ . '/../utils/fxConverter.php';
 require_once __DIR__ . '/../utils/transactionDuplicateDetector.php';
 require_once __DIR__ . '/../utils/categoryResolver.php';
+require_once __DIR__ . '/../utils/categoryLearning.php';
 require_once __DIR__ . '/../utils/statementPasswordVault.php';
 
 if (!class_exists('\Smalot\PdfParser\Parser')) {
@@ -161,6 +162,186 @@ class StatementController
         ], $deleted > 0 ? 'Statement password removed.' : 'No matching statement password found.');
     }
 
+    /**
+     * GET /statements/password-candidates
+     * List the user's saved candidate passwords (never returns plaintext).
+     */
+    public function getPasswordCandidates(): void
+    {
+        $tokenData = JWTHandler::requireAuth();
+        $userId = (int)$tokenData['userId'];
+
+        $rows = $this->db->fetchAll(
+            "SELECT id, label, created_at, updated_at
+             FROM statement_password_candidates
+             WHERE user_id = ?
+             ORDER BY updated_at DESC, id DESC",
+            [$userId]
+        );
+
+        Response::success([
+            'candidates' => array_map(static function (array $row): array {
+                return [
+                    'id' => (int)$row['id'],
+                    'label' => $row['label'] !== null ? (string)$row['label'] : null,
+                    'created_at' => $row['created_at'],
+                    'updated_at' => $row['updated_at'],
+                ];
+            }, $rows),
+            'count' => count($rows),
+        ], 'Password candidates retrieved.');
+    }
+
+    /**
+     * POST /statements/password-candidates
+     * Body: { "passwords": [ "..", { "password": "..", "label": ".." } ] }
+     *   or  { "password": "..", "label": ".." }
+     * Adds each password to the user's pool (encrypted, de-duplicated).
+     */
+    public function savePasswordCandidates(): void
+    {
+        $tokenData = JWTHandler::requireAuth();
+        $userId = (int)$tokenData['userId'];
+
+        $input = getJsonInput();
+
+        // Accept a single password or an array of strings / {password,label} objects.
+        $entries = [];
+        if (isset($input['passwords']) && is_array($input['passwords'])) {
+            $entries = $input['passwords'];
+        } elseif (isset($input['password'])) {
+            $entries = [['password' => $input['password'], 'label' => $input['label'] ?? null]];
+        }
+
+        if (empty($entries)) {
+            Response::error('Provide "password" or a non-empty "passwords" array.', 400);
+        }
+
+        $added = 0;
+        $skipped = 0;
+        $invalid = 0;
+
+        foreach ($entries as $entry) {
+            $password = is_array($entry) ? (string)($entry['password'] ?? '') : (string)$entry;
+            $label = is_array($entry) && isset($entry['label']) && trim((string)$entry['label']) !== ''
+                ? mb_substr(trim((string)$entry['label']), 0, 100)
+                : null;
+
+            $password = trim($password);
+            if ($password === '' || mb_strlen($password) > 256) {
+                $invalid++;
+                continue;
+            }
+
+            $hash = $this->candidatePasswordHash($password);
+            $encrypted = StatementPasswordVault::encrypt($password);
+
+            // Upsert: keep first occurrence; refresh label/updated_at on repeat.
+            // MySQL rowCount(): 1 = inserted (new), 2 = updated (duplicate).
+            $affected = $this->db->execute(
+                "INSERT INTO statement_password_candidates
+                    (user_id, label, password_hash, encrypted_password, iv, auth_tag, encryption_version)
+                 VALUES (?, ?, ?, ?, ?, ?, ?)
+                 ON DUPLICATE KEY UPDATE
+                    label = COALESCE(VALUES(label), label),
+                    updated_at = CURRENT_TIMESTAMP",
+                [
+                    $userId,
+                    $label,
+                    $hash,
+                    $encrypted['encrypted_password'],
+                    $encrypted['iv'],
+                    $encrypted['auth_tag'],
+                    $encrypted['encryption_version'],
+                ]
+            );
+
+            if ((int)$affected >= 2) {
+                $skipped++;
+            } else {
+                $added++;
+            }
+        }
+
+        Response::success([
+            'added' => $added,
+            'skipped_duplicates' => $skipped,
+            'invalid' => $invalid,
+        ], 'Password candidates saved.');
+    }
+
+    /**
+     * DELETE /statements/password-candidates
+     * Body: { "id": 123 } to delete one, or { "all": true } to clear the pool.
+     */
+    public function deletePasswordCandidate(): void
+    {
+        $tokenData = JWTHandler::requireAuth();
+        $userId = (int)$tokenData['userId'];
+
+        $input = getJsonInput();
+
+        if (!empty($input['all'])) {
+            $deleted = $this->db->execute(
+                "DELETE FROM statement_password_candidates WHERE user_id = ?",
+                [$userId]
+            );
+            Response::success(['deleted' => (int)$deleted], 'All password candidates removed.');
+        }
+
+        $id = isset($input['id']) ? (int)$input['id'] : 0;
+        if ($id <= 0) {
+            Response::error('Provide "id" of the candidate to delete, or "all": true.', 400);
+        }
+
+        $deleted = $this->db->execute(
+            "DELETE FROM statement_password_candidates WHERE id = ? AND user_id = ?",
+            [$id, $userId]
+        );
+
+        Response::success([
+            'deleted' => $deleted > 0,
+        ], $deleted > 0 ? 'Password candidate removed.' : 'No matching candidate found.');
+    }
+
+    /** HMAC of a candidate password — used only to de-duplicate, never to decrypt. */
+    private function candidatePasswordHash(string $password): string
+    {
+        $key = defined('STATEMENT_PASSWORD_KEY') ? (string)STATEMENT_PASSWORD_KEY : '';
+        return hash_hmac('sha256', $password, $key);
+    }
+
+    /**
+     * Return the user's candidate passwords as decryptable rows shaped like
+     * statement_passwords rows, so they can be appended to the decryption loop.
+     */
+    private function loadCandidatePasswordRows(int $userId): array
+    {
+        try {
+            $rows = $this->db->fetchAll(
+                "SELECT encrypted_password, iv, auth_tag
+                 FROM statement_password_candidates
+                 WHERE user_id = ?
+                 ORDER BY updated_at DESC, id DESC",
+                [$userId]
+            );
+        } catch (Exception $e) {
+            // Tolerate the table not existing yet (migration 015 not applied) so
+            // statement uploads keep working regardless of deploy order.
+            error_log('loadCandidatePasswordRows skipped: ' . $e->getMessage());
+            return [];
+        }
+
+        return array_map(static function (array $row): array {
+            return [
+                'card_last_four' => null,
+                'encrypted_password' => (string)$row['encrypted_password'],
+                'iv' => (string)$row['iv'],
+                'auth_tag' => (string)$row['auth_tag'],
+            ];
+        }, $rows);
+    }
+
     public function uploadStatement(): void
     {
         $tokenData = JWTHandler::requireAuth();
@@ -209,6 +390,11 @@ class StatementController
                 [$userId, $bank, $accountType]
             );
         }
+
+        // Also try the user's generic candidate-password pool (after any
+        // bank/card-specific passwords) so a shared list of common passwords
+        // (DOB, PAN, etc.) can decrypt statements without per-card setup.
+        $passwordRows = array_merge($passwordRows, $this->loadCandidatePasswordRows($userId));
 
         if (empty($passwordRows)) {
             $passwordRows = [[
@@ -349,163 +535,30 @@ class StatementController
                 throw new Exception('No transactions detected in the uploaded ' . strtoupper($bank) . ' statement.');
             }
 
-            // Best-effort AI cleanup for merchant/description/category before dedupe + insert.
-            // Upload must still succeed if AI is unavailable or returns partial output.
-            $statementAi = new AzureOpenAI();
-            $aiRefinements = $statementAi->refineStatementTransactions($parsedTransactions, strtoupper($bank));
-            if (!empty($aiRefinements)) {
-                foreach ($parsedTransactions as $idx => $parsedTxn) {
-                    if (!isset($aiRefinements[$idx]) || !is_array($aiRefinements[$idx])) {
-                        continue;
-                    }
-
-                    $refined = $aiRefinements[$idx];
-                    if (!empty($refined['merchant'])) {
-                        $parsedTransactions[$idx]['merchant'] = (string)$refined['merchant'];
-                    }
-                    if (!empty($refined['description'])) {
-                        $parsedTransactions[$idx]['description'] = (string)$refined['description'];
-                    }
-                    if (!empty($refined['category_id'])) {
-                        $parsedTransactions[$idx]['category_id'] = (int)$refined['category_id'];
-                    }
-                }
-            }
-
             $accountId = $this->getOrCreateCreditCardAccount($userId, $bank, $effectiveCardLastFour);
-            $paymentMethod = strtoupper($bank) . ' Card *' . $effectiveCardLastFour;
+            $stats = $this->persistParsedCardTransactions(
+                $userId,
+                $bank,
+                $effectiveCardLastFour,
+                $accountId,
+                $parsedTransactions,
+                $parserName,
+                $uploadId,
+                $fileHash
+            );
 
-            $savedCount = 0;
-            $skippedHighConfidence = 0;
-            $flaggedPossibleDuplicates = 0;
-            $aiChecked = 0;
-            $fallbackUsed = 0;
-            $savedDebitCount = 0;
-            $savedCreditCount = 0;
-            $savedDebitAmount = 0.0;
-            $savedCreditAmount = 0.0;
-            $savedDateMin = null;
-            $savedDateMax = null;
-            $errors = [];
-
-            foreach ($parsedTransactions as $txn) {
-                try {
-                    $normalizedType = $this->normalizeStatementTransactionType(
-                        (string)($txn['transaction_type'] ?? ''),
-                        (string)($txn['description'] ?? '')
-                    );
-                    $normalizedDescription = $this->normalizeStatementDescription(
-                        (string)($txn['description'] ?? ''),
-                        (string)($txn['merchant'] ?? ''),
-                        strtoupper($bank)
-                    );
-                    $normalizedMerchant = $this->normalizeStatementMerchant(
-                        (string)($txn['merchant'] ?? ''),
-                        $normalizedDescription,
-                        strtoupper($bank) . ' Card Transaction'
-                    );
-
-                    $transactionPayload = [
-                        'bank' => strtoupper($bank),
-                        'account_number' => $effectiveCardLastFour,
-                        'transaction_type' => $normalizedType,
-                        'amount' => $txn['amount'],
-                        'merchant' => $normalizedMerchant,
-                        'description' => $normalizedDescription,
-                        'category_id' => isset($txn['category_id']) ? (int)$txn['category_id'] : null,
-                        'date' => $txn['transaction_date'],
-                        'reference_number' => $txn['reference_number'],
-                        'payment_method' => $paymentMethod,
-                    ];
-
-                    $duplicateCheck = $this->duplicateDetector->evaluate($userId, $transactionPayload, [
-                        'account_id' => $accountId,
-                        'ai_enabled' => true,
-                        'skip_threshold' => 76,
-                        'duplicate_threshold' => 51,
-                    ]);
-
-                    if (!empty($duplicateCheck['ai_used'])) {
-                        $aiChecked++;
-                    }
-
-                    if (!empty($duplicateCheck['fallback_used'])) {
-                        $fallbackUsed++;
-                    }
-
-                    if (!empty($duplicateCheck['should_skip'])) {
-                        $skippedHighConfidence++;
-                        continue;
-                    }
-
-                    if (!empty($duplicateCheck['possible_duplicate'])) {
-                        $flaggedPossibleDuplicates++;
-                    }
-
-                    $categoryId = CategoryResolver::resolveTransaction($transactionPayload);
-                    $sourceData = [
-                        'source' => 'statement_pdf',
-                        'parser' => $parserName,
-                        'bank' => $bank,
-                        'card_last_four' => $effectiveCardLastFour,
-                        'upload_id' => $uploadId,
-                        'file_hash' => $fileHash,
-                        'raw_line' => $txn['raw_line'],
-                    ];
-
-                    // Card statements bill in INR (amount already converted). If the
-                    // raw line carries the original foreign figure, preserve it.
-                    $foreign = fxExtractForeign((string)($txn['raw_line'] ?? '') . ' ' . (string)($txn['description'] ?? ''));
-                    $origAmount = $foreign['amount'] ?? null;
-                    $origCurrency = $foreign['currency'] ?? null;
-
-                    $this->db->insert(
-                        "INSERT INTO transactions
-                         (user_id, account_id, category_id, transaction_type, amount, currency, original_amount, original_currency,
-                          merchant, description, transaction_date, reference_number, source, payment_method, source_data, duplicate_score)
-                         VALUES (?, ?, ?, ?, ?, 'INR', ?, ?, ?, ?, ?, ?, 'statement_pdf', ?, ?, ?)",
-                        [
-                            $userId,
-                            $accountId,
-                            $categoryId,
-                            $normalizedType,
-                            $txn['amount'],
-                            $origAmount,
-                            $origCurrency,
-                            $normalizedMerchant,
-                            $normalizedDescription,
-                            $txn['transaction_date'],
-                            $txn['reference_number'],
-                            $paymentMethod,
-                            json_encode($sourceData),
-                            (int)($duplicateCheck['confidence'] ?? 0),
-                        ]
-                    );
-
-                    $savedCount++;
-
-                    $txnAmount = (float)$txn['amount'];
-                    if ($normalizedType === 'credit') {
-                        $savedCreditCount++;
-                        $savedCreditAmount += $txnAmount;
-                    } else {
-                        $savedDebitCount++;
-                        $savedDebitAmount += $txnAmount;
-                    }
-
-                    $txnDate = (string)($txn['transaction_date'] ?? '');
-                    if ($txnDate !== '') {
-                        if ($savedDateMin === null || strtotime($txnDate) < strtotime($savedDateMin)) {
-                            $savedDateMin = $txnDate;
-                        }
-                        if ($savedDateMax === null || strtotime($txnDate) > strtotime($savedDateMax)) {
-                            $savedDateMax = $txnDate;
-                        }
-                    }
-                } catch (Exception $recordError) {
-                    $errors[] = $recordError->getMessage();
-                }
-            }
+            $savedCount = $stats['saved'];
+            $skippedHighConfidence = $stats['skipped_high_confidence'];
+            $flaggedPossibleDuplicates = $stats['flagged'];
+            $aiChecked = $stats['ai_checked'];
+            $fallbackUsed = $stats['fallback_used'];
+            $savedDebitCount = $stats['debit_count'];
+            $savedCreditCount = $stats['credit_count'];
+            $savedDebitAmount = $stats['debit_amount'];
+            $savedCreditAmount = $stats['credit_amount'];
+            $savedDateMin = $stats['date_min'];
+            $savedDateMax = $stats['date_max'];
+            $errors = $stats['errors'];
 
             $this->db->execute(
                 "UPDATE statement_uploads
@@ -557,6 +610,326 @@ class StatementController
                     @unlink($cleanupPath);
                 }
             }
+        }
+    }
+
+    /**
+     * Public wrapper so server-side workers (e.g. the Gmail fetch worker) can
+     * reuse the exact multi-tool PDF decryption/extraction used for uploads
+     * (qpdf -> pdftotext -> mutool -> python/pypdf). Returns extracted text, or
+     * throws if the password/tools could not open the PDF.
+     */
+    public function extractTextFromPdf(string $inputPath, string $password): string
+    {
+        $cleanupFiles = [];
+        try {
+            return $this->extractPdfText($inputPath, $password, $cleanupFiles);
+        } finally {
+            foreach ($cleanupFiles as $cleanupPath) {
+                if (is_string($cleanupPath) && file_exists($cleanupPath)) {
+                    @unlink($cleanupPath);
+                }
+            }
+        }
+    }
+
+    /**
+     * AI-refine, rules-categorize, dedupe and insert parsed credit-card
+     * transactions. Shared by uploadStatement() and the Gmail worker
+     * (ingestCreditCardPdf). Returns counts; does not touch statement_uploads.
+     */
+    private function persistParsedCardTransactions(
+        int $userId,
+        string $bank,
+        string $effectiveCardLastFour,
+        int $accountId,
+        array $parsedTransactions,
+        string $parserName,
+        int $uploadId,
+        string $fileHash
+    ): array {
+        // Best-effort AI cleanup for merchant/description/category before dedupe + insert.
+        // Must still succeed if AI is unavailable or returns partial output.
+        $statementAi = new AzureOpenAI();
+        $aiRefinements = $statementAi->refineStatementTransactions($parsedTransactions, strtoupper($bank));
+        if (!empty($aiRefinements)) {
+            foreach ($parsedTransactions as $idx => $parsedTxn) {
+                if (!isset($aiRefinements[$idx]) || !is_array($aiRefinements[$idx])) {
+                    continue;
+                }
+                $refined = $aiRefinements[$idx];
+                if (!empty($refined['merchant'])) {
+                    $parsedTransactions[$idx]['merchant'] = (string)$refined['merchant'];
+                }
+                if (!empty($refined['description'])) {
+                    $parsedTransactions[$idx]['description'] = (string)$refined['description'];
+                }
+                if (!empty($refined['category_id'])) {
+                    $parsedTransactions[$idx]['category_id'] = (int)$refined['category_id'];
+                }
+            }
+        }
+
+        $paymentMethod = strtoupper($bank) . ' Card *' . $effectiveCardLastFour;
+
+        $savedCount = 0;
+        $skippedHighConfidence = 0;
+        $flaggedPossibleDuplicates = 0;
+        $aiChecked = 0;
+        $fallbackUsed = 0;
+        $savedDebitCount = 0;
+        $savedCreditCount = 0;
+        $savedDebitAmount = 0.0;
+        $savedCreditAmount = 0.0;
+        $savedDateMin = null;
+        $savedDateMax = null;
+        $errors = [];
+
+        foreach ($parsedTransactions as $txn) {
+            try {
+                $normalizedType = $this->normalizeStatementTransactionType(
+                    (string)($txn['transaction_type'] ?? ''),
+                    (string)($txn['description'] ?? '')
+                );
+                $normalizedDescription = $this->normalizeStatementDescription(
+                    (string)($txn['description'] ?? ''),
+                    (string)($txn['merchant'] ?? ''),
+                    strtoupper($bank)
+                );
+                $normalizedMerchant = $this->normalizeStatementMerchant(
+                    (string)($txn['merchant'] ?? ''),
+                    $normalizedDescription,
+                    strtoupper($bank) . ' Card Transaction'
+                );
+
+                // Rules-first: a user's learned merchant→category correction
+                // beats the AI guess (mirrors the SMS parsing path).
+                $learnedCategoryId = CategoryLearning::resolveFromTransaction($this->db, $userId, [
+                    'merchant' => $normalizedMerchant,
+                    'description' => $normalizedDescription,
+                ]);
+                $resolvedCategoryId = $learnedCategoryId !== null
+                    ? $learnedCategoryId
+                    : (isset($txn['category_id']) ? (int)$txn['category_id'] : null);
+
+                $transactionPayload = [
+                    'bank' => strtoupper($bank),
+                    'account_number' => $effectiveCardLastFour,
+                    'transaction_type' => $normalizedType,
+                    'amount' => $txn['amount'],
+                    'merchant' => $normalizedMerchant,
+                    'description' => $normalizedDescription,
+                    'category_id' => $resolvedCategoryId,
+                    'date' => $txn['transaction_date'],
+                    'reference_number' => $txn['reference_number'],
+                    'payment_method' => $paymentMethod,
+                ];
+
+                $duplicateCheck = $this->duplicateDetector->evaluate($userId, $transactionPayload, [
+                    'account_id' => $accountId,
+                    'ai_enabled' => true,
+                    'skip_threshold' => 76,
+                    'duplicate_threshold' => 51,
+                ]);
+
+                if (!empty($duplicateCheck['ai_used'])) {
+                    $aiChecked++;
+                }
+                if (!empty($duplicateCheck['fallback_used'])) {
+                    $fallbackUsed++;
+                }
+                if (!empty($duplicateCheck['should_skip'])) {
+                    $skippedHighConfidence++;
+                    continue;
+                }
+                if (!empty($duplicateCheck['possible_duplicate'])) {
+                    $flaggedPossibleDuplicates++;
+                }
+
+                $categoryId = CategoryResolver::resolveTransaction($transactionPayload);
+                $sourceData = [
+                    'source' => 'statement_pdf',
+                    'parser' => $parserName,
+                    'bank' => $bank,
+                    'card_last_four' => $effectiveCardLastFour,
+                    'upload_id' => $uploadId,
+                    'file_hash' => $fileHash,
+                    'raw_line' => $txn['raw_line'],
+                ];
+
+                // Card statements bill in INR (amount already converted). If the
+                // raw line carries the original foreign figure, preserve it.
+                $foreign = fxExtractForeign((string)($txn['raw_line'] ?? '') . ' ' . (string)($txn['description'] ?? ''));
+                $origAmount = $foreign['amount'] ?? null;
+                $origCurrency = $foreign['currency'] ?? null;
+
+                $this->db->insert(
+                    "INSERT INTO transactions
+                     (user_id, account_id, category_id, transaction_type, amount, currency, original_amount, original_currency,
+                      merchant, description, transaction_date, reference_number, source, payment_method, source_data, duplicate_score)
+                     VALUES (?, ?, ?, ?, ?, 'INR', ?, ?, ?, ?, ?, ?, 'statement_pdf', ?, ?, ?)",
+                    [
+                        $userId,
+                        $accountId,
+                        $categoryId,
+                        $normalizedType,
+                        $txn['amount'],
+                        $origAmount,
+                        $origCurrency,
+                        $normalizedMerchant,
+                        $normalizedDescription,
+                        $txn['transaction_date'],
+                        $txn['reference_number'],
+                        $paymentMethod,
+                        json_encode($sourceData),
+                        (int)($duplicateCheck['confidence'] ?? 0),
+                    ]
+                );
+
+                $savedCount++;
+
+                $txnAmount = (float)$txn['amount'];
+                if ($normalizedType === 'credit') {
+                    $savedCreditCount++;
+                    $savedCreditAmount += $txnAmount;
+                } else {
+                    $savedDebitCount++;
+                    $savedDebitAmount += $txnAmount;
+                }
+
+                $txnDate = (string)($txn['transaction_date'] ?? '');
+                if ($txnDate !== '') {
+                    if ($savedDateMin === null || strtotime($txnDate) < strtotime($savedDateMin)) {
+                        $savedDateMin = $txnDate;
+                    }
+                    if ($savedDateMax === null || strtotime($txnDate) > strtotime($savedDateMax)) {
+                        $savedDateMax = $txnDate;
+                    }
+                }
+            } catch (Exception $recordError) {
+                $errors[] = $recordError->getMessage();
+            }
+        }
+
+        return [
+            'saved' => $savedCount,
+            'skipped_high_confidence' => $skippedHighConfidence,
+            'flagged' => $flaggedPossibleDuplicates,
+            'ai_checked' => $aiChecked,
+            'fallback_used' => $fallbackUsed,
+            'debit_count' => $savedDebitCount,
+            'credit_count' => $savedCreditCount,
+            'debit_amount' => $savedDebitAmount,
+            'credit_amount' => $savedCreditAmount,
+            'date_min' => $savedDateMin,
+            'date_max' => $savedDateMax,
+            'errors' => $errors,
+        ];
+    }
+
+    /**
+     * Worker-facing: ingest a credit-card statement PDF already on disk (e.g.
+     * downloaded from Gmail), trying the given plaintext passwords. Reuses the
+     * same parse/normalize/dedupe/insert path as uploads. Returns a summary;
+     * throws on hard failure.
+     */
+    public function ingestCreditCardPdf(
+        int $userId,
+        string $bank,
+        string $cardLastFour,
+        string $workingFile,
+        string $fileName,
+        array $passwordPlaintexts = []
+    ): array {
+        $bank = $this->normalizeBank($bank);
+        if (!$this->isSupportedBank($bank)) {
+            throw new Exception("Unsupported bank for statement parsing: {$bank}");
+        }
+
+        $cardLastFour = $this->normalizeCardLastFour($cardLastFour);
+        $cardFilter = $cardLastFour !== '' ? $cardLastFour : null;
+        $fileHash = hash_file('sha256', $workingFile);
+
+        // Skip if this exact statement file was already processed.
+        $existing = $this->db->fetchOne(
+            "SELECT id FROM statement_uploads
+             WHERE user_id = ? AND bank = ? AND account_type = 'credit_card'
+               AND file_hash = ? AND status IN ('success', 'duplicate_upload')
+             ORDER BY id DESC LIMIT 1",
+            [$userId, $bank, $fileHash]
+        );
+        if ($existing) {
+            return ['duplicate_upload' => true, 'extracted_transactions' => 0, 'saved_transactions' => 0];
+        }
+
+        $uploadId = (int)$this->db->insert(
+            "INSERT INTO statement_uploads (user_id, bank, account_type, card_last_four, file_name, file_hash, status)
+             VALUES (?, ?, 'credit_card', ?, ?, ?, 'processing')",
+            [$userId, $bank, $cardFilter, $fileName, $fileHash]
+        );
+
+        try {
+            $parsedResult = ['transactions' => [], 'parser' => ''];
+            foreach (array_merge([''], $passwordPlaintexts) as $pwd) {
+                try {
+                    $text = $this->extractTextFromPdf($workingFile, (string)$pwd);
+                    $candidate = $this->parseTransactionsByBank($bank, $text, $cardLastFour);
+                    if (!empty($candidate['transactions'])) {
+                        $parsedResult = $candidate;
+                        break;
+                    }
+                } catch (Exception $e) {
+                    // try next password
+                }
+            }
+
+            $parsedTransactions = $parsedResult['transactions'];
+            if (empty($parsedTransactions)) {
+                throw new Exception('Could not parse statement with available passwords.');
+            }
+
+            $effectiveCardLastFour = $cardLastFour !== '' ? $cardLastFour : '0000';
+            $accountId = $this->getOrCreateCreditCardAccount($userId, $bank, $effectiveCardLastFour);
+            $stats = $this->persistParsedCardTransactions(
+                $userId,
+                $bank,
+                $effectiveCardLastFour,
+                $accountId,
+                $parsedTransactions,
+                (string)($parsedResult['parser'] ?? ''),
+                $uploadId,
+                $fileHash
+            );
+
+            $this->db->execute(
+                "UPDATE statement_uploads
+                 SET status = 'success', extracted_count = ?, saved_count = ?, skipped_high_confidence = ?,
+                     flagged_possible_duplicates = ?, ai_checked_transactions = ?, duplicate_fallback_used = ?,
+                     error_message = ?
+                 WHERE id = ?",
+                [
+                    count($parsedTransactions),
+                    $stats['saved'],
+                    $stats['skipped_high_confidence'],
+                    $stats['flagged'],
+                    $stats['ai_checked'],
+                    $stats['fallback_used'],
+                    !empty($stats['errors']) ? implode(' | ', array_slice($stats['errors'], 0, 5)) : null,
+                    $uploadId,
+                ]
+            );
+
+            return [
+                'duplicate_upload' => false,
+                'extracted_transactions' => count($parsedTransactions),
+                'saved_transactions' => $stats['saved'],
+            ];
+        } catch (Exception $e) {
+            $this->db->execute(
+                "UPDATE statement_uploads SET status = 'failed', error_message = ? WHERE id = ?",
+                [substr($e->getMessage(), 0, 1000), $uploadId]
+            );
+            throw $e;
         }
     }
 
@@ -1499,6 +1872,21 @@ function handleStatementRoutes(string $uri, string $method): void
 
     if ($uri === '/statements/password' && $method === 'DELETE') {
         $controller->deletePassword();
+        return;
+    }
+
+    if ($uri === '/statements/password-candidates' && $method === 'GET') {
+        $controller->getPasswordCandidates();
+        return;
+    }
+
+    if ($uri === '/statements/password-candidates' && $method === 'POST') {
+        $controller->savePasswordCandidates();
+        return;
+    }
+
+    if ($uri === '/statements/password-candidates' && $method === 'DELETE') {
+        $controller->deletePasswordCandidate();
         return;
     }
 

@@ -74,17 +74,19 @@ function getDashboardSummary($userId)
 
     // Get current month expenses by category
     $monthlyExpenses = $db->fetchAll(
-      "SELECT c.name, c.color, c.icon, COUNT(t.id) as count, SUM(t.amount) as total, c.monthly_budget
+      "SELECT c.name, c.color, c.icon, COUNT(t.id) as count, SUM(t.amount) as total,
+              COALESCE(cb.monthly_budget, c.monthly_budget) AS monthly_budget
        FROM transactions t
        JOIN categories c ON t.category_id = c.id
-       WHERE t.user_id = ? 
+       LEFT JOIN category_budgets cb ON cb.category_id = c.id AND cb.user_id = ?
+       WHERE t.user_id = ?
          AND t.deleted_at IS NULL
          AND t.transaction_type = 'debit'
          AND YEAR(t.transaction_date) = YEAR(CURDATE())
          AND MONTH(t.transaction_date) = MONTH(CURDATE())
-       GROUP BY c.id, c.name, c.color, c.icon, c.monthly_budget
+       GROUP BY c.id, c.name, c.color, c.icon, c.monthly_budget, cb.monthly_budget
        ORDER BY total DESC",
-      [$userId]
+      [$userId, $userId]
     );
 
     // Get investments maturing soon (next 90 days)

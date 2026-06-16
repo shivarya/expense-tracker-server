@@ -158,6 +158,13 @@ try {
     exit;
   }
 
+  // Gmail integration (connect/status/disconnect; sync + jobs added later)
+  if (strpos($requestUri, '/gmail') === 0) {
+    require_once __DIR__ . '/controllers/gmailController.php';
+    handleGmailRoutes($requestUri, $requestMethod);
+    exit;
+  }
+
   // Summary endpoints (for MCP server)
   if (strpos($requestUri, '/summary') === 0) {
     require_once __DIR__ . '/controllers/summaryController.php';

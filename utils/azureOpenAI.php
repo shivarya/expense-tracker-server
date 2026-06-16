@@ -1,101 +1,26 @@
 <?php
 
 require_once __DIR__ . '/fxConverter.php';
+require_once __DIR__ . '/aiClient.php';
 
+/**
+ * AzureOpenAI
+ *
+ * Despite the historical name, this is now a provider-agnostic helper: it builds
+ * the finance-specific prompts (SMS parsing, statement refinement, duplicate
+ * scoring) and delegates the actual HTTP transport to {@see AIClient}, whose
+ * provider is selected via env (Gemini Flash-Lite by default, or Azure/OpenAI/
+ * Groq). Existing call sites (`new AzureOpenAI()`) keep working unchanged.
+ */
 class AzureOpenAI {
-    private string $endpoint;
-    private string $apiKey;
-    private string $deployment;
-    private string $apiVersion;
+    private AIClient $client;
 
     public function __construct() {
-        $this->endpoint = $_ENV['AZURE_OPENAI_ENDPOINT'] ?? '';
-        $this->apiKey = $_ENV['AZURE_OPENAI_API_KEY'] ?? '';
-        $this->deployment = $_ENV['AZURE_OPENAI_DEPLOYMENT'] ?? 'gpt-4-turbo';
-        $this->apiVersion = '2024-02-15-preview';
+        $this->client = new AIClient();
     }
 
     public function chatCompletion(array $messages, float $temperature = 0.1, bool $jsonMode = true, int $maxRetries = 3): ?array {
-        if (empty($this->endpoint) || empty($this->apiKey)) {
-            error_log('Azure OpenAI credentials not configured');
-            return null;
-        }
-
-        $url = rtrim($this->endpoint, '/') . "/openai/deployments/{$this->deployment}/chat/completions?api-version={$this->apiVersion}";
-        
-        $payload = [
-            'messages' => $messages,
-            'temperature' => $temperature,
-            'max_completion_tokens' => 2000
-        ];
-
-        if ($jsonMode) {
-            $payload['response_format'] = ['type' => 'json_object'];
-        }
-
-        $attempt = 0;
-        $waitTime = 1; // Start with 1 second
-
-        while ($attempt < $maxRetries) {
-            $ch = curl_init($url);
-            curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-            curl_setopt($ch, CURLOPT_POST, true);
-            curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($payload));
-            curl_setopt($ch, CURLOPT_HTTPHEADER, [
-                'Content-Type: application/json',
-                'api-key: ' . $this->apiKey
-            ]);
-
-            $response = curl_exec($ch);
-            $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-            curl_close($ch);
-
-            if ($httpCode === 200) {
-                $result = json_decode($response, true);
-                $content = $result['choices'][0]['message']['content'] ?? null;
-                
-                if ($content === null) {
-                    return null;
-                }
-                
-                // Parse the JSON content and return as array
-                $parsed = json_decode($content, true);
-                return $parsed ?? null;
-            }
-
-            // Handle rate limit (429)
-            if ($httpCode === 429) {
-                $errorData = json_decode($response, true);
-                $retryAfter = $this->extractRetryAfter($errorData);
-                
-                $attempt++;
-                if ($attempt >= $maxRetries) {
-                    error_log("Azure OpenAI rate limit exceeded after $maxRetries attempts");
-                    return null;
-                }
-
-                $sleepTime = $retryAfter > 0 ? $retryAfter : $waitTime;
-                error_log("Rate limit hit. Retrying in $sleepTime seconds (attempt $attempt/$maxRetries)");
-                sleep($sleepTime);
-                $waitTime *= 2; // Exponential backoff
-                continue;
-            }
-
-            // Other errors
-            error_log("Azure OpenAI API error (HTTP $httpCode): $response");
-            return null;
-        }
-
-        return null;
-    }
-
-    private function extractRetryAfter(array $errorData): int {
-        // Extract retry time from error message
-        $message = $errorData['error']['message'] ?? '';
-        if (preg_match('/retry after (\d+) seconds/', $message, $matches)) {
-            return (int)$matches[1];
-        }
-        return 0;
+        return $this->client->chatCompletion($messages, $temperature, $jsonMode, $maxRetries);
     }
 
     /**
@@ -267,6 +192,87 @@ PROMPT;
 
     public function parseEmailContent(string $emailBody, string $subject): ?array {
         return $this->parseEmailBatch($emailBody, $subject);
+    }
+
+    /**
+     * Extract holdings from a CDSL eCAS (Consolidated Account Statement) — both
+     * demat equities and mutual funds. Returns ['stocks' => [...], 'mutual_funds' => [...]].
+     */
+    public function extractCdslHoldings(string $statementText): array {
+        if (trim($statementText) === '') {
+            return ['stocks' => [], 'mutual_funds' => []];
+        }
+
+        $systemPrompt = <<<'PROMPT'
+You extract holdings from an Indian CDSL eCAS (Consolidated Account Statement) PDF.
+
+Return ONLY a JSON object:
+{
+  "stocks": [
+    {"symbol": "", "isin": "", "company_name": "", "quantity": 0, "current_value": 0, "invested_amount": 0}
+  ],
+  "mutual_funds": [
+    {"fund_name": "", "folio_number": "", "isin": "", "units": 0, "current_value": 0, "invested_amount": 0}
+  ]
+}
+
+Rules:
+- "stocks" = demat equity holdings. ISIN is mandatory; if a ticker symbol is absent, derive a short symbol from the company name.
+- "mutual_funds" = MF folios. folio_number is mandatory when present.
+- Numbers must be plain numerics (no currency symbols, no commas).
+- current_value = current market value; invested_amount = cost/purchase value if shown, else 0.
+- Omit rows you cannot read with an identifier (ISIN for stocks, folio or fund name for MF).
+- Return ONLY valid JSON, no markdown.
+PROMPT;
+
+        $userPrompt = "Extract all holdings from this CDSL eCAS statement text:\n\n"
+            . mb_substr($statementText, 0, 18000)
+            . "\n\nReturn JSON: {\"stocks\": [...], \"mutual_funds\": [...]}";
+
+        $result = $this->chatCompletion([
+            ['role' => 'system', 'content' => $systemPrompt],
+            ['role' => 'user', 'content' => $userPrompt],
+        ], 0.1, true);
+
+        return [
+            'stocks' => is_array($result['stocks'] ?? null) ? $result['stocks'] : [],
+            'mutual_funds' => is_array($result['mutual_funds'] ?? null) ? $result['mutual_funds'] : [],
+        ];
+    }
+
+    /**
+     * Extract the NPS account summary from a Protean/NSDL NPS statement.
+     * Returns ['pran' => , 'account_name' => , 'invested_amount' => , 'current_value' => ] or [].
+     */
+    public function extractNpsStatement(string $statementText): array {
+        if (trim($statementText) === '') {
+            return [];
+        }
+
+        $systemPrompt = <<<'PROMPT'
+You extract the NPS (National Pension System) account summary from an Indian NPS statement PDF.
+
+Return ONLY a JSON object:
+{"pran": "", "account_name": "", "invested_amount": 0, "current_value": 0}
+
+Rules:
+- pran = the 12-digit PRAN if present.
+- account_name = subscriber name.
+- invested_amount = total contributions; current_value = current total valuation (Tier I + Tier II if both shown).
+- Numbers must be plain numerics (no currency symbols, no commas).
+- Return ONLY valid JSON, no markdown.
+PROMPT;
+
+        $userPrompt = "Extract the NPS summary from this statement text:\n\n"
+            . mb_substr($statementText, 0, 18000)
+            . "\n\nReturn JSON: {\"pran\": \"\", \"account_name\": \"\", \"invested_amount\": 0, \"current_value\": 0}";
+
+        $result = $this->chatCompletion([
+            ['role' => 'system', 'content' => $systemPrompt],
+            ['role' => 'user', 'content' => $userPrompt],
+        ], 0.1, true);
+
+        return is_array($result) ? $result : [];
     }
 
     /**
