@@ -28,6 +28,10 @@ class SubscriptionService
             return true; // gating disabled — everyone is "premium"
         }
 
+        if (self::isComplimentary($userId)) {
+            return true; // manually-granted (comp / beta / family) accounts
+        }
+
         $row = self::latestSubscription($userId);
         if (!$row) {
             return false;
@@ -42,14 +46,60 @@ class SubscriptionService
     {
         $row = self::latestSubscription($userId);
 
+        $complimentary = self::isComplimentary($userId);
+
         return [
             'premium' => self::isPremium($userId),
             'enforced' => self::enforced(),
-            'product_id' => $row['product_id'] ?? null,
-            'status' => $row['status'] ?? null,
-            'expiry_time' => $row['expiry_time'] ?? null,
+            'complimentary' => $complimentary,
+            'product_id' => $complimentary ? 'complimentary' : ($row['product_id'] ?? null),
+            'status' => $complimentary ? 'active' : ($row['status'] ?? null),
+            'expiry_time' => $complimentary ? null : ($row['expiry_time'] ?? null),
             'auto_renewing' => isset($row['auto_renewing']) ? (bool)$row['auto_renewing'] : null,
         ];
+    }
+
+    /**
+     * Manually-granted ("complimentary") premium with no purchase, via the
+     * PREMIUM_ALLOWLIST env var — a comma-separated list of user emails and/or
+     * numeric user IDs. Lets you give a few accounts (yourself, family, beta
+     * testers) full premium without a subscription.
+     */
+    public static function isComplimentary(int $userId): bool
+    {
+        $list = self::env('PREMIUM_ALLOWLIST');
+        if ($list === '') {
+            return false;
+        }
+
+        $entries = array_values(array_filter(array_map('trim', explode(',', $list)), static fn($e) => $e !== ''));
+        if (empty($entries)) {
+            return false;
+        }
+
+        // Match by numeric user ID.
+        foreach ($entries as $entry) {
+            if (ctype_digit($entry) && (int)$entry === $userId) {
+                return true;
+            }
+        }
+
+        // Match by email (case-insensitive).
+        try {
+            $row = getDB()->fetchOne("SELECT email FROM users WHERE id = ? LIMIT 1", [$userId]);
+            $email = strtolower(trim((string)($row['email'] ?? '')));
+            if ($email !== '') {
+                foreach ($entries as $entry) {
+                    if (strtolower($entry) === $email) {
+                        return true;
+                    }
+                }
+            }
+        } catch (Exception $e) {
+            error_log('isComplimentary lookup failed: ' . $e->getMessage());
+        }
+
+        return false;
     }
 
     /**
