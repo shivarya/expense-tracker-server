@@ -130,19 +130,76 @@ class SMSParserController {
         ]);
     }
 
+    /**
+     * POST /parse/sms/structured — free-tier path: the app parses bank SMS
+     * on-device (regex) and posts already-structured transactions; the server
+     * categorizes (rules), dedupes and inserts WITHOUT calling AI.
+     * Body: { "transactions": [ { bank, account_number, transaction_type,
+     *         amount, currency?, merchant, description, date, reference_number? } ] }
+     */
+    public function parseStructuredSMS(): void
+    {
+        $tokenData = JWTHandler::requireAuth();
+        $userId = (int)$tokenData['userId'];
+
+        $input = getJsonInput();
+        $transactions = (isset($input['transactions']) && is_array($input['transactions'])) ? $input['transactions'] : [];
+
+        if (empty($transactions)) {
+            Response::error('transactions array is required', 400);
+            return;
+        }
+        if (count($transactions) > 500) {
+            $transactions = array_slice($transactions, 0, 500);
+        }
+
+        try {
+            $result = $this->ingestStructuredTransactions($userId, $transactions);
+            Response::success($result, 'Transactions synced');
+        } catch (Throwable $e) {
+            error_log('parseStructuredSMS error: ' . $e->getMessage());
+            Response::error('Failed to sync transactions: ' . $e->getMessage(), 500);
+        }
+    }
+
     public function processBankMessagesForUser(int $userId, array $bankSMS, array $options = []): array
+    {
+        error_log("Processing " . count($bankSMS) . " bank SMS messages");
+
+        $transactions = $this->ai->parseBankSMS($bankSMS);
+        error_log("AI parsing complete. Extracted " . count($transactions) . " transactions");
+        $this->logTransactionsInChunks($transactions);
+
+        return $this->persistParsedTransactions($userId, $transactions, $options);
+    }
+
+    /**
+     * Ingest already-parsed transactions from the on-device (free-tier) SMS
+     * parser, skipping AI for both parsing and duplicate scoring.
+     */
+    public function ingestStructuredTransactions(int $userId, array $transactions, array $options = []): array
+    {
+        return $this->persistParsedTransactions(
+            $userId,
+            $transactions,
+            array_merge(['summary_tag' => 'SMS_ONDEVICE', 'use_ai_dedupe' => false], $options)
+        );
+    }
+
+    /**
+     * Persist already-parsed transactions (AI- or on-device-parsed). Honors
+     * $options['use_ai_dedupe'] (default true). Shared by the AI SMS path and
+     * the on-device free-tier path.
+     */
+    private function persistParsedTransactions(int $userId, array $transactions, array $options = []): array
     {
         $summaryTag = strtoupper((string)($options['summary_tag'] ?? 'SMS_PARSE'));
         $chunkSize = max(1, (int)($options['chunk_size'] ?? 20));
         $sleepMs = max(0, (int)($options['sleep_ms'] ?? 0));
         $jobId = isset($options['job_id']) ? (int)$options['job_id'] : null;
+        $useAiDedupe = (bool)($options['use_ai_dedupe'] ?? true);
 
-        error_log("Processing " . count($bankSMS) . " bank SMS messages");
-
-        $transactions = $this->ai->parseBankSMS($bankSMS);
         $totalTransactions = count($transactions);
-        error_log("AI parsing complete. Extracted " . $totalTransactions . " transactions");
-        $this->logTransactionsInChunks($transactions);
 
         $savedCount = 0;
         $skippedCount = 0;
@@ -182,7 +239,7 @@ class SMSParserController {
                 $transaction['merchant'] = $this->normalizeMerchantName((string)($transaction['merchant'] ?? ''));
                 $transaction['description'] = $this->resolveTransactionDescription($transaction);
 
-                $duplicateCheck = $this->evaluateDuplicateTransactionSafely($userId, $transaction, null, true);
+                $duplicateCheck = $this->evaluateDuplicateTransactionSafely($userId, $transaction, null, $useAiDedupe);
 
                 if (!empty($duplicateCheck['ai_used'])) {
                     $aiCheckedCount++;

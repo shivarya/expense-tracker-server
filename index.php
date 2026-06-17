@@ -165,6 +165,13 @@ try {
     exit;
   }
 
+  // Billing (Google Play subscription verification + status)
+  if (strpos($requestUri, '/billing') === 0) {
+    require_once __DIR__ . '/controllers/billingController.php';
+    handleBillingRoutes($requestUri, $requestMethod);
+    exit;
+  }
+
   // Summary endpoints (for MCP server)
   if (strpos($requestUri, '/summary') === 0) {
     require_once __DIR__ . '/controllers/summaryController.php';
@@ -186,6 +193,8 @@ try {
     
     if ($requestUri === '/parse/sms' && $requestMethod === 'POST') {
       $controller->parseSMS();
+    } elseif ($requestUri === '/parse/sms/structured' && $requestMethod === 'POST') {
+      $controller->parseStructuredSMS();
     } elseif ($requestUri === '/parse/sms/webhook' && $requestMethod === 'POST') {
       $controller->smsWebhook();
     } else {

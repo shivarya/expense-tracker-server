@@ -4,6 +4,7 @@ require_once __DIR__ . '/../config/database.php';
 require_once __DIR__ . '/../utils/response.php';
 require_once __DIR__ . '/../utils/jwt.php';
 require_once __DIR__ . '/../utils/gmailService.php';
+require_once __DIR__ . '/../utils/subscriptionService.php';
 
 /**
  * Gmail integration routes (/gmail/*).
@@ -58,6 +59,12 @@ function gmailSync(): void
 
     if (!GmailService::isConnected($userId)) {
         Response::error('Gmail is not connected. Connect Gmail before syncing.', 400);
+        return;
+    }
+
+    // Premium feature. No-op while PREMIUM_ENFORCED is off (isPremium returns true).
+    if (!SubscriptionService::isPremium($userId)) {
+        Response::error('Gmail Auto-Sync is a premium feature. Upgrade to enable it.', 402);
         return;
     }
 
