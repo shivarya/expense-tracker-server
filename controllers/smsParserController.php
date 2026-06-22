@@ -975,10 +975,26 @@ class SMSParserController {
         $digits = preg_replace('/\D+/', '', (string)$accountNumber);
         $lastFour = substr($digits, -4);
         $fullAccountNumber = 'XXXX' . str_pad($lastFour ?: $accountNumber, 4, '0', STR_PAD_LEFT);
-        return $this->db->insert(
-            "INSERT INTO bank_accounts (user_id, bank, account_number, account_type, card_last_four, balance) VALUES (?, ?, ?, ?, ?, 0)",
-            [$userId, $bank, $fullAccountNumber, $accountType, $accountType === 'credit_card' ? $cardLastFour : null]
-        );
+
+        try {
+            return $this->db->insert(
+                "INSERT INTO bank_accounts (user_id, bank, account_number, account_type, card_last_four, balance) VALUES (?, ?, ?, ?, ?, 0)",
+                [$userId, $bank, $fullAccountNumber, $accountType, $accountType === 'credit_card' ? $cardLastFour : null]
+            );
+        } catch (Exception $e) {
+            // An account with this (user, bank, account_number) already exists under a
+            // different type (e.g. the SMS lacked a card hint so it was classified as
+            // savings, but the number is actually a credit card). Attach to the
+            // existing account instead of failing the whole sync.
+            $existingByNumber = $this->db->fetchOne(
+                "SELECT id FROM bank_accounts WHERE user_id = ? AND bank = ? AND account_number = ? LIMIT 1",
+                [$userId, $bank, $fullAccountNumber]
+            );
+            if ($existingByNumber && isset($existingByNumber['id'])) {
+                return (int)$existingByNumber['id'];
+            }
+            throw $e;
+        }
     }
 
     private function inferAccountType(array $transaction): string {
