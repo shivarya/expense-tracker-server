@@ -304,6 +304,42 @@ class StatementController
         ], $deleted > 0 ? 'Password candidate removed.' : 'No matching candidate found.');
     }
 
+    /**
+     * POST /statements/password-candidates/reveal
+     * Body: { "id": 123 }
+     * Returns the decrypted plaintext for ONE of the authenticated user's own
+     * candidates, so they can confirm what's stored. Owner-scoped (id + user_id).
+     */
+    public function revealPasswordCandidate(): void
+    {
+        $tokenData = JWTHandler::requireAuth();
+        $userId = (int)$tokenData['userId'];
+
+        $input = getJsonInput();
+        $id = isset($input['id']) ? (int)$input['id'] : 0;
+        if ($id <= 0) {
+            Response::error('Provide "id" of the candidate to reveal.', 400);
+        }
+
+        $row = $this->db->fetchOne(
+            "SELECT encrypted_password, iv, auth_tag
+             FROM statement_password_candidates
+             WHERE id = ? AND user_id = ?",
+            [$id, $userId]
+        );
+        if (!$row) {
+            Response::error('Password candidate not found.', 404);
+        }
+
+        try {
+            $plain = StatementPasswordVault::decrypt($row['encrypted_password'], $row['iv'], $row['auth_tag']);
+        } catch (Throwable $e) {
+            Response::error('Could not decrypt this password.', 500);
+        }
+
+        Response::success(['id' => $id, 'password' => $plain]);
+    }
+
     /** HMAC of a candidate password — used only to de-duplicate, never to decrypt. */
     private function candidatePasswordHash(string $password): string
     {
@@ -730,6 +766,7 @@ class StatementController
                     'ai_enabled' => true,
                     'skip_threshold' => 76,
                     'duplicate_threshold' => 51,
+                    'source_hint' => 'statement_pdf',
                 ]);
 
                 if (!empty($duplicateCheck['ai_used'])) {
@@ -888,7 +925,11 @@ class StatementController
                 throw new Exception('Could not parse statement with available passwords.');
             }
 
-            $effectiveCardLastFour = $cardLastFour !== '' ? $cardLastFour : '0000';
+            // Statement PDFs have no card number passed in; detect the masked last
+            // digits from the decrypted text so transactions file under the real card
+            // (and dedupe against SMS) instead of a synthetic XXXX0000 account.
+            $detectedLast4 = ($cardLastFour === '' && isset($text)) ? $this->extractCardLast4ForBank($bank, (string)$text) : '';
+            $effectiveCardLastFour = $cardLastFour !== '' ? $cardLastFour : ($detectedLast4 !== '' ? $detectedLast4 : '0000');
             $accountId = $this->getOrCreateCreditCardAccount($userId, $bank, $effectiveCardLastFour);
             $stats = $this->persistParsedCardTransactions(
                 $userId,
@@ -1290,6 +1331,21 @@ PY;
             ];
         }
 
+        if ($bank === 'rbl') {
+            $transactions = $this->parseRblTransactions($text, $cardLastFour);
+            if (!empty($transactions)) {
+                return [
+                    'transactions' => $transactions,
+                    'parser' => 'rbl_v1',
+                ];
+            }
+
+            return [
+                'transactions' => $this->parseGenericStatementTransactions($text, $cardLastFour, 'RBL'),
+                'parser' => 'rbl_generic_v1',
+            ];
+        }
+
         $transactions = $this->parseIciciTransactions($text, $cardLastFour);
         if (!empty($transactions)) {
             return [
@@ -1537,6 +1593,100 @@ PY;
         return $transactions;
     }
 
+    /**
+     * RBL credit-card statement parser. Transaction lines look like:
+     *   "23 May 2026 LIFE STYLE INTERNATIO BANGALORE KAR 299.00"
+     *   "29 May 2026 PAYMENT RECEIVED - BBPS 12,522.00"  (a credit)
+     * Skips the EMI/fee schedule rows (which carry the mangled "/uni20B9" rupee
+     * glyph and dd-Mon-yy 2-digit dates) and zero-amount lines.
+     */
+    private function parseRblTransactions(string $text, string $cardLastFour): array
+    {
+        $lines = preg_split('/\r\n|\n|\r/', $text) ?: [];
+        $transactions = [];
+        $creditPattern = '/payment received|payment credit|reversal|refund|cashback|received\s*-/i';
+
+        foreach ($lines as $line) {
+            $line = trim(preg_replace('/\s+/', ' ', (string)$line) ?? '');
+            if ($line === '' || stripos($line, 'uni20B9') !== false) {
+                continue; // skip EMI/fee-schedule noise (rupee-glyph rows)
+            }
+
+            // <D Mon YYYY> <merchant ...> <amount>[ Cr]
+            if (!preg_match('/^(\d{1,2}) ([A-Za-z]{3}) (\d{4}) (.+?) ([\d,]+\.\d{2})(?:\s*(Cr|CR))?$/', $line, $m)) {
+                continue;
+            }
+
+            $monthNum = $this->monthAbbrToNum($m[2]);
+            if ($monthNum === null) {
+                continue;
+            }
+
+            $amount = (float)str_replace(',', '', $m[5]);
+            if ($amount <= 0) {
+                continue;
+            }
+
+            $description = trim($m[4]);
+            if (stripos($description, 'opening balance') !== false || stripos($description, 'total amount due') !== false) {
+                continue;
+            }
+
+            $isCredit = !empty($m[6]) || preg_match($creditPattern, $description) === 1;
+            $normalizedDate = sprintf('%04d-%02d-%02d 12:00:00', (int)$m[3], $monthNum, (int)$m[1]);
+            $merchant = $this->extractMerchant($description, 'RBL Card Transaction');
+
+            $transactions[] = [
+                'transaction_type' => $isCredit ? 'credit' : 'debit',
+                'amount' => round($amount, 2),
+                'merchant' => $merchant,
+                'description' => $description,
+                'transaction_date' => $normalizedDate,
+                // No serial in the PDF text; derive a stable ref so re-syncs dedupe.
+                'reference_number' => 'RBL_' . substr(md5($normalizedDate . '|' . $description . '|' . $amount), 0, 16),
+                'raw_line' => $line,
+                'card_last_four' => $cardLastFour,
+            ];
+        }
+
+        return $transactions;
+    }
+
+    /** Three-letter month abbreviation to 1-12, or null. */
+    private function monthAbbrToNum(string $mon): ?int
+    {
+        static $map = [
+            'jan' => 1, 'feb' => 2, 'mar' => 3, 'apr' => 4, 'may' => 5, 'jun' => 6,
+            'jul' => 7, 'aug' => 8, 'sep' => 9, 'oct' => 10, 'nov' => 11, 'dec' => 12,
+        ];
+        $key = strtolower(substr(trim($mon), 0, 3));
+        return $map[$key] ?? null;
+    }
+
+    /**
+     * Pull the masked card's trailing digits (2-4) from decrypted statement text,
+     * e.g. ICICI "XXXXXXXX7003" -> 7003, RBL "Card Number XXXXXXXXXXXXXX89" -> 89.
+     * Returned digits are matched against existing cards via account_number LIKE,
+     * so even a 2-digit tail maps to the right card (…6089).
+     */
+    private function extractCardLast4ForBank(string $bank, string $text): string
+    {
+        if (trim($text) === '') {
+            return '';
+        }
+        $flat = preg_replace('/[ \t]+/', ' ', $text) ?? $text;
+
+        // Masked digits then 2-4 revealed trailing digits (not followed by more digits).
+        if (preg_match('/(?:[xX*]\s?){4,}(\d{2,4})(?!\d)/', $flat, $m)) {
+            return $m[1];
+        }
+        // "card ending 1234" / "card no: ....1234"
+        if (preg_match('/card\s*(?:no\.?|number|ending(?:\s*in)?)?\s*[:#]?\s*(?:[xX*\d]{2,}\D)?(\d{4})(?!\d)/i', $flat, $m)) {
+            return $m[1];
+        }
+        return '';
+    }
+
     private function parseSbiTransactions(string $text, string $cardLastFour): array
     {
         $lines = preg_split('/\r\n|\n|\r/', $text) ?: [];
@@ -1781,7 +1931,7 @@ PY;
 
     private function isSupportedBank(string $bank): bool
     {
-        return in_array($bank, ['icici', 'sbi'], true);
+        return in_array($bank, ['icici', 'sbi', 'rbl'], true);
     }
 
     private function getOrCreateCreditCardAccount(int $userId, string $bank, string $cardLastFour): int
@@ -1799,18 +1949,32 @@ PY;
             return (int)$existing['id'];
         }
 
-        return (int)$this->db->insert(
-            "INSERT INTO bank_accounts
-             (user_id, bank, account_type, account_number, account_name, card_last_four, status)
-             VALUES (?, ?, 'credit_card', ?, ?, ?, 'active')",
-            [
-                $userId,
-                $bank,
-                'XXXX' . $cardLastFour,
-                strtoupper($bank) . ' Card',
-                $cardLastFour,
-            ]
-        );
+        $accountNumber = 'XXXX' . $cardLastFour;
+        try {
+            return (int)$this->db->insert(
+                "INSERT INTO bank_accounts
+                 (user_id, bank, account_type, account_number, account_name, card_last_four, status)
+                 VALUES (?, ?, 'credit_card', ?, ?, ?, 'active')",
+                [
+                    $userId,
+                    $bank,
+                    $accountNumber,
+                    strtoupper($bank) . ' Card',
+                    $cardLastFour,
+                ]
+            );
+        } catch (Exception $e) {
+            // unique_account collision (lost race, or a row exists this SELECT didn't
+            // match) — fall back to the existing account for this bank+number.
+            $row = $this->db->fetchOne(
+                "SELECT id FROM bank_accounts WHERE user_id = ? AND bank = ? AND account_number = ? LIMIT 1",
+                [$userId, $bank, $accountNumber]
+            );
+            if ($row && isset($row['id'])) {
+                return (int)$row['id'];
+            }
+            throw $e;
+        }
     }
 
     private function normalizeBank(string $bank): string
@@ -1887,6 +2051,11 @@ function handleStatementRoutes(string $uri, string $method): void
 
     if ($uri === '/statements/password-candidates' && $method === 'DELETE') {
         $controller->deletePasswordCandidate();
+        return;
+    }
+
+    if ($uri === '/statements/password-candidates/reveal' && $method === 'POST') {
+        $controller->revealPasswordCandidate();
         return;
     }
 

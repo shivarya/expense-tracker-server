@@ -49,7 +49,7 @@ class TransactionDuplicateDetector
         // card account is the same physical transaction mis-attributed (the reference
         // number differs only because the card last4 was wrong). Catch it by
         // (calendar date, amount, type, normalized raw description) instead of the ref.
-        $crossCardMatch = $this->findStatementLineDuplicate($userId, $normalized, $accountId, $excludeTransactionId);
+        $crossCardMatch = $this->findStatementLineDuplicate($userId, $normalized, $accountId, $excludeTransactionId, $sourceHint);
         if ($crossCardMatch !== null) {
             $match = $this->decorateMatchWithScore($crossCardMatch, 100, 'cross_card_statement_match');
             return $this->buildResult(true, true, 100, 'cross_card_statement_match', (int)$crossCardMatch['id'], [$match], false, false);
@@ -246,7 +246,7 @@ class TransactionDuplicateDetector
      * account is unknown (e.g. preview), we require an exact raw-line match to stay
      * conservative.
      */
-    private function findStatementLineDuplicate(int $userId, array $normalized, ?int $accountId, ?int $excludeTransactionId): ?array
+    private function findStatementLineDuplicate(int $userId, array $normalized, ?int $accountId, ?int $excludeTransactionId, string $sourceHint = ''): ?array
     {
         $incomingRaw = $this->normalizeText($normalized['raw_description']);
         $incomingMerchant = $this->normalizeText($normalized['merchant']);
@@ -288,9 +288,15 @@ class TransactionDuplicateDetector
         // merchant+description agreeing. With an unknown account, demand the raw line.
         $requireRawLineMatch = ($accountId === null);
 
+        $incomingIsStatement = in_array($sourceHint, ['statement_pdf', 'email'], true);
+
         foreach ($rows as $row) {
-            if ($accountId !== null && (int)$row['account_id'] === $accountId) {
-                continue; // same card — not a cross-card mis-attribution
+            $sameAccount = ($accountId !== null && (int)$row['account_id'] === $accountId);
+            $candIsSms = in_array(strtolower((string)($row['source'] ?? '')), ['sms', 'sms_webhook'], true);
+            // Same card is normally left to deterministic/AI scoring, EXCEPT a statement
+            // line re-importing a transaction already captured from SMS on the same card.
+            if ($sameAccount && !($incomingIsStatement && $candIsSms)) {
+                continue;
             }
 
             $candRaw = $this->normalizeText((string)($row['raw_description'] ?? ''));
@@ -299,11 +305,17 @@ class TransactionDuplicateDetector
             }
 
             if (!$requireRawLineMatch) {
-                $candMerchant = $this->normalizeText((string)($row['merchant'] ?? ''));
-                $candDescription = $this->normalizeText((string)($row['description'] ?? ''));
-                $merchantAgrees = $incomingMerchant !== '' && $incomingMerchant === $candMerchant;
-                $descriptionAgrees = $incomingDescription !== '' && $incomingDescription === $candDescription;
-                if ($merchantAgrees && $descriptionAgrees) {
+                // Same date+amount+type on another card with a recognisably similar
+                // merchant/description is the same physical transaction captured from a
+                // different source (e.g. a statement PDF vs the SMS). Fuzzy-match so
+                // "Lifestyle" vs "Life Style Internati" / "Swiggy" vs "Swiggy Instamart"
+                // are caught even though the text isn't identical.
+                $candMerchant = (string)($row['merchant'] ?? '');
+                $candDescription = (string)($row['description'] ?? '');
+                if ($this->textsLikelySame($normalized['merchant'], $candMerchant)
+                    || $this->textsLikelySame($normalized['description'], $candDescription)
+                    || $this->textsLikelySame($normalized['merchant'], $candDescription)
+                    || $this->textsLikelySame($normalized['description'], $candMerchant)) {
                     return $row;
                 }
             }
@@ -552,6 +564,33 @@ class TransactionDuplicateDetector
         $value = preg_replace('/\s+/', ' ', $value);
 
         return trim((string)$value);
+    }
+
+    /**
+     * Loose merchant/description equivalence for cross-source duplicate matching:
+     * identical after normalisation, one space-stripped string contains the other,
+     * or they share a significant (>=4 char) token.
+     */
+    private function textsLikelySame(string $a, string $b): bool
+    {
+        $a = $this->normalizeText($a);
+        $b = $this->normalizeText($b);
+        if ($a === '' || $b === '') {
+            return false;
+        }
+        if ($a === $b) {
+            return true;
+        }
+
+        $sa = str_replace(' ', '', $a);
+        $sb = str_replace(' ', '', $b);
+        if (strlen($sa) >= 4 && strlen($sb) >= 4 && (str_contains($sa, $sb) || str_contains($sb, $sa))) {
+            return true;
+        }
+
+        $ta = array_filter(explode(' ', $a), static fn($t) => strlen($t) >= 4);
+        $tb = array_filter(explode(' ', $b), static fn($t) => strlen($t) >= 4);
+        return !empty(array_intersect($ta, $tb));
     }
 
     private function buildAiTransactionPayload(array $normalized): array

@@ -107,6 +107,8 @@ exit(0);
 
 function processJob(Database $db, int $jobId, int $userId, $paramsRaw): void
 {
+    global $startTime; // the per-run wall-clock budget anchor (set in the main scope)
+
     // Atomically claim the job so overlapping cron runs don't double-process it.
     $claimed = $db->execute(
         "UPDATE sync_jobs SET status = 'processing', started_at = NOW() WHERE id = ? AND status = 'pending'",

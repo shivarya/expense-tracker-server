@@ -43,17 +43,47 @@ class GmailService
      */
     public static function connectFromAuthCode(int $userId, string $authCode): array
     {
-        $client = self::baseClient();
-        // Google Sign-In (native) one-time codes are exchanged with an empty
-        // redirect URI against the web client. If exchange ever 400s with
-        // redirect_uri_mismatch, try 'postmessage' here.
-        $client->setRedirectUri('');
+        $clientId = (string)(defined('GOOGLE_CLIENT_ID') ? GOOGLE_CLIENT_ID : '');
+        $clientSecret = (string)(defined('GOOGLE_CLIENT_SECRET') ? GOOGLE_CLIENT_SECRET : '');
+        if ($clientId === '' || $clientSecret === '') {
+            throw new Exception('Google OAuth is not configured (GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET).');
+        }
 
-        $token = $client->fetchAccessTokenWithAuthCode($authCode);
+        // Native Google Sign-In one-time codes must be exchanged with an EMPTY
+        // redirect_uri (per Google's offline-access docs). The google-api-php-client
+        // rejects an empty redirect_uri ("must be absolute") and 'postmessage'
+        // yields redirect_uri_mismatch — so POST the exchange directly.
+        $ch = curl_init('https://oauth2.googleapis.com/token');
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_POST, true);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, http_build_query([
+            'code' => $authCode,
+            'client_id' => $clientId,
+            'client_secret' => $clientSecret,
+            'grant_type' => 'authorization_code',
+            'redirect_uri' => '',
+        ]));
+        curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/x-www-form-urlencoded']);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 30);
+        $response = curl_exec($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $curlErr = curl_error($ch);
+        curl_close($ch);
 
-        if (!is_array($token) || isset($token['error'])) {
-            $detail = is_array($token) ? ($token['error_description'] ?? $token['error'] ?? 'unknown') : 'no response';
+        if ($response === false) {
+            throw new Exception('Google token exchange request failed: ' . $curlErr);
+        }
+
+        $token = json_decode($response, true);
+        if (!is_array($token) || isset($token['error']) || empty($token['access_token'])) {
+            error_log('GMAIL_EXCHANGE_DEBUG: ' . substr((string)$response, 0, 300));
+            $detail = is_array($token) ? ($token['error_description'] ?? $token['error'] ?? ('HTTP ' . $httpCode)) : ('HTTP ' . $httpCode);
             throw new Exception('Google token exchange failed: ' . $detail);
+        }
+
+        // The client lib computes access-token expiry from created + expires_in.
+        if (!isset($token['created'])) {
+            $token['created'] = time();
         }
 
         // A refresh_token is only returned on first consent / forced code. If
@@ -70,6 +100,7 @@ class GmailService
         // Best-effort: read the mailbox address for display.
         $email = null;
         try {
+            $client = self::baseClient();
             $client->setAccessToken($token);
             $gmail = new \Google\Service\Gmail($client);
             $email = $gmail->users->getProfile('me')->getEmailAddress();
