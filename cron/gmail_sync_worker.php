@@ -158,6 +158,8 @@ function processJob(Database $db, int $jobId, int $userId, $paramsRaw): void
 
             $srcSaved = 0;
             $srcProcessed = 0;
+            $srcFailed = 0;
+            $srcFailureReasons = [];
 
             foreach ($messageIds as $messageId) {
                 if (time() - $startTime > WORKER_BUDGET_SECONDS) {
@@ -176,6 +178,11 @@ function processJob(Database $db, int $jobId, int $userId, $paramsRaw): void
                     $totalSaved += $saved;
                     markSynced($db, $userId, $dataType, $cfg['source'], $syncId, ['saved' => $saved]);
                 } catch (Throwable $e) {
+                    $srcFailed++;
+                    $reason = trim($e->getMessage());
+                    if ($reason !== '' && !in_array($reason, $srcFailureReasons, true)) {
+                        $srcFailureReasons[] = $reason;
+                    }
                     error_log("[gmail-worker] message {$messageId} failed: " . $e->getMessage());
                 }
 
@@ -184,8 +191,19 @@ function processJob(Database $db, int $jobId, int $userId, $paramsRaw): void
                 updateProgress($db, $jobId, $totalProcessed, $totalSaved, $totalSkipped);
             }
 
-            logScrape($db, $userId, $dataType, $cfg['source'], 'success', $srcProcessed, $srcSaved, null);
-            $sourceSummaries[] = "{$cfg['source']}: {$srcSaved} saved / {$srcProcessed} emails";
+            // Surface *why* a message failed instead of only counting it — a
+            // decrypt/parse failure never calls markSynced(), so it's retried
+            // (and silently re-fails) on every future sync until this is visible
+            // somewhere a person will actually see it.
+            $summary = "{$cfg['source']}: {$srcSaved} saved / {$srcProcessed} emails";
+            if ($srcFailed > 0) {
+                $summary .= " ({$srcFailed} failed: " . implode(' | ', array_slice($srcFailureReasons, 0, 2)) . ")";
+            }
+            $sourceSummaries[] = $summary;
+
+            $scrapeStatus = $srcFailed === 0 ? 'success' : ($srcSaved > 0 ? 'partial' : 'failed');
+            $scrapeError = $srcFailed > 0 ? implode(' | ', array_slice($srcFailureReasons, 0, 5)) : null;
+            logScrape($db, $userId, $dataType, $cfg['source'], $scrapeStatus, $srcProcessed, $srcSaved, $scrapeError);
         }
 
         $db->execute(
