@@ -1964,16 +1964,20 @@ PY;
                 ]
             );
         } catch (Exception $e) {
-            // unique_account collision (lost race, or a row exists this SELECT didn't
-            // match) — fall back to the existing account for this bank+number.
+            // unique_account (user_id, bank, account_number) collision — either we lost
+            // a race against another credit-card insert, or account_number happens to
+            // match a DIFFERENT account_type (e.g. a savings account whose masked number
+            // coincidentally equals 'XXXX<last4>'). Must stay scoped to credit_card here:
+            // silently reusing a non-credit-card row would misfile transactions into the
+            // wrong account with no error at all.
             $row = $this->db->fetchOne(
-                "SELECT id FROM bank_accounts WHERE user_id = ? AND bank = ? AND account_number = ? LIMIT 1",
+                "SELECT id FROM bank_accounts WHERE user_id = ? AND bank = ? AND account_number = ? AND account_type = 'credit_card' LIMIT 1",
                 [$userId, $bank, $accountNumber]
             );
             if ($row && isset($row['id'])) {
                 return (int)$row['id'];
             }
-            throw $e;
+            throw new Exception("Cannot create credit card account: account_number '{$accountNumber}' is already used by a non-credit-card account for this bank. Original error: " . $e->getMessage());
         }
     }
 
