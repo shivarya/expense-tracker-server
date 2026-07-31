@@ -547,6 +547,52 @@ CREATE TABLE IF NOT EXISTS emis (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================
+-- GOALS TABLES (Personal financial goal tracking)
+-- ============================================
+-- Distinct from category_budgets (per-category monthly cap): a goal can
+-- span a single linked loan (debt_payoff), a free-standing savings pot with
+-- no backing table (savings), the whole portfolio (net_worth), or an
+-- aggregate cap across many categories (spend_cap). Progress is computed on
+-- read from existing data; goals never duplicates a balance, it only stores
+-- the target + assumptions. goal_contributions is a manual ledger, used
+-- only by goal_type='savings'.
+CREATE TABLE IF NOT EXISTS goals (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    user_id INT NOT NULL,
+    goal_type ENUM('debt_payoff', 'savings', 'net_worth', 'spend_cap') NOT NULL,
+    name VARCHAR(255) NOT NULL,
+    emi_id INT NULL COMMENT 'debt_payoff only; FK to emis.id',
+    target_amount DECIMAL(15, 2) NULL,
+    start_amount DECIMAL(15, 2) NOT NULL DEFAULT 0,
+    target_date DATE NULL,
+    assumed_annual_return_percent DECIMAL(5, 2) NULL COMMENT 'net_worth only; default 10.00 applied by controller if omitted',
+    assumed_monthly_contribution DECIMAL(15, 2) NULL COMMENT 'net_worth only; optional, defaults to 0',
+    linked_category_ids JSON NULL COMMENT 'spend_cap only; NULL = default discretionary set',
+    status ENUM('active', 'achieved', 'abandoned') NOT NULL DEFAULT 'active',
+    notes VARCHAR(500) NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (emi_id) REFERENCES emis(id) ON DELETE SET NULL,
+    INDEX idx_goals_user_type (user_id, goal_type),
+    INDEX idx_goals_user_status (user_id, status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS goal_contributions (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    goal_id INT NOT NULL,
+    user_id INT NOT NULL,
+    amount DECIMAL(15, 2) NOT NULL,
+    contributed_at DATE NOT NULL,
+    note VARCHAR(255) NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (goal_id) REFERENCES goals(id) ON DELETE CASCADE,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    INDEX idx_goal_contributions_goal (goal_id),
+    INDEX idx_goal_contributions_date (contributed_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================
 -- SCRAPE LOGS TABLE (Track scraping activities)
 -- ============================================
 CREATE TABLE IF NOT EXISTS scrape_logs (

@@ -116,6 +116,13 @@ try {
     exit;
   }
 
+  // Financial goals (debt payoff, savings target, net-worth target, monthly spend cap)
+  if (strpos($requestUri, '/goals') === 0) {
+    require_once __DIR__ . '/controllers/goalController.php';
+    handleGoalRoutes($requestUri, $requestMethod);
+    exit;
+  }
+
   // Trusted Contacts (own UPI IDs / names for self-transfer detection)
   if (strpos($requestUri, '/contacts') === 0) {
     require_once __DIR__ . '/controllers/trustedContactsController.php';
