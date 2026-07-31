@@ -180,10 +180,18 @@ function computeSpendCapProgress($db, $userId, $goal)
     array_merge([$userId], $categoryIds)
   );
 
+  // Use the same "now" the transaction filter above used (MySQL CURDATE()),
+  // not PHP's date() -- they can disagree by a day right around midnight IST
+  // if the DB server's timezone isn't Asia/Kolkata, which previously made
+  // days_elapsed/days_in_month describe a different month than current_amount
+  // actually summed, producing a nonsensical run-rate (e.g. a full month's
+  // spend divided by 1 "day elapsed" of the *new* month).
+  $today = $db->fetchOne("SELECT DAY(CURDATE()) as d, DAY(LAST_DAY(CURDATE())) as dim");
+  $daysInMonth = (int)$today['dim'];
+  $daysElapsed = (int)$today['d'];
+
   $current = (float)$sum['total'];
   $cap = (float)$goal['target_amount'];
-  $daysInMonth = (int)date('t');
-  $daysElapsed = (int)date('j');
   $runRate = $daysElapsed > 0 ? $current / $daysElapsed * $daysInMonth : $current;
 
   return [
