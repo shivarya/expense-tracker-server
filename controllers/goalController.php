@@ -12,6 +12,10 @@ function handleGoalRoutes($uri, $method)
     getGoals($userId);
   } elseif ($uri === '/goals' && $method === 'POST') {
     createGoal($userId);
+  } elseif ($uri === '/goals/plan' && $method === 'GET') {
+    getMonthlyPlan($userId);
+  } elseif ($uri === '/goals/plan' && $method === 'PUT') {
+    updateMonthlyPlanSettings($userId);
   } elseif (preg_match('#^/goals/(\d+)$#', $uri, $m) && $method === 'GET') {
     getGoal($userId, (int)$m[1]);
   } elseif (preg_match('#^/goals/(\d+)$#', $uri, $m) && $method === 'PUT') {
@@ -467,5 +471,138 @@ function deleteGoalContribution($userId, $goalId, $contributionId)
     }
   } catch (Exception $e) {
     Response::error('Failed to delete contribution: ' . $e->getMessage(), 500);
+  }
+}
+
+// ============================================
+// Monthly action plan -- "how much should I save/invest this month"
+// ============================================
+// Ties income + real EMI/goal data together into a concrete monthly split,
+// rather than leaving the user to infer it from separate progress numbers.
+
+function computeMonthlyPlan($db, int $userId): array
+{
+  $user = $db->fetchOne("SELECT monthly_income, monthly_other_commitments FROM users WHERE id = ?", [$userId]);
+  $monthlyIncome = $user['monthly_income'] !== null ? (float)$user['monthly_income'] : null;
+  $otherCommitments = (float)$user['monthly_other_commitments'];
+
+  // Active EMI burden is read live from emis, not hardcoded -- it drops on
+  // its own as short-term card-EMI conversions finish, without this plan
+  // going stale.
+  $emiRow = $db->fetchOne(
+    "SELECT COALESCE(SUM(emi_amount), 0) as total FROM emis WHERE user_id = ? AND status = 'active'",
+    [$userId]
+  );
+  $activeEmiTotal = (float)$emiRow['total'];
+
+  $goals = $db->fetchAll(
+    "SELECT * FROM goals WHERE user_id = ? AND status = 'active' ORDER BY target_date IS NULL, target_date ASC",
+    [$userId]
+  );
+  foreach ($goals as &$g) {
+    $g['linked_category_ids'] = $g['linked_category_ids'] ? json_decode($g['linked_category_ids'], true) : null;
+    $g['progress'] = computeGoalProgress($db, $userId, $g);
+  }
+  unset($g);
+
+  $spendCapTarget = 0.0;
+  foreach ($goals as $g) {
+    if ($g['goal_type'] === 'spend_cap') $spendCapTarget += (float)$g['target_amount'];
+  }
+
+  $totalCommitted = $activeEmiTotal + $otherCommitments + $spendCapTarget;
+  $availableSurplus = $monthlyIncome !== null ? $monthlyIncome - $totalCommitted : null;
+
+  $allocations = [];
+  $remaining = $availableSurplus !== null ? max(0, $availableSurplus) : 0.0;
+
+  // Priority 1: savings goals not yet hit, earliest deadline first (matches
+  // the sequencing already chosen when the goals were set up).
+  foreach ($goals as $g) {
+    if ($g['goal_type'] !== 'savings' || !empty($g['progress']['is_achieved'])) continue;
+    $need = (float)($g['progress']['required_monthly_contribution'] ?? 0);
+    if ($need <= 0) continue;
+    $alloc = min($remaining, $need);
+    $allocations[] = [
+      'goal_id' => (int)$g['id'],
+      'name' => $g['name'],
+      'goal_type' => 'savings',
+      'monthly_need' => round($need, 2),
+      'suggested_amount' => round($alloc, 2),
+      'note' => 'monthly contribution toward target',
+    ];
+    $remaining -= $alloc;
+  }
+
+  // Priority 2: debt_payoff goals not on track, earliest deadline first --
+  // spreads the lumpsum-needed figure evenly across the remaining months as
+  // a monthly prepayment-fund target.
+  foreach ($goals as $g) {
+    if ($g['goal_type'] !== 'debt_payoff') continue;
+    $p = $g['progress'];
+    $lumpsum = (float)($p['lumpsum_needed'] ?? 0);
+    if ($lumpsum <= 0 || !$g['target_date']) continue;
+    $monthsLeft = monthsBetweenDates($g['target_date']);
+    if ($monthsLeft <= 0) continue;
+    $need = $lumpsum / $monthsLeft;
+    $alloc = min($remaining, $need);
+    $allocations[] = [
+      'goal_id' => (int)$g['id'],
+      'name' => $g['name'],
+      'goal_type' => 'debt_payoff',
+      'monthly_need' => round($need, 2),
+      'suggested_amount' => round($alloc, 2),
+      'lumpsum_target' => round($lumpsum, 2),
+      'note' => 'set aside toward a one-time prepayment',
+    ];
+    $remaining -= $alloc;
+  }
+
+  return [
+    'is_configured' => $monthlyIncome !== null,
+    'monthly_income' => $monthlyIncome,
+    'monthly_other_commitments' => $otherCommitments,
+    'active_emi_total' => $activeEmiTotal,
+    'spend_cap_target' => $spendCapTarget,
+    'total_committed' => $totalCommitted,
+    'available_surplus' => $availableSurplus,
+    'allocations' => $allocations,
+    'leftover_to_buffer' => round($remaining, 2),
+  ];
+}
+
+function getMonthlyPlan($userId)
+{
+  try {
+    $db = getDB();
+    $plan = computeMonthlyPlan($db, $userId);
+    Response::success($plan, 'Monthly plan computed successfully');
+  } catch (Exception $e) {
+    Response::error('Failed to compute monthly plan: ' . $e->getMessage(), 500);
+  }
+}
+
+function updateMonthlyPlanSettings($userId)
+{
+  try {
+    $input = getJsonInput();
+    $db = getDB();
+
+    $db->execute(
+      "UPDATE users SET
+        monthly_income = COALESCE(?, monthly_income),
+        monthly_other_commitments = COALESCE(?, monthly_other_commitments)
+       WHERE id = ?",
+      [
+        $input['monthly_income'] ?? null,
+        $input['monthly_other_commitments'] ?? null,
+        $userId,
+      ]
+    );
+
+    $plan = computeMonthlyPlan($db, $userId);
+    Response::success($plan, 'Monthly plan settings updated successfully');
+  } catch (Exception $e) {
+    Response::error('Failed to update monthly plan settings: ' . $e->getMessage(), 500);
   }
 }

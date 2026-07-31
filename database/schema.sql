@@ -17,6 +17,8 @@ CREATE TABLE IF NOT EXISTS users (
     profile_picture TEXT,
     gmail_token JSON COMMENT 'Gmail OAuth access token and refresh token',
     gmail_authorized_at TIMESTAMP NULL COMMENT 'When user authorized Gmail access',
+    monthly_income DECIMAL(15, 2) NULL COMMENT 'Take-home monthly income; NULL = monthly plan not yet configured',
+    monthly_other_commitments DECIMAL(15, 2) NOT NULL DEFAULT 0 COMMENT 'Recurring fixed monthly costs not covered by emis or a spend_cap goal',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     INDEX idx_email (email),
