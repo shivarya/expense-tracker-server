@@ -570,6 +570,8 @@ CREATE TABLE IF NOT EXISTS goals (
     assumed_annual_return_percent DECIMAL(5, 2) NULL COMMENT 'net_worth only; default 10.00 applied by controller if omitted',
     assumed_monthly_contribution DECIMAL(15, 2) NULL COMMENT 'net_worth only; optional, defaults to 0',
     linked_category_ids JSON NULL COMMENT 'spend_cap only; NULL = default discretionary set',
+    linked_mutual_fund_ids JSON NULL COMMENT 'net_worth only; NULL = not scoped to specific funds',
+    linked_long_term_fund_ids JSON NULL COMMENT 'net_worth only; NULL = not scoped to specific long-term funds',
     status ENUM('active', 'achieved', 'abandoned') NOT NULL DEFAULT 'active',
     notes VARCHAR(500) NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,

@@ -127,10 +127,46 @@ function computeSavingsProgress($db, $userId, $goal)
   ];
 }
 
+// Sums only the specifically-linked mutual_funds / long_term_funds rows
+// instead of the whole portfolio -- for purpose-scoped goals (e.g. a child's
+// corpus made of SSY + a couple of growth funds, not retirement EPF/NPS/PPF
+// or debt/gold funds held for other reasons). Both id lists are validated
+// against user_id so a goal can never read another user's holdings.
+function getScopedAssetTotal($db, int $userId, ?array $mutualFundIds, ?array $longTermFundIds): float
+{
+  $total = 0.0;
+  if (!empty($mutualFundIds)) {
+    $placeholders = implode(',', array_fill(0, count($mutualFundIds), '?'));
+    $row = $db->fetchOne(
+      "SELECT COALESCE(SUM(current_value), 0) as total FROM mutual_funds WHERE user_id = ? AND id IN ($placeholders)",
+      array_merge([$userId], $mutualFundIds)
+    );
+    $total += (float)$row['total'];
+  }
+  if (!empty($longTermFundIds)) {
+    $placeholders = implode(',', array_fill(0, count($longTermFundIds), '?'));
+    $row = $db->fetchOne(
+      "SELECT COALESCE(SUM(current_value), 0) as total FROM long_term_funds WHERE user_id = ? AND id IN ($placeholders)",
+      array_merge([$userId], $longTermFundIds)
+    );
+    $total += (float)$row['total'];
+  }
+  return $total;
+}
+
 function computeNetWorthProgress($db, $userId, $goal)
 {
-  $totals = getPortfolioTotals($db, $userId);
-  $current = (float)$totals['totalValue'];
+  $mfIds = $goal['linked_mutual_fund_ids'] ?? null;
+  $ltfIds = $goal['linked_long_term_fund_ids'] ?? null;
+  $isScoped = !empty($mfIds) || !empty($ltfIds);
+
+  if ($isScoped) {
+    $current = getScopedAssetTotal($db, $userId, $mfIds, $ltfIds);
+  } else {
+    $totals = getPortfolioTotals($db, $userId);
+    $current = (float)$totals['totalValue'];
+  }
+
   $target = (float)$goal['target_amount'];
   $progressPercent = $target > 0 ? max(0, min(1, $current / $target)) : 0;
   $monthsRemaining = $goal['target_date'] ? monthsBetweenDates($goal['target_date']) : 0;
@@ -139,10 +175,11 @@ function computeNetWorthProgress($db, $userId, $goal)
   $pmt = $goal['assumed_monthly_contribution'] !== null ? (float)$goal['assumed_monthly_contribution'] : 0.0;
   $projected = calculateFutureValue($current, $pmt, $rate, $monthsRemaining);
 
-  return [
+  $result = [
     'progress_percent' => $progressPercent,
     'current_amount' => $current,
     'target_amount' => $target,
+    'is_scoped' => $isScoped,
     'months_remaining' => $monthsRemaining,
     'assumed_annual_return_percent' => $rate,
     'assumed_monthly_contribution' => $pmt,
@@ -150,6 +187,17 @@ function computeNetWorthProgress($db, $userId, $goal)
     'is_on_track' => $projected >= $target,
     'is_achieved' => $current >= $target,
   ];
+
+  if ($monthsRemaining > 0) {
+    // Total level monthly investment needed to hit target exactly, and how
+    // much of that is ON TOP OF whatever's already assumed to be going in --
+    // this is the "invest more" suggestion, not just a projection.
+    $requiredTotal = calculateRequiredMonthlyContribution($current, $target, $rate, $monthsRemaining);
+    $result['required_monthly_contribution'] = round($requiredTotal, 2);
+    $result['additional_monthly_contribution_needed'] = round(max(0, $requiredTotal - $pmt), 2);
+  }
+
+  return $result;
 }
 
 function computeSpendCapProgress($db, $userId, $goal)
@@ -220,6 +268,8 @@ function getGoals($userId)
 
     foreach ($goals as &$goal) {
       $goal['linked_category_ids'] = $goal['linked_category_ids'] ? json_decode($goal['linked_category_ids'], true) : null;
+      $goal['linked_mutual_fund_ids'] = $goal['linked_mutual_fund_ids'] ? json_decode($goal['linked_mutual_fund_ids'], true) : null;
+      $goal['linked_long_term_fund_ids'] = $goal['linked_long_term_fund_ids'] ? json_decode($goal['linked_long_term_fund_ids'], true) : null;
       $goal['progress'] = computeGoalProgress($db, $userId, $goal);
       maybeMarkAchieved($db, $goal);
     }
@@ -240,6 +290,8 @@ function getGoal($userId, $goalId)
     }
 
     $goal['linked_category_ids'] = $goal['linked_category_ids'] ? json_decode($goal['linked_category_ids'], true) : null;
+    $goal['linked_mutual_fund_ids'] = $goal['linked_mutual_fund_ids'] ? json_decode($goal['linked_mutual_fund_ids'], true) : null;
+    $goal['linked_long_term_fund_ids'] = $goal['linked_long_term_fund_ids'] ? json_decode($goal['linked_long_term_fund_ids'], true) : null;
     $goal['progress'] = computeGoalProgress($db, $userId, $goal);
     maybeMarkAchieved($db, $goal);
 
@@ -367,6 +419,47 @@ function updateGoal($userId, $goalId)
     // goal_type is intentionally not editable -- changing it would invalidate
     // whichever type-specific fields (emi_id vs target_amount vs
     // linked_category_ids) were already set. Create a new goal instead.
+
+    // net_worth only: re-scope which specific mutual_funds/long_term_funds
+    // rows this goal tracks. Validated against user_id so a goal can never
+    // be pointed at another user's holdings. Sending an empty array clears
+    // the scoping back to whole-portfolio tracking.
+    $linkedMfIdsJson = null;
+    $linkedLtfIdsJson = null;
+    if ($goal['goal_type'] === 'net_worth') {
+      if (array_key_exists('linked_mutual_fund_ids', $input)) {
+        $ids = is_array($input['linked_mutual_fund_ids']) ? array_map('intval', $input['linked_mutual_fund_ids']) : [];
+        if (!empty($ids)) {
+          $valid = $db->fetchAll(
+            "SELECT id FROM mutual_funds WHERE id IN (" . implode(',', array_fill(0, count($ids), '?')) . ") AND user_id = ?",
+            array_merge($ids, [$userId])
+          );
+          if (count($valid) !== count($ids)) {
+            Response::error('Validation failed', 422, ['linked_mutual_fund_ids' => 'One or more fund ids are invalid for this user']);
+          }
+        }
+        $linkedMfIdsJson = json_encode($ids);
+      } else {
+        $linkedMfIdsJson = $goal['linked_mutual_fund_ids'];
+      }
+
+      if (array_key_exists('linked_long_term_fund_ids', $input)) {
+        $ids = is_array($input['linked_long_term_fund_ids']) ? array_map('intval', $input['linked_long_term_fund_ids']) : [];
+        if (!empty($ids)) {
+          $valid = $db->fetchAll(
+            "SELECT id FROM long_term_funds WHERE id IN (" . implode(',', array_fill(0, count($ids), '?')) . ") AND user_id = ?",
+            array_merge($ids, [$userId])
+          );
+          if (count($valid) !== count($ids)) {
+            Response::error('Validation failed', 422, ['linked_long_term_fund_ids' => 'One or more fund ids are invalid for this user']);
+          }
+        }
+        $linkedLtfIdsJson = json_encode($ids);
+      } else {
+        $linkedLtfIdsJson = $goal['linked_long_term_fund_ids'];
+      }
+    }
+
     $db->execute(
       "UPDATE goals SET
         name = ?,
@@ -375,6 +468,8 @@ function updateGoal($userId, $goalId)
         target_date = ?,
         assumed_annual_return_percent = COALESCE(?, assumed_annual_return_percent),
         assumed_monthly_contribution = COALESCE(?, assumed_monthly_contribution),
+        linked_mutual_fund_ids = ?,
+        linked_long_term_fund_ids = ?,
         status = COALESCE(?, status),
         notes = ?
        WHERE id = ? AND user_id = ?",
@@ -385,6 +480,8 @@ function updateGoal($userId, $goalId)
         array_key_exists('target_date', $input) ? $input['target_date'] : $goal['target_date'],
         $input['assumed_annual_return_percent'] ?? null,
         $input['assumed_monthly_contribution'] ?? null,
+        $linkedMfIdsJson,
+        $linkedLtfIdsJson,
         $input['status'] ?? null,
         array_key_exists('notes', $input) ? $input['notes'] : $goal['notes'],
         $goalId,
@@ -516,6 +613,8 @@ function computeMonthlyPlan($db, int $userId): array
   );
   foreach ($goals as &$g) {
     $g['linked_category_ids'] = $g['linked_category_ids'] ? json_decode($g['linked_category_ids'], true) : null;
+    $g['linked_mutual_fund_ids'] = $g['linked_mutual_fund_ids'] ? json_decode($g['linked_mutual_fund_ids'], true) : null;
+    $g['linked_long_term_fund_ids'] = $g['linked_long_term_fund_ids'] ? json_decode($g['linked_long_term_fund_ids'], true) : null;
     $g['progress'] = computeGoalProgress($db, $userId, $g);
   }
   unset($g);

@@ -27,3 +27,20 @@ function calculateFutureValue(float $presentValue, float $monthlyContribution, f
   $growth = pow(1 + $r, $months);
   return $presentValue * $growth + $monthlyContribution * (($growth - 1) / $r);
 }
+
+// Inverse of calculateFutureValue -- solves for the level monthly
+// contribution (PMT) needed so the present value grows to $targetFutureValue
+// by $months from now at $annualRatePercent:
+//   PMT = (FV - PV.(1+r)^t) . r / ((1+r)^t - 1)
+// Returns 0 (not negative) if the present value alone is already projected
+// to clear the target -- caller should treat 0 as "on track without extra
+// investment", not "nothing to invest at all".
+function calculateRequiredMonthlyContribution(float $presentValue, float $targetFutureValue, float $annualRatePercent, int $months): float
+{
+  if ($months <= 0) return max(0, $targetFutureValue - $presentValue);
+  $r = $annualRatePercent / 12 / 100;
+  if ($r == 0.0) return max(0, ($targetFutureValue - $presentValue) / $months);
+  $growth = pow(1 + $r, $months);
+  $pmt = ($targetFutureValue - $presentValue * $growth) * $r / ($growth - 1);
+  return max(0, $pmt);
+}
