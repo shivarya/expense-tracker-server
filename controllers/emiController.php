@@ -111,27 +111,39 @@ function updateEmi($userId, $emiId)
     $input = getJsonInput();
     $db = getDB();
 
-    $sql = "UPDATE emis SET 
+    // Check existence separately from the UPDATE's affected-row count: PDO's
+    // rowCount() (no MYSQL_ATTR_FOUND_ROWS set on this connection) only counts
+    // rows whose values actually changed, not rows matched by WHERE — so a
+    // no-op update (new values identical to current ones, e.g. an idempotent
+    // re-sync) would otherwise be misreported as "not found".
+    $exists = $db->fetchOne("SELECT id FROM emis WHERE id = ? AND user_id = ?", [$emiId, $userId]);
+    if (!$exists) {
+      Response::error('EMI not found', 404);
+    }
+
+    // interest_rate/emi_amount are optional — only relevant for variable-rate
+    // loans where a later statement reflects a rate reset. COALESCE keeps
+    // existing callers (which never send these) as no-ops.
+    $sql = "UPDATE emis SET
               remaining_months = ?, remaining_principal = ?, last_payment_date = ?,
-              next_payment_date = ?, total_paid = ?, status = ?
+              next_payment_date = ?, total_paid = ?, status = ?,
+              interest_rate = COALESCE(?, interest_rate), emi_amount = COALESCE(?, emi_amount)
             WHERE id = ? AND user_id = ?";
-    
-    $affected = $db->execute($sql, [
+
+    $db->execute($sql, [
       $input['remaining_months'],
       $input['remaining_principal'],
       $input['last_payment_date'] ?? null,
       $input['next_payment_date'],
       $input['total_paid'] ?? 0,
       $input['status'] ?? 'active',
+      $input['interest_rate'] ?? null,
+      $input['emi_amount'] ?? null,
       $emiId,
       $userId
     ]);
 
-    if ($affected > 0) {
-      Response::success(['id' => $emiId], 'EMI updated successfully');
-    } else {
-      Response::error('EMI not found', 404);
-    }
+    Response::success(['id' => $emiId], 'EMI updated successfully');
   } catch (Exception $e) {
     Response::error('Failed to update EMI: ' . $e->getMessage(), 500);
   }

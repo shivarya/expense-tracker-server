@@ -63,9 +63,12 @@ function getDashboardSummary($userId)
 
     // Get upcoming EMIs (next 30 days)
     $upcomingEmis = $db->fetchAll(
-      "SELECT e.id, e.loan_name, e.emi_amount, e.next_payment_date, e.bank, e.remaining_months
+      "SELECT e.id, e.loan_name, e.loan_type, e.emi_amount, e.next_payment_date, e.bank,
+              e.remaining_months, e.tenure_months,
+              (e.tenure_months - e.remaining_months) AS paid_installments,
+              e.tenure_months AS total_installments
        FROM emis e
-       WHERE e.user_id = ? AND e.status = 'active' 
+       WHERE e.user_id = ? AND e.status = 'active'
          AND e.next_payment_date <= DATE_ADD(CURDATE(), INTERVAL 30 DAY)
        ORDER BY e.next_payment_date ASC
        LIMIT 5",
