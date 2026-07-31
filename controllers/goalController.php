@@ -488,12 +488,19 @@ function computeMonthlyPlan($db, int $userId): array
 
   // Active EMI burden is read live from emis, not hardcoded -- it drops on
   // its own as short-term card-EMI conversions finish, without this plan
-  // going stale.
+  // going stale. Split out home/reno loans (permanent) from everything
+  // else (short-term card-EMI conversions) so a tight month is explained,
+  // not just reported as a flat number.
   $emiRow = $db->fetchOne(
-    "SELECT COALESCE(SUM(emi_amount), 0) as total FROM emis WHERE user_id = ? AND status = 'active'",
+    "SELECT
+      COALESCE(SUM(emi_amount), 0) as total,
+      COALESCE(SUM(CASE WHEN loan_type = 'home' THEN emi_amount ELSE 0 END), 0) as housing_total
+     FROM emis WHERE user_id = ? AND status = 'active'",
     [$userId]
   );
   $activeEmiTotal = (float)$emiRow['total'];
+  $housingLoanEmiTotal = (float)$emiRow['housing_total'];
+  $shortTermEmiTotal = $activeEmiTotal - $housingLoanEmiTotal;
 
   $goals = $db->fetchAll(
     "SELECT * FROM goals WHERE user_id = ? AND status = 'active' ORDER BY target_date IS NULL, target_date ASC",
@@ -563,6 +570,8 @@ function computeMonthlyPlan($db, int $userId): array
     'monthly_income' => $monthlyIncome,
     'monthly_other_commitments' => $otherCommitments,
     'active_emi_total' => $activeEmiTotal,
+    'housing_loan_emi_total' => $housingLoanEmiTotal,
+    'short_term_emi_total' => $shortTermEmiTotal,
     'spend_cap_target' => $spendCapTarget,
     'total_committed' => $totalCommitted,
     'available_surplus' => $availableSurplus,
