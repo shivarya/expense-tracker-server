@@ -152,11 +152,18 @@ function getWidgetSummary($userId)
   }
 }
 
+// NOTE: `SHOW COLUMNS ... LIKE :column` with a bound parameter throws a
+// syntax error on this MariaDB version ("SHOW ... LIKE" doesn't accept
+// placeholders) -- the try/catch here silently swallowed that, so this
+// always returned false and the widget's totals never actually excluded
+// soft-deleted transactions. information_schema supports real bound params.
 function widgetDetectColumn(PDO $db, $table, $column)
 {
   try {
-    $stmt = $db->prepare("SHOW COLUMNS FROM {$table} LIKE :column");
-    $stmt->execute([':column' => $column]);
+    $stmt = $db->prepare(
+      "SELECT 1 FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = :table AND column_name = :column"
+    );
+    $stmt->execute([':table' => $table, ':column' => $column]);
     return (bool) $stmt->fetch(PDO::FETCH_ASSOC);
   } catch (Exception $e) {
     return false;

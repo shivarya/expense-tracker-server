@@ -311,10 +311,18 @@ class ExpenseAnalyticsController {
         }
     }
 
+    // NOTE: `SHOW COLUMNS ... LIKE :column` / `SHOW TABLES LIKE :table_name`
+    // with a bound parameter throws a syntax error on this MariaDB version
+    // ("SHOW ... LIKE" doesn't accept placeholders) -- the try/catch here
+    // silently swallowed that, so hasDeletedAt/hasSplits/hasRefundAllocations
+    // were ALWAYS false and this endpoint never actually filtered soft-deleted
+    // transactions. information_schema queries support real bound params.
     private function tableHasColumn(PDO $db, string $table, string $column): bool {
         try {
-            $stmt = $db->prepare("SHOW COLUMNS FROM {$table} LIKE :column");
-            $stmt->execute([':column' => $column]);
+            $stmt = $db->prepare(
+                "SELECT 1 FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = :table AND column_name = :column"
+            );
+            $stmt->execute([':table' => $table, ':column' => $column]);
             return (bool)$stmt->fetch(PDO::FETCH_ASSOC);
         } catch (Exception $e) {
             return false;
@@ -323,7 +331,9 @@ class ExpenseAnalyticsController {
 
     private function tableExists(PDO $db, string $table): bool {
         try {
-            $stmt = $db->prepare('SHOW TABLES LIKE :table_name');
+            $stmt = $db->prepare(
+                "SELECT 1 FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = :table_name"
+            );
             $stmt->execute([':table_name' => $table]);
             return (bool)$stmt->fetch(PDO::FETCH_ASSOC);
         } catch (Exception $e) {
