@@ -213,6 +213,10 @@ class SMSParserController {
         $savedDebitAmount = 0.0;
         $savedCreditAmount = 0.0;
         $processedCount = 0;
+        $createdTransactions = [];
+        // category_id -> name, so the notification title costs one query per
+        // distinct category rather than one per transaction.
+        $categoryNameCache = [];
 
         if ($jobId !== null) {
             $this->updateSyncJobProgress(
@@ -280,7 +284,7 @@ class SMSParserController {
                 ";
 
                 try {
-                    $this->db->execute($insertQuery, [
+                    $newId = $this->db->insert($insertQuery, [
                         $userId,
                         $accountId,
                         $categoryId,
@@ -308,6 +312,25 @@ class SMSParserController {
                         $savedDebitCount++;
                         $savedDebitAmount += $txnAmount;
                     }
+
+                    if ($categoryId !== null && !array_key_exists((int)$categoryId, $categoryNameCache)) {
+                        $categoryRow = $this->db->fetchOne(
+                            'SELECT name FROM categories WHERE id = ?',
+                            [(int)$categoryId]
+                        );
+                        $categoryNameCache[(int)$categoryId] = $categoryRow['name'] ?? null;
+                    }
+
+                    $createdTransactions[] = [
+                        'id' => (int)$newId,
+                        'category_id' => $categoryId,
+                        'category_name' => $categoryId !== null ? ($categoryNameCache[(int)$categoryId] ?? null) : null,
+                        'merchant' => $transaction['merchant'] ?? null,
+                        'amount' => $txnAmount,
+                        'transaction_type' => $transaction['transaction_type'],
+                        'description' => $transaction['description'] ?? 'SMS Transaction',
+                        'transaction_date' => $transaction['date'] ?? date('Y-m-d H:i:s'),
+                    ];
                 } catch (Exception $e) {
                     $failedSaveCount++;
                     error_log("Failed to save transaction: " . $e->getMessage());
@@ -386,7 +409,7 @@ class SMSParserController {
             'saved_credit_count' => $savedCreditCount,
             'saved_debit_amount' => $savedDebitAmount,
             'saved_credit_amount' => $savedCreditAmount,
-            'transactions' => $transactions,
+            'transactions' => $createdTransactions,
         ];
     }
 
@@ -394,9 +417,8 @@ class SMSParserController {
     {
         $asyncRequested = filter_var($input['async'] ?? false, FILTER_VALIDATE_BOOLEAN);
         $mode = strtolower((string)($input['mode'] ?? 'manual'));
-        $forceLookbackDays = (int)($input['force_lookback_days'] ?? 0);
 
-        return $asyncRequested && $mode === 'manual' && $forceLookbackDays >= 30;
+        return $asyncRequested && $mode === 'manual';
     }
 
     private function createSmsSyncJob(int $userId, int $totalSms): int
