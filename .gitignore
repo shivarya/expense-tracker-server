@@ -7,6 +7,7 @@ composer.lock
 .env
 .env.local
 .env.production
+.env.bak*
 
 # Logs
 *.log
