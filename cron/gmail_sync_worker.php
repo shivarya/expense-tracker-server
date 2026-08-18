@@ -57,14 +57,21 @@ const SOURCES = [
         'source' => 'credit_cards',
         // Only SBI/ICICI statement PDFs are parseable today (parseTransactionsByBank);
         // others are fetched but will log a parser error until their parsers land.
+        // cbssbi.cas@alerts.sbi.bank.in is a different format entirely (SBI's
+        // consolidated *savings-account* e-statement, not a credit-card
+        // statement) and is routed separately in dispatchMessage() below.
         'senders' => [
             'statements@hdfcbank.net', 'statements@rbl.bank.in',
             'credit_cards@icicibank.com', 'credit_cards@icici.bank.in',
             'creditcardservices@sbicard.com', 'statements@axisbank.com',
+            'cbssbi.cas@alerts.sbi.bank.in',
         ],
         'implemented' => true, // CC statements (reuses StatementController::ingestCreditCardPdf)
     ],
 ];
+
+/** Sender for SBI's consolidated account-statement (CAS) email — a savings-account layout, not a CC statement. */
+const SBI_CAS_SENDER = 'cbssbi.cas@alerts.sbi.bank.in';
 
 // Map a credit-card statement sender address to a bank enum value.
 const CC_SENDER_BANK = [
@@ -242,7 +249,12 @@ function dispatchMessage(
         case 'long_term':
             return processNpsMessage($db, $client, $sc, $ai, $userId, $messageId, $passwords);
         case 'transactions':
-            return processCreditCardMessage($db, $client, $sc, $ai, $userId, $messageId, $passwords);
+            $message = GmailFetcher::getMessage($client, $messageId);
+            $from = GmailFetcher::getHeader($message, 'From');
+            if (stripos($from, SBI_CAS_SENDER) !== false) {
+                return processSbiCasMessage($client, $sc, $userId, $messageId, $message, $passwords);
+            }
+            return processCreditCardMessage($db, $client, $sc, $ai, $userId, $messageId, $message, $passwords);
         default:
             return 0;
     }
@@ -397,9 +409,9 @@ function processCreditCardMessage(
     AzureOpenAI $ai,
     int $userId,
     string $messageId,
+    \Google\Service\Gmail\Message $message,
     array $passwords
 ): int {
-    $message = GmailFetcher::getMessage($client, $messageId);
     $from = GmailFetcher::getHeader($message, 'From');
     $bank = bankFromSender($from);
     if ($bank === null) {
@@ -417,6 +429,34 @@ function processCreditCardMessage(
         file_put_contents($tmp, $att['bytes']);
         try {
             $result = $sc->ingestCreditCardPdf($userId, $bank, '', $tmp, $att['filename'], $passwords);
+            $saved += (int)($result['saved_transactions'] ?? 0);
+        } finally {
+            @unlink($tmp);
+        }
+    }
+    return $saved;
+}
+
+/** SBI consolidated account-statement (CAS) email → savings-account transactions. */
+function processSbiCasMessage(
+    \Google\Client $client,
+    StatementController $sc,
+    int $userId,
+    string $messageId,
+    \Google\Service\Gmail\Message $message,
+    array $passwords
+): int {
+    $attachments = GmailFetcher::downloadPdfAttachments($client, $messageId, $message);
+    if (empty($attachments)) {
+        return 0;
+    }
+
+    $saved = 0;
+    foreach ($attachments as $att) {
+        $tmp = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'gmail_sbi_cas_' . uniqid() . '.pdf';
+        file_put_contents($tmp, $att['bytes']);
+        try {
+            $result = $sc->ingestSbiCasStatement($userId, $tmp, $att['filename'], $passwords);
             $saved += (int)($result['saved_transactions'] ?? 0);
         } finally {
             @unlink($tmp);

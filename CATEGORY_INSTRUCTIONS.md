@@ -280,18 +280,91 @@ Runtime matching uses DB table `category_learning_rules` (per user) and this mar
 <!-- AUTO_LEARNED_MAPPINGS_START -->
 | User | Pattern | Category ID | Category Name | Uses | Last Updated |
 |---|---|---:|---|---:|---|
+| 1 | shree | 55 | Donation | 1 | 2026-08-17 08:16:35 |
+| 1 | swiggy | 1 | Food & Dining | 1 | 2026-08-17 06:17:33 |
+| 1 | nirmal behera | 52 | Household Help | 1 | 2026-08-17 02:30:36 |
+| 1 | saumya blinkit | 9 | Groceries | 1 | 2026-08-15 22:19:36 |
+| 1 | amazon pay wall | 3 | Shopping | 1 | 2026-08-15 09:34:25 |
+| 1 | amazon pay | 8 | Travel | 2 | 2026-08-15 09:31:05 |
+| 1 | cred | 5 | Bills & Utilities | 3 | 2026-08-15 01:17:15 |
+| 1 | green | 2 | Transportation | 1 | 2026-08-15 00:51:23 |
+| 1 | booksetg | 7 | Education | 1 | 2026-08-14 09:02:33 |
+| 1 | subram | 2 | Transportation | 1 | 2026-08-14 08:14:24 |
+| 1 | altaf pa sha | 2 | Transportation | 1 | 2026-08-14 05:59:19 |
+| 1 | kalabair | 2 | Transportation | 1 | 2026-08-14 04:36:41 |
+| 1 | electricity bill | 2 | Transportation | 1 | 2026-08-14 04:36:32 |
+| 1 | upi credit from to hdfc | 17 | Transfer | 5 | 2026-08-13 22:27:01 |
+| 1 | urbanclap technologies | 12 | Personal Care | 1 | 2026-08-13 10:42:26 |
+| 1 | urbancla | 56 | Home Improvement | 1 | 2026-08-13 10:42:01 |
+| 1 | ramdev | 6 | Healthcare | 1 | 2026-08-13 10:17:47 |
+| 1 | venugopa | 9 | Groceries | 1 | 2026-08-11 20:51:15 |
+| 1 | snabbit | 52 | Household Help | 1 | 2026-08-11 10:12:09 |
+| 1 | paneer | 9 | Groceries | 2 | 2026-08-11 10:12:05 |
+| 1 | saumya mishra | 6 | Healthcare | 1 | 2026-08-11 08:43:06 |
+| 1 | ashok kumar sahu | 9 | Groceries | 1 | 2026-08-11 07:05:42 |
+| 1 | pay dtdc | 15 | Refund | 1 | 2026-08-10 00:53:03 |
+| 1 | rbl bank credit | 17 | Transfer | 2 | 2026-08-10 00:53:02 |
+| 1 | zz notify check | 17 | Transfer | 1 | 2026-08-09 23:31:15 |
+| 1 | suraj singh | 53 | Kids Activities | 1 | 2026-08-09 21:00:01 |
+| 1 | kashif | 53 | Kids Activities | 1 | 2026-08-09 06:28:35 |
+| 1 | anand | 1 | Food & Dining | 2 | 2026-08-09 03:20:00 |
+| 1 | mr anand kumar | 2 | Transportation | 1 | 2026-08-09 03:04:20 |
+| 1 | amazon pay indi | 3 | Shopping | 1 | 2026-08-08 23:39:00 |
+| 1 | nagaraja | 5 | Bills & Utilities | 1 | 2026-08-08 10:37:27 |
+| 1 | zomato online | 1 | Food & Dining | 2 | 2026-08-08 10:12:34 |
+| 1 | upi credit received from | 17 | Transfer | 1 | 2026-08-08 10:12:15 |
+| 1 | harivaracom | 55 | Donation | 1 | 2026-08-07 23:27:56 |
+| 1 | hungerbo | 1 | Food & Dining | 1 | 2026-08-07 23:27:40 |
+| 1 | pwc ubcp upi | 56 | Home Improvement | 1 | 2026-08-07 23:27:20 |
+| 1 | rajashekar | 52 | Household Help | 1 | 2026-08-06 21:32:23 |
+| 1 | banda | 9 | Groceries | 1 | 2026-08-06 21:32:21 |
+| 1 | mayura | 1 | Food & Dining | 1 | 2026-08-03 08:42:52 |
+| 1 | kanti | 1 | Food & Dining | 1 | 2026-08-03 07:58:57 |
+| 1 | gramiq | 9 | Groceries | 1 | 2026-08-03 07:58:57 |
+| 1 | hp pay | 5 | Bills & Utilities | 1 | 2026-08-03 07:58:57 |
+| 1 | murugan | 53 | Kids Activities | 1 | 2026-08-03 07:58:57 |
+| 1 | upi transfer received from to hdfc | 13 | Investments | 1 | 2026-08-01 20:06:50 |
+| 1 | gowramma | 53 | Kids Activities | 1 | 2026-08-01 20:06:38 |
+| 1 | smart | 3 | Shopping | 1 | 2026-08-01 20:06:20 |
+| 1 | upi transfer received from | 17 | Transfer | 1 | 2026-08-01 20:02:40 |
+| 1 | ashok | 3 | Shopping | 1 | 2026-08-01 05:02:10 |
+| 1 | idfc first bank | 15 | Refund | 1 | 2026-08-01 05:02:08 |
+| 1 | westside | 3 | Shopping | 1 | 2026-07-31 11:33:06 |
+| 1 | playstation | 4 | Entertainment | 1 | 2026-07-31 11:33:05 |
+| 1 | deloitte support services pvt ltd | 14 | Salary | 1 | 2026-07-31 03:27:10 |
+| 1 | icici fastag | 2 | Transportation | 1 | 2026-07-30 23:41:34 |
+| 1 | bharat bill payment system | 17 | Transfer | 1 | 2026-07-30 23:41:15 |
+| 1 | dipak nishad | 56 | Home Improvement | 1 | 2026-07-28 23:10:46 |
+| 1 | kumara | 2 | Transportation | 1 | 2026-07-28 23:10:36 |
+| 1 | raja kumar sahu | 9 | Groceries | 1 | 2026-07-28 23:10:15 |
+| 1 | laxman sial | 52 | Household Help | 1 | 2026-07-28 23:10:15 |
+| 1 | beneficiary via neft | 13 | Investments | 1 | 2026-07-08 22:11:58 |
+| 1 | amazon pay in | 12 | Personal Care | 1 | 2026-07-04 00:15:54 |
+| 1 | ente | 2 | Transportation | 1 | 2026-07-04 00:15:52 |
+| 1 | piku sukanya | 13 | Investments | 1 | 2026-07-03 00:21:23 |
+| 1 | amazon india cy | 9 | Groceries | 1 | 2026-07-01 06:28:23 |
+| 1 | jyoti mal | 52 | Household Help | 1 | 2026-07-01 06:28:16 |
+| 1 | makemytrip | 8 | Travel | 2 | 2026-07-01 04:50:50 |
+| 1 | shrwan | 1 | Food & Dining | 1 | 2026-07-01 04:50:42 |
+| 1 | pavithra | 1 | Food & Dining | 2 | 2026-07-01 04:50:38 |
+| 1 | vijiyamm | 9 | Groceries | 1 | 2026-07-01 04:50:36 |
+| 1 | sathya | 6 | Healthcare | 3 | 2026-07-01 04:50:33 |
+| 1 | credpaya | 6 | Healthcare | 2 | 2026-07-01 04:50:33 |
+| 1 | ashish tripathi | 1 | Food & Dining | 1 | 2026-06-30 06:05:45 |
+| 1 | shradha | 1 | Food & Dining | 1 | 2026-06-24 05:55:28 |
+| 1 | kushal tripathi | 55 | Donation | 1 | 2026-05-29 21:44:24 |
+| 1 | igst tax | 8 | Travel | 1 | 2026-05-26 03:50:44 |
+| 1 | dharmaraj | 2 | Transportation | 1 | 2026-03-29 17:50:01 |
+| 1 | nagalakshmi | 55 | Donation | 1 | 2026-03-29 17:46:42 |
+| 1 | mr shankar | 2 | Transportation | 1 | 2026-03-27 18:22:05 |
+| 1 | nagamalleswari gunda | 2 | Transportation | 1 | 2026-03-27 18:19:44 |
+| 1 | jyothi | 2 | Transportation | 2 | 2026-03-27 18:19:31 |
+| 1 | upi urbancla | 12 | Personal Care | 1 | 2026-03-26 01:01:25 |
 | 1 | kishan | 3 | Shopping | 1 | 2026-03-23 09:10:31 |
-| 1 | amazon pay | 8 | Travel | 1 | 2026-03-22 08:24:54 |
-| 1 | urbancla | 56 | Home Improvement | 1 | 2026-03-22 08:22:47 |
-| 1 | amazon pay in | 12 | Personal Care | 1 | 2026-03-22 08:22:47 |
-| 1 | saumya blinkit | 9 | Groceries | 1 | 2026-03-22 08:22:47 |
-| 1 | gramiq | 9 | Groceries | 1 | 2026-03-21 09:04:33 |
 | 1 | bharatpe | 1 | Food & Dining | 1 | 2026-03-21 09:04:10 |
-| 1 | shrwan | 1 | Food & Dining | 1 | 2026-03-21 09:03:58 |
 | 1 | vijayala | 55 | Donation | 1 | 2026-03-21 09:01:36 |
 | 1 | 12 03 2026dep tfr upi cr | 6 | Healthcare | 2 | 2026-03-20 11:23:50 |
 | 1 | zakeer | 2 | Transportation | 1 | 2026-03-20 11:22:01 |
-| 1 | ashok | 3 | Shopping | 1 | 2026-03-20 11:21:49 |
 | 1 | chandram | 3 | Shopping | 1 | 2026-03-20 11:21:34 |
 | 1 | nandeesh | 3 | Shopping | 1 | 2026-03-20 11:20:33 |
 | 1 | altaf | 2 | Transportation | 1 | 2026-03-20 11:17:12 |
@@ -301,36 +374,11 @@ Runtime matching uses DB table `category_learning_rules` (per user) and this mar
 | 1 | purse saumya | 55 | Donation | 1 | 2026-03-18 11:10:29 |
 | 1 | 13 03 2026wdl tfr upi dr | 5 | Bills & Utilities | 1 | 2026-03-17 09:39:57 |
 | 1 | muniraju | 3 | Shopping | 1 | 2026-03-17 09:37:19 |
-| 1 | ente | 2 | Transportation | 1 | 2026-03-17 09:34:51 |
 | 1 | treasure | 1 | Food & Dining | 1 | 2026-03-17 09:10:58 |
-| 1 | raja kumar sahu | 9 | Groceries | 1 | 2026-03-17 09:05:13 |
-| 1 | kanti | 1 | Food & Dining | 1 | 2026-03-17 09:05:13 |
-| 1 | cred | 5 | Bills & Utilities | 1 | 2026-03-17 09:04:59 |
 | 1 | district | 1 | Food & Dining | 1 | 2026-03-17 09:04:29 |
-| 1 | venugopa | 9 | Groceries | 1 | 2026-03-17 05:43:42 |
-| 1 | credpaya | 12 | Personal Care | 1 | 2026-03-16 23:30:07 |
-| 1 | pavithra | 1 | Food & Dining | 2 | 2026-03-16 03:26:33 |
-| 1 | shradha | 1 | Food & Dining | 1 | 2026-03-14 19:23:12 |
 | 1 | guvvala rupakumar | 6 | Healthcare | 1 | 2026-03-14 19:20:19 |
 | 1 | dsi omr bangalore | 3 | Shopping | 1 | 2026-03-14 19:20:03 |
 | 1 | passport seva project | 8 | Travel | 1 | 2026-03-14 19:11:59 |
 | 1 | amit kumar sahani | 56 | Home Improvement | 1 | 2026-03-14 19:10:56 |
-| 1 | nagalakshmi | 55 | Donation | 1 | 2026-03-11 09:14:58 |
-| 1 | kumara | 2 | Transportation | 1 | 2026-03-11 09:13:09 |
-| 1 | ramaling dundappa belakud | 2 | Transportation | 1 | 2026-03-11 09:09:22 |
-| 1 | nallola munemma | 2 | Transportation | 1 | 2026-03-08 21:17:50 |
-| 1 | jyothi | 9 | Groceries | 1 | 2026-03-08 21:17:31 |
-| 1 | the arun | 9 | Groceries | 1 | 2026-03-08 21:17:00 |
-| 1 | sathya | 6 | Healthcare | 3 | 2026-03-08 21:15:38 |
-| 1 | deepak kumar | 1 | Food & Dining | 1 | 2026-03-07 09:22:57 |
-| 1 | vivek kumar rai | 1 | Food & Dining | 1 | 2026-03-07 09:22:50 |
-| 1 | hemanth singh | 53 | Kids Activities | 1 | 2026-03-07 09:22:05 |
-| 1 | vijiyamm | 9 | Groceries | 1 | 2026-03-06 21:49:09 |
-| 1 | piku sukanya | 13 | Investments | 1 | 2026-03-06 10:42:08 |
-| 1 | kamala devi | 56 | Home Improvement | 1 | 2026-03-06 10:40:48 |
-| 1 | rajashekar | 52 | Household Help | 1 | 2026-03-05 22:56:06 |
-| 1 | rajnish kumar singh | 55 | Donation | 1 | 2026-03-05 22:55:53 |
-| 1 | mr anand kumar | 2 | Transportation | 1 | 2026-03-05 22:55:42 |
-| 1 | kolar | 9 | Groceries | 1 | 2026-03-05 22:54:47 |
 <!-- AUTO_LEARNED_MAPPINGS_END -->
 

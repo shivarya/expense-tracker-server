@@ -123,6 +123,13 @@ try {
     exit;
   }
 
+  // Merchant subscription detection (Netflix/Spotify/gym-style recurring charges)
+  if (strpos($requestUri, '/subscriptions') === 0) {
+    require_once __DIR__ . '/controllers/subscriptionsController.php';
+    handleSubscriptionRoutes($requestUri, $requestMethod);
+    exit;
+  }
+
   // Trusted Contacts (own UPI IDs / names for self-transfer detection)
   if (strpos($requestUri, '/contacts') === 0) {
     require_once __DIR__ . '/controllers/trustedContactsController.php';

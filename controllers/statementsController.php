@@ -8,6 +8,7 @@ require_once __DIR__ . '/../utils/fxConverter.php';
 require_once __DIR__ . '/../utils/transactionDuplicateDetector.php';
 require_once __DIR__ . '/../utils/categoryResolver.php';
 require_once __DIR__ . '/../utils/categoryLearning.php';
+require_once __DIR__ . '/../utils/merchantSubscriptionDetector.php';
 require_once __DIR__ . '/../utils/statementPasswordVault.php';
 
 if (!class_exists('\Smalot\PdfParser\Parser')) {
@@ -800,7 +801,7 @@ class StatementController
                 $origAmount = $foreign['amount'] ?? null;
                 $origCurrency = $foreign['currency'] ?? null;
 
-                $this->db->insert(
+                $newTxnId = $this->db->insert(
                     "INSERT INTO transactions
                      (user_id, account_id, category_id, transaction_type, amount, currency, original_amount, original_currency,
                       merchant, description, transaction_date, reference_number, source, payment_method, source_data, duplicate_score)
@@ -822,6 +823,8 @@ class StatementController
                         (int)($duplicateCheck['confidence'] ?? 0),
                     ]
                 );
+
+                MerchantSubscriptionDetector::evaluateTransaction($this->db, $userId, (int)$newTxnId);
 
                 $savedCount++;
 
@@ -972,6 +975,383 @@ class StatementController
             );
             throw $e;
         }
+    }
+
+    /**
+     * Worker-facing: ingest an SBI consolidated account-statement (CAS) PDF
+     * already on disk (e.g. downloaded from Gmail). Same duplicate-file-skip /
+     * dedupe / insert pattern as ingestCreditCardPdf, but for the CAS
+     * savings-account layout, which is structurally unrelated to a credit-card
+     * statement (multi-page: account summary, then a "TRANSACTION DETAILS"
+     * block per linked account with a Date/Description/Credit/Debit/Balance
+     * table) so it gets its own parser rather than reusing parseTransactionsByBank.
+     */
+    public function ingestSbiCasStatement(
+        int $userId,
+        string $workingFile,
+        string $fileName,
+        array $passwordPlaintexts = []
+    ): array {
+        $fileHash = hash_file('sha256', $workingFile);
+
+        $existing = $this->db->fetchOne(
+            "SELECT id FROM statement_uploads
+             WHERE user_id = ? AND bank = 'sbi' AND account_type = 'savings'
+               AND file_hash = ? AND status IN ('success', 'duplicate_upload')
+             ORDER BY id DESC LIMIT 1",
+            [$userId, $fileHash]
+        );
+        if ($existing) {
+            return ['duplicate_upload' => true, 'extracted_transactions' => 0, 'saved_transactions' => 0];
+        }
+
+        $uploadId = (int)$this->db->insert(
+            "INSERT INTO statement_uploads (user_id, bank, account_type, file_name, file_hash, status)
+             VALUES (?, 'sbi', 'savings', ?, ?, 'processing')",
+            [$userId, $fileName, $fileHash]
+        );
+
+        try {
+            $text = '';
+            foreach (array_merge([''], $passwordPlaintexts) as $pwd) {
+                try {
+                    $candidate = $this->extractTextFromPdf($workingFile, (string)$pwd);
+                    if (trim($candidate) !== '') {
+                        $text = $candidate;
+                        break;
+                    }
+                } catch (Exception $e) {
+                    // try next password
+                }
+            }
+
+            if (trim($text) === '') {
+                throw new Exception('Could not decrypt/parse SBI e-statement with available passwords.');
+            }
+
+            $parsed = $this->parseSbiCasStatement($text);
+            $transactions = $parsed['transactions'];
+            if (empty($transactions)) {
+                throw new Exception('No transactions found in SBI e-statement.');
+            }
+
+            $accountLastFour = $parsed['account_last_four'] !== '' ? $parsed['account_last_four'] : '0000';
+            $accountId = $this->getOrCreateSavingsAccount($userId, 'sbi', $accountLastFour);
+            $stats = $this->persistParsedSbiCasTransactions($userId, $accountId, $accountLastFour, $transactions, $uploadId, $fileHash);
+
+            $this->db->execute(
+                "UPDATE statement_uploads
+                 SET status = 'success', extracted_count = ?, saved_count = ?, skipped_high_confidence = ?,
+                     flagged_possible_duplicates = ?, ai_checked_transactions = ?, duplicate_fallback_used = ?,
+                     error_message = ?
+                 WHERE id = ?",
+                [
+                    count($transactions),
+                    $stats['saved'],
+                    $stats['skipped_high_confidence'],
+                    $stats['flagged'],
+                    $stats['ai_checked'],
+                    $stats['fallback_used'],
+                    !empty($stats['errors']) ? implode(' | ', array_slice($stats['errors'], 0, 5)) : null,
+                    $uploadId,
+                ]
+            );
+
+            return [
+                'duplicate_upload' => false,
+                'extracted_transactions' => count($transactions),
+                'saved_transactions' => $stats['saved'],
+            ];
+        } catch (Exception $e) {
+            $this->db->execute(
+                "UPDATE statement_uploads SET status = 'failed', error_message = ? WHERE id = ?",
+                [substr($e->getMessage(), 0, 1000), $uploadId]
+            );
+            throw $e;
+        }
+    }
+
+    /**
+     * Parse an SBI CAS statement's plain text into transaction rows. The
+     * statement lists one "TRANSACTION DETAILS" block per linked account
+     * (savings/current), each carrying its own masked account number, so
+     * blocks are parsed independently and transactions never bleed across
+     * accounts. Transaction lines look like:
+     *   "01-07-26 UPI/DR/345394731537/ASHISH T/HDFC/shivarya3@/Payme - 0 50000.00 111933.38"
+     *   DD-MM-YY <description> - <credit> <debit> <balance-after>
+     * Every line's balance-after is contiguous with the next line's, which is
+     * a strong internal check that the regex isn't silently mis-parsing.
+     */
+    private function parseSbiCasStatement(string $text): array
+    {
+        $blocks = preg_split('/(?=TRANSACTION DETAILS)/', $text);
+        $transactions = [];
+        $accountLastFour = '';
+        $lineRe = '/^(\d{2}-\d{2}-\d{2})\s+(.+?)\s+-\s+([\d,]+(?:\.\d{2})?)\s+([\d,]+(?:\.\d{2})?)\s+([\d,]+(?:\.\d{2})?)$/';
+
+        foreach ($blocks as $block) {
+            if (strpos($block, 'TRANSACTION DETAILS') === false) {
+                continue; // preamble before the first account block
+            }
+            if (!preg_match('/X{4,}(\d{4})/', $block, $accMatch)) {
+                continue;
+            }
+            $blockLastFour = $accMatch[1];
+            if ($accountLastFour === '') {
+                $accountLastFour = $blockLastFour;
+            }
+
+            foreach (explode("\n", $block) as $line) {
+                $line = trim($line);
+                if ($line === '' || !preg_match($lineRe, $line, $m)) {
+                    continue;
+                }
+                [, $date, $desc, $creditStr, $debitStr] = $m;
+                $credit = (float)str_replace(',', '', $creditStr);
+                $debit = (float)str_replace(',', '', $debitStr);
+                $isCredit = $credit > 0;
+                $amount = $isCredit ? $credit : $debit;
+                if ($amount <= 0) {
+                    continue;
+                }
+
+                $desc = trim($desc);
+                $transactions[] = [
+                    'transaction_type' => $isCredit ? 'credit' : 'debit',
+                    'amount' => $amount,
+                    'merchant' => $this->cleanSbiCasMerchant($desc),
+                    'description' => $desc,
+                    'transaction_date' => $this->toIsoDateDdMmYy($date),
+                    'reference_number' => $this->extractSbiCasReference($desc),
+                    'raw_line' => $line,
+                ];
+            }
+        }
+
+        return ['account_last_four' => $accountLastFour, 'transactions' => $transactions];
+    }
+
+    /** e.g. "UPI/DR/345394731537/ASHISH T/HDFC/shivarya3@/Payme" -> "ASHISH T" */
+    private function cleanSbiCasMerchant(string $desc): string
+    {
+        if (str_starts_with($desc, 'UPI/')) {
+            $parts = explode('/', $desc);
+            if (isset($parts[3]) && trim($parts[3]) !== '') {
+                return trim($parts[3]);
+            }
+        }
+        if (str_starts_with($desc, 'ACHDr') || str_starts_with($desc, 'ACHCr')) {
+            return trim((string)preg_replace('/^ACH(Dr|Cr)\s*/', '', $desc));
+        }
+        if (str_starts_with($desc, 'NEFT')) {
+            $segs = explode('*', $desc);
+            return trim((string)end($segs));
+        }
+        return $desc;
+    }
+
+    private function extractSbiCasReference(string $desc): ?string
+    {
+        if (preg_match('#UPI/(?:DR|CR)/(\d+)/#', $desc, $m)) {
+            return 'SBI_' . $m[1];
+        }
+        if (preg_match('/NEFT\*[^*]+\*([^*]+)\*/', $desc, $m)) {
+            return 'SBI_' . $m[1];
+        }
+        return null;
+    }
+
+    /** "31-07-26" -> "2026-07-31" */
+    private function toIsoDateDdMmYy(string $ddmmyy): string
+    {
+        [$d, $m, $y] = explode('-', $ddmmyy);
+        return '20' . $y . '-' . $m . '-' . $d;
+    }
+
+    /**
+     * Resolve (or create) the savings/current account for an SBI CAS
+     * statement. Mirrors getOrCreateCreditCardAccount's collision handling,
+     * and matches on a last-four LIKE fallback so it lands on the same
+     * account the SMS parser and bulk scraper sync already created (which
+     * store account_number as literal 'XXXX<last4>').
+     */
+    private function getOrCreateSavingsAccount(int $userId, string $bank, string $accountLastFour): int
+    {
+        $existing = $this->db->fetchOne(
+            "SELECT id FROM bank_accounts
+             WHERE user_id = ? AND bank = ? AND account_type = 'savings' AND account_number LIKE ?
+             ORDER BY id DESC
+             LIMIT 1",
+            [$userId, $bank, '%' . $accountLastFour]
+        );
+
+        if ($existing && isset($existing['id'])) {
+            return (int)$existing['id'];
+        }
+
+        $accountNumber = 'XXXX' . $accountLastFour;
+        try {
+            return (int)$this->db->insert(
+                "INSERT INTO bank_accounts
+                 (user_id, bank, account_type, account_number, account_name, status)
+                 VALUES (?, ?, 'savings', ?, ?, 'active')",
+                [$userId, $bank, $accountNumber, strtoupper($bank) . ' Account']
+            );
+        } catch (Exception $e) {
+            $row = $this->db->fetchOne(
+                "SELECT id FROM bank_accounts WHERE user_id = ? AND bank = ? AND account_number = ? LIMIT 1",
+                [$userId, $bank, $accountNumber]
+            );
+            if ($row && isset($row['id'])) {
+                return (int)$row['id'];
+            }
+            throw new Exception("Cannot create savings account: account_number '{$accountNumber}' collision. Original error: " . $e->getMessage());
+        }
+    }
+
+    /**
+     * AI-refine, dedupe and insert parsed SBI CAS transactions. Mirrors
+     * persistParsedCardTransactions but for a savings-account statement (no
+     * card-specific fields, no foreign-currency handling needed — CAS
+     * statements are INR-only).
+     */
+    private function persistParsedSbiCasTransactions(
+        int $userId,
+        int $accountId,
+        string $accountLastFour,
+        array $parsedTransactions,
+        int $uploadId,
+        string $fileHash
+    ): array {
+        $statementAi = new AzureOpenAI();
+        $aiRefinements = $statementAi->refineStatementTransactions($parsedTransactions, 'SBI');
+        if (!empty($aiRefinements)) {
+            foreach ($parsedTransactions as $idx => $parsedTxn) {
+                if (!isset($aiRefinements[$idx]) || !is_array($aiRefinements[$idx])) {
+                    continue;
+                }
+                $refined = $aiRefinements[$idx];
+                if (!empty($refined['merchant'])) {
+                    $parsedTransactions[$idx]['merchant'] = (string)$refined['merchant'];
+                }
+                if (!empty($refined['description'])) {
+                    $parsedTransactions[$idx]['description'] = (string)$refined['description'];
+                }
+                if (!empty($refined['category_id'])) {
+                    $parsedTransactions[$idx]['category_id'] = (int)$refined['category_id'];
+                }
+            }
+        }
+
+        $paymentMethod = 'SBI Savings *' . $accountLastFour;
+
+        $savedCount = 0;
+        $skippedHighConfidence = 0;
+        $flaggedPossibleDuplicates = 0;
+        $aiChecked = 0;
+        $fallbackUsed = 0;
+        $errors = [];
+
+        foreach ($parsedTransactions as $txn) {
+            try {
+                $normalizedType = ($txn['transaction_type'] ?? 'debit') === 'credit' ? 'credit' : 'debit';
+                $normalizedDescription = trim((string)($txn['description'] ?? ''));
+                $normalizedMerchant = trim((string)($txn['merchant'] ?? '')) ?: 'SBI Transaction';
+
+                // Rules-first: a user's learned merchant->category correction
+                // beats the AI guess (mirrors the credit-card statement path).
+                $learnedCategoryId = CategoryLearning::resolveFromTransaction($this->db, $userId, [
+                    'merchant' => $normalizedMerchant,
+                    'description' => $normalizedDescription,
+                ]);
+                $resolvedCategoryId = $learnedCategoryId !== null
+                    ? $learnedCategoryId
+                    : (isset($txn['category_id']) ? (int)$txn['category_id'] : null);
+
+                $transactionPayload = [
+                    'bank' => 'SBI',
+                    'account_number' => $accountLastFour,
+                    'transaction_type' => $normalizedType,
+                    'amount' => $txn['amount'],
+                    'merchant' => $normalizedMerchant,
+                    'description' => $normalizedDescription,
+                    'category_id' => $resolvedCategoryId,
+                    'date' => $txn['transaction_date'],
+                    'reference_number' => $txn['reference_number'],
+                    'payment_method' => $paymentMethod,
+                ];
+
+                $duplicateCheck = $this->duplicateDetector->evaluate($userId, $transactionPayload, [
+                    'account_id' => $accountId,
+                    'expand_linked_accounts' => true,
+                    'ai_enabled' => true,
+                    'skip_threshold' => 76,
+                    'duplicate_threshold' => 51,
+                    'source_hint' => 'statement_pdf',
+                ]);
+
+                if (!empty($duplicateCheck['ai_used'])) {
+                    $aiChecked++;
+                }
+                if (!empty($duplicateCheck['fallback_used'])) {
+                    $fallbackUsed++;
+                }
+                if (!empty($duplicateCheck['should_skip'])) {
+                    $skippedHighConfidence++;
+                    continue;
+                }
+                if (!empty($duplicateCheck['possible_duplicate'])) {
+                    $flaggedPossibleDuplicates++;
+                }
+
+                $categoryId = CategoryResolver::resolveTransaction($transactionPayload);
+                $sourceData = [
+                    'source' => 'statement_pdf',
+                    'parser' => 'sbi_cas',
+                    'bank' => 'sbi',
+                    'account_last_four' => $accountLastFour,
+                    'upload_id' => $uploadId,
+                    'file_hash' => $fileHash,
+                    'raw_line' => $txn['raw_line'],
+                ];
+
+                $newTxnId = $this->db->insert(
+                    "INSERT INTO transactions
+                     (user_id, account_id, category_id, transaction_type, amount, currency,
+                      merchant, description, transaction_date, reference_number, source, payment_method, source_data, duplicate_score)
+                     VALUES (?, ?, ?, ?, ?, 'INR', ?, ?, ?, ?, 'statement_pdf', ?, ?, ?)",
+                    [
+                        $userId,
+                        $accountId,
+                        $categoryId,
+                        $normalizedType,
+                        $txn['amount'],
+                        $normalizedMerchant,
+                        $normalizedDescription,
+                        $txn['transaction_date'],
+                        $txn['reference_number'],
+                        $paymentMethod,
+                        json_encode($sourceData),
+                        (int)($duplicateCheck['confidence'] ?? 0),
+                    ]
+                );
+
+                MerchantSubscriptionDetector::evaluateTransaction($this->db, $userId, (int)$newTxnId);
+
+                $savedCount++;
+            } catch (Exception $recordError) {
+                $errors[] = $recordError->getMessage();
+            }
+        }
+
+        return [
+            'saved' => $savedCount,
+            'skipped_high_confidence' => $skippedHighConfidence,
+            'flagged' => $flaggedPossibleDuplicates,
+            'ai_checked' => $aiChecked,
+            'fallback_used' => $fallbackUsed,
+            'errors' => $errors,
+        ];
     }
 
     private function validateUploadedPdf(array $file): void

@@ -287,6 +287,9 @@ CREATE TABLE IF NOT EXISTS transactions (
     duplicate_score INT DEFAULT 0 COMMENT 'AI-detected duplicate probability (0-100): 0-20=Not duplicate, 21-50=Unlikely, 51-75=Possible, 76-100=Highly likely',
     is_emi BOOLEAN DEFAULT FALSE,
     emi_id INT NULL COMMENT 'Link to EMI if this is an EMI payment',
+    is_subscription BOOLEAN DEFAULT FALSE,
+    merchant_subscription_id INT NULL COMMENT 'Link to merchant_subscriptions if this transaction belongs to a detected subscription',
+    merchant_pattern VARCHAR(255) NULL COMMENT 'Normalized merchant pattern, backfilled lazily on write',
     notes TEXT,
     deleted_at TIMESTAMP NULL DEFAULT NULL COMMENT 'Soft delete timestamp; NULL = active, set = deleted',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -303,7 +306,9 @@ CREATE TABLE IF NOT EXISTS transactions (
     INDEX idx_payment_method (payment_method),
     INDEX idx_duplicate_score (duplicate_score),
     INDEX idx_deleted_at (deleted_at),
-    INDEX idx_original_currency (original_currency)
+    INDEX idx_original_currency (original_currency),
+    INDEX idx_merchant_subscription (merchant_subscription_id),
+    INDEX idx_merchant_pattern (user_id, merchant_pattern)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================
@@ -546,6 +551,39 @@ CREATE TABLE IF NOT EXISTS emis (
     INDEX idx_user_status (user_id, status),
     INDEX idx_next_payment (next_payment_date),
     INDEX idx_bank (bank)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================
+-- MERCHANT SUBSCRIPTIONS (detected recurring charges, e.g. Netflix/Spotify/gym)
+-- ============================================
+-- Distinct from `subscriptions` (Google Play Billing premium gating for this
+-- app itself) -- this tracks the user's own recurring merchant charges.
+CREATE TABLE IF NOT EXISTS merchant_subscriptions (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    user_id INT NOT NULL,
+    merchant_pattern VARCHAR(255) NOT NULL COMMENT 'Normalized pattern, same shape as category_learning_rules.merchant_pattern',
+    display_name VARCHAR(255) NOT NULL COMMENT 'Most recent raw merchant text, for UI display',
+    category_id INT NULL COMMENT 'Snapshot of latest contributing transaction category, for icon/badge only -- not authoritative',
+    billing_cycle ENUM('weekly','monthly','quarterly','annual') NOT NULL DEFAULT 'monthly',
+    average_amount DECIMAL(15, 2) NOT NULL,
+    last_amount DECIMAL(15, 2) NOT NULL,
+    amount_variance_percent DECIMAL(6, 2) NOT NULL DEFAULT 0 COMMENT 'Coefficient of variation across observed amounts x100',
+    occurrence_count INT NOT NULL DEFAULT 0,
+    first_transaction_date DATE NOT NULL,
+    last_transaction_date DATE NOT NULL,
+    next_expected_date DATE NULL COMMENT 'Informational projection only, not a hard due date',
+    status ENUM('active', 'deactivated', 'dismissed') NOT NULL DEFAULT 'active',
+    detection_source ENUM('bulk_scan', 'incremental', 'manual') NOT NULL DEFAULT 'bulk_scan',
+    cancel_url VARCHAR(1000) NULL COMMENT 'User-editable cancellation link; seeded from CancelUrlMap',
+    notes VARCHAR(500) NULL,
+    dismissed_at TIMESTAMP NULL,
+    deactivated_at TIMESTAMP NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE SET NULL,
+    UNIQUE KEY uniq_user_merchant_pattern (user_id, merchant_pattern),
+    INDEX idx_merchant_subscriptions_user_status (user_id, status)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================

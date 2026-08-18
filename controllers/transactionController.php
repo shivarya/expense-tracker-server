@@ -1,6 +1,7 @@
 <?php
 
 require_once __DIR__ . '/../utils/categoryLearning.php';
+require_once __DIR__ . '/../utils/merchantSubscriptionDetector.php';
 require_once __DIR__ . '/groupController.php';
 require_once __DIR__ . '/manualGroupController.php';
 
@@ -154,6 +155,7 @@ function getTransactions($userId)
     $transactions = $db->fetchAll($sql, $params);
     enrichTransactionsWithOverlayMeta($db, (int)$userId, $transactions);
     enrichTransactionsWithManualGroups($db, (int)$userId, $transactions);
+    enrichTransactionsWithSubscriptionMeta($db, (int)$userId, $transactions);
     normalizeTransactionDateFields($transactions);
 
     // Get summary
@@ -296,6 +298,8 @@ function createTransaction($userId)
       isset($input['source_data']) ? json_encode($input['source_data']) : null,
       $input['notes'] ?? null
     ]);
+
+    MerchantSubscriptionDetector::evaluateTransaction($db, (int)$userId, (int)$id);
 
     Response::success(['id' => $id], 'Transaction created successfully', 201);
   } catch (Exception $e) {
@@ -1131,6 +1135,43 @@ function enrichTransactionsWithOverlayMeta($db, int $userId, array &$transaction
 
     $txn['refund_targets_count'] = (int)$outgoingRefundMeta['allocation_count'];
     $txn['refund_allocated_out'] = round((float)$outgoingRefundMeta['allocated_amount'], 2);
+  }
+}
+
+function enrichTransactionsWithSubscriptionMeta($db, int $userId, array &$transactions): void
+{
+  if (empty($transactions)) {
+    return;
+  }
+
+  if (!overlayTableExists($db, 'merchant_subscriptions')) {
+    return;
+  }
+
+  $subscriptionIds = array_values(array_unique(array_filter(
+    array_map(static fn($txn) => isset($txn['merchant_subscription_id']) ? (int)$txn['merchant_subscription_id'] : 0, $transactions),
+    static fn($id) => $id > 0
+  )));
+  if (empty($subscriptionIds)) {
+    return;
+  }
+
+  $in = implode(',', array_fill(0, count($subscriptionIds), '?'));
+  $rows = $db->fetchAll(
+    "SELECT id, display_name, billing_cycle FROM merchant_subscriptions WHERE user_id = ? AND id IN ($in)",
+    array_merge([$userId], $subscriptionIds)
+  );
+
+  $map = [];
+  foreach ($rows as $row) {
+    $map[(int)$row['id']] = $row;
+  }
+
+  foreach ($transactions as &$txn) {
+    $subId = isset($txn['merchant_subscription_id']) ? (int)$txn['merchant_subscription_id'] : 0;
+    $meta = $subId > 0 ? ($map[$subId] ?? null) : null;
+    $txn['subscription_name'] = $meta['display_name'] ?? null;
+    $txn['subscription_billing_cycle'] = $meta['billing_cycle'] ?? null;
   }
 }
 

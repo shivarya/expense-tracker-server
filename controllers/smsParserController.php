@@ -6,6 +6,7 @@ require_once __DIR__ . '/../utils/azureOpenAI.php';
 require_once __DIR__ . '/../utils/transactionDuplicateDetector.php';
 require_once __DIR__ . '/../utils/categoryResolver.php';
 require_once __DIR__ . '/../utils/categoryLearning.php';
+require_once __DIR__ . '/../utils/merchantSubscriptionDetector.php';
 require_once __DIR__ . '/../config/database.php';
 
 class SMSParserController {
@@ -300,6 +301,8 @@ class SMSParserController {
                         $transaction['payment_method'] ?? null,
                         (int)($duplicateCheck['confidence'] ?? 0),
                     ]);
+
+                    MerchantSubscriptionDetector::evaluateTransaction($this->db, $userId, (int)$newId);
 
                     $savedCount++;
 
@@ -637,7 +640,7 @@ class SMSParserController {
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'sms_webhook', ?)
         ";
 
-        $this->db->execute($insertQuery, [
+        $newId = $this->db->insert($insertQuery, [
             $userId,
             $accountId,
             $categoryId,
@@ -653,6 +656,8 @@ class SMSParserController {
             $transaction['payment_method'] ?? null,
             (int)($duplicateCheck['confidence'] ?? 0),
         ]);
+
+        MerchantSubscriptionDetector::evaluateTransaction($this->db, $userId, (int)$newId);
 
         $txnType = strtolower((string)($transaction['transaction_type'] ?? 'debit'));
         $txnAmount = round((float)($transaction['amount'] ?? 0), 2);

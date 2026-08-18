@@ -2,6 +2,7 @@
 
 require_once __DIR__ . '/../utils/azureOpenAI.php';
 require_once __DIR__ . '/../utils/transactionDuplicateDetector.php';
+require_once __DIR__ . '/../utils/merchantSubscriptionDetector.php';
 
 function normalizeAccountType($rawType) {
   $value = strtolower(trim((string)$rawType));
@@ -580,7 +581,7 @@ function syncTransactions($userId)
         $originalAmount = $originalCurrency !== null && isset($txn['original_amount']) && is_numeric($txn['original_amount'])
           ? round((float)$txn['original_amount'], 2) : null;
 
-        $db->insert($sql, [
+        $newTxnId = $db->insert($sql, [
           $userId,
           $accountId,
           $categoryId,
@@ -599,6 +600,8 @@ function syncTransactions($userId)
           (int)($duplicateCheck['confidence'] ?? 0)
         ]);
         $created++;
+
+        MerchantSubscriptionDetector::evaluateTransaction($db, (int)$userId, (int)$newTxnId);
       } catch (Exception $e) {
         $failed++;
         $errors[] = ($txn['reference_number'] ?? $txn['merchant'] ?? 'Unknown') . ': ' . $e->getMessage();
