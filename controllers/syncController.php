@@ -520,14 +520,32 @@ function syncTransactions($userId)
         $categoryId = getOrCreateCategory($db, $userId, $txn['category'], $txn['transaction_type']);
 
         // Re-run with resolved account id for higher confidence, but keep conservative fallback.
-        $duplicateCheck = $duplicateDetector->evaluate($userId, $txn, [
+        $evaluateOptions = [
           'account_id' => $accountId,
           'expand_linked_accounts' => true,
           'source_hint' => $sourceHint,
           'ai_enabled' => true,
           'skip_threshold' => $skipThreshold,
           'duplicate_threshold' => $duplicateThreshold,
-        ]);
+        ];
+        try {
+          $duplicateCheck = $duplicateDetector->evaluate($userId, $txn, $evaluateOptions);
+        } catch (Exception $e) {
+          $goneAwayMsg = strtolower($e->getMessage());
+          if (!str_contains($goneAwayMsg, 'server has gone away') && !str_contains($goneAwayMsg, 'lost connection')) {
+            throw $e;
+          }
+
+          // $duplicateDetector holds a raw PDO handle captured before this loop started
+          // (see construction above); a wait_timeout drop during a slow AI-backed evaluate()
+          // call kills that handle permanently, so every remaining row would fail identically
+          // without rebuilding the detector against a fresh connection. Same pattern as
+          // smsParserController::evaluateDuplicateTransactionSafely().
+          error_log('[TX_SYNC][DB] Connection lost during duplicate evaluation. Reconnecting and retrying once.');
+          $db->forceReconnect();
+          $duplicateDetector = new TransactionDuplicateDetector($db->getConnection(), new AzureOpenAI());
+          $duplicateCheck = $duplicateDetector->evaluate($userId, $txn, $evaluateOptions);
+        }
 
         if (!empty($duplicateCheck['ai_used'])) {
           $aiChecked++;
@@ -624,7 +642,13 @@ function syncTransactions($userId)
       !empty($errors) ? implode('; ', $errors) : null
     ]);
 
-    $db->commit();
+    // A mid-loop reconnect (above, or transparently inside Database::query()) replaces
+    // the connection with one that was never told beginTransaction() — committing it
+    // would throw "There is no active transaction" even though rows already persisted
+    // via autocommit on the new connection. Only commit if a transaction is still live.
+    if ($db->getConnection()->inTransaction()) {
+      $db->commit();
+    }
 
     $duplicatesFound = $skipped + $flaggedPossible;
     error_log('[TX_SYNC_SUMMARY][SYNC_API] user_id=' . $userId
