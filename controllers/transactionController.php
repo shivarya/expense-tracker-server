@@ -50,6 +50,10 @@ function getTransactions($userId)
     $endDate = $_GET['end_date'] ?? date('Y-m-t');     // Last day of current month
     $accountId = $_GET['account_id'] ?? null;
     $categoryId = $_GET['category_id'] ?? null;
+    $categoryIds = [];
+    if (!empty($_GET['category_ids'])) {
+      $categoryIds = array_values(array_filter(array_map('intval', explode(',', (string)$_GET['category_ids']))));
+    }
     $groupId = isset($_GET['group_id']) ? (int)$_GET['group_id'] : null;
     $manualGroupId = isset($_GET['manual_group_id']) ? (int)$_GET['manual_group_id'] : null;
     $type = $_GET['type'] ?? null;
@@ -117,7 +121,10 @@ function getTransactions($userId)
       $sql .= " AND t.account_id = ?";
       $params[] = $accountId;
     }
-    if ($categoryId) {
+    if (!empty($categoryIds)) {
+      $sql .= " AND t.category_id IN (" . implode(',', array_fill(0, count($categoryIds), '?')) . ")";
+      array_push($params, ...$categoryIds);
+    } elseif ($categoryId) {
       $sql .= " AND t.category_id = ?";
       $params[] = $categoryId;
     }
@@ -185,7 +192,10 @@ function getTransactions($userId)
       $summarySQL .= " AND t.account_id = ?";
       $summaryParams[] = $accountId;
     }
-    if ($categoryId) {
+    if (!empty($categoryIds)) {
+      $summarySQL .= " AND t.category_id IN (" . implode(',', array_fill(0, count($categoryIds), '?')) . ")";
+      array_push($summaryParams, ...$categoryIds);
+    } elseif ($categoryId) {
       $summarySQL .= " AND t.category_id = ?";
       $summaryParams[] = $categoryId;
     }

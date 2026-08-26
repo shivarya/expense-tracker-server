@@ -246,6 +246,7 @@ function computeSpendCapProgress($db, $userId, $goal)
     'progress_percent' => $cap > 0 ? $current / $cap : 0, // intentionally NOT clamped -- >1 means over cap
     'current_amount' => $current,
     'target_amount' => $cap,
+    'category_ids' => $categoryIds, // resolved set (goal's own list, or the default expense-minus-Rent/EMI fallback) -- lets the client link straight to a matching transaction filter without re-deriving this rule
     'days_in_month' => $daysInMonth,
     'days_elapsed' => $daysElapsed,
     'days_remaining' => $daysInMonth - $daysElapsed,
