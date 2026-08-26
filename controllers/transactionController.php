@@ -228,9 +228,90 @@ function getTransactions($userId)
 
     $summary = $db->fetchOne($summarySQL, $summaryParams);
 
+    // Category breakdown for the same filtered scope (mirrors summarySQL's WHERE
+    // clause) -- lets the client render a spend-by-category chart for whatever
+    // filter combination is currently applied, not just the unfiltered list.
+    $categoryParams = [$userId];
+    $categorySQL = "SELECT t.category_id, c.name as category_name, c.color as category_color, c.icon as category_icon,
+                     SUM(CASE WHEN t.transaction_type = 'debit' THEN t.amount ELSE 0 END) as debit_amount,
+                     SUM(CASE WHEN t.transaction_type = 'credit' THEN t.amount ELSE 0 END) as credit_amount,
+                     COUNT(*) as transaction_count
+                     FROM transactions t
+                     JOIN categories c ON t.category_id = c.id";
+
+    if ($keyword !== null) {
+      $categorySQL .= " JOIN bank_accounts ba ON t.account_id = ba.id";
+    }
+
+    $categorySQL .= " WHERE t.user_id = ? AND t.deleted_at IS NULL";
+
+    if ($startDate) {
+      $categorySQL .= " AND t.transaction_date >= ?";
+      $categoryParams[] = $startDate;
+    }
+    if ($endDate) {
+      $categorySQL .= " AND t.transaction_date <= ?";
+      $categoryParams[] = $endDate . ' 23:59:59';
+    }
+    if ($accountId) {
+      $categorySQL .= " AND t.account_id = ?";
+      $categoryParams[] = $accountId;
+    }
+    if (!empty($categoryIds)) {
+      $categorySQL .= " AND t.category_id IN (" . implode(',', array_fill(0, count($categoryIds), '?')) . ")";
+      array_push($categoryParams, ...$categoryIds);
+    } elseif ($categoryId) {
+      $categorySQL .= " AND t.category_id = ?";
+      $categoryParams[] = $categoryId;
+    }
+    if ($type) {
+      $categorySQL .= " AND t.transaction_type = ?";
+      $categoryParams[] = $type;
+    }
+    if ($keyword !== null) {
+      $keywordPattern = '%' . $keyword . '%';
+      $categorySQL .= " AND (COALESCE(t.merchant, '') LIKE ?
+                          OR COALESCE(t.description, '') LIKE ?
+                          OR COALESCE(ba.account_name, '') LIKE ?
+                          OR COALESCE(ba.bank, '') LIKE ?)";
+      $categoryParams[] = $keywordPattern;
+      $categoryParams[] = $keywordPattern;
+      $categoryParams[] = $keywordPattern;
+      $categoryParams[] = $keywordPattern;
+    }
+    if ($minAmount !== null) {
+      $categorySQL .= " AND t.amount >= ?";
+      $categoryParams[] = $minAmount;
+    }
+    if ($maxAmount !== null) {
+      $categorySQL .= " AND t.amount <= ?";
+      $categoryParams[] = $maxAmount;
+    }
+
+    $categorySQL .= buildGroupFilterSql($groupId, $categoryParams, 't');
+    $categorySQL .= buildManualGroupFilterSql($manualGroupId, $categoryParams, 't');
+    $categorySQL .= " GROUP BY t.category_id, c.name, c.color, c.icon ORDER BY debit_amount DESC";
+
+    $categoryRows = $db->fetchAll($categorySQL, $categoryParams);
+    $totalDebitForPercent = (float)($summary['total_debit'] ?? 0);
+    $byCategory = array_map(function ($row) use ($totalDebitForPercent) {
+      $amount = round((float)$row['debit_amount'], 2);
+      return [
+        'category_id' => (int)$row['category_id'],
+        'category' => $row['category_name'],
+        'color' => $row['category_color'],
+        'icon' => $row['category_icon'],
+        'amount' => $amount,
+        'credit_amount' => round((float)$row['credit_amount'], 2),
+        'percentage' => $totalDebitForPercent > 0 ? round($amount / $totalDebitForPercent * 100, 2) : 0,
+        'transaction_count' => (int)$row['transaction_count'],
+      ];
+    }, $categoryRows);
+
     Response::success([
       'transactions' => $transactions,
-      'summary' => $summary
+      'summary' => $summary,
+      'by_category' => $byCategory
     ], 'Transactions retrieved successfully');
   } catch (Exception $e) {
     Response::error('Failed to fetch transactions: ' . $e->getMessage(), 500);
