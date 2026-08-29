@@ -101,6 +101,7 @@ CANONICAL CATEGORY LIST — you MUST return one of these integer category_id val
 54 = Software & Tools    (SaaS, GitHub, AWS, Azure, domains, hosting, Figma, Notion, developer tools)
 55 = Donation            (charity donations, NGO contributions, relief funds, donation drives)
 56 = Home Improvement    (home repairs, renovation, plumbing, electrician work, home decor, furnishings)
+57 = Gift                (gift items, gift cards/vouchers, presents for birthdays/weddings/festivals)
 
 RULES:
 - Most SMS are INR; set "currency" to a foreign code only when the SMS clearly shows one.
@@ -302,7 +303,7 @@ PROMPT;
             return [];
         }
 
-        $canonicalIds = [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,51,52,53,54,55,56];
+        $canonicalIds = [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,51,52,53,54,55,56,57];
         $items = [];
 
         foreach (array_values($transactions) as $index => $txn) {
@@ -322,7 +323,7 @@ You clean card-statement transactions for an Indian expense tracker.
 Task:
 1. Improve merchant and description text.
 2. Assign canonical category_id from this list only:
-1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,51,52,53,54,55,56
+1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,51,52,53,54,55,56,57
 
 Rules:
 - Keep merchant short, readable, and human-friendly.

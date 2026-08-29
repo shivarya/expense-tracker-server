@@ -1,7 +1,7 @@
 # Transaction Category Assignment Instructions
 
-> **Version**: 3.4  
-> **Last Updated**: 2026-03-06  
+> **Version**: 3.5  
+> **Last Updated**: 2026-08-30  
 > **For**: GPT-4 / Azure OpenAI SMS parser, Claude, and other AI models in expense-tracker pipeline  
 > **Status**: AI returns canonical `category_id` and server now applies user feedback learning from manual recategorization
 
@@ -40,6 +40,7 @@ This is the **single source of truth** for assigning `category_id` to transactio
 | 54 | Software & Tools | `laptop-outline` | `#5C6BC0` | GitHub, AWS, Azure, Vercel, Figma, Notion, SaaS, domains, dev tools |
 | 55 | Donation | `heart-outline` | `#E74C3C` | Charity, NGO contributions, religious/place donations, relief fund support |
 | 56 | Home Improvement | `hammer-outline` | `#8D6E63` | House repairs, renovation, carpentry, plumbing/electrical work, home decor/furnishing |
+| 57 | Gift | `gift-outline` | `#EC407A` | Gift items, gift cards/vouchers, presents for birthdays/weddings/festivals |
 
 ### Income
 

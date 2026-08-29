@@ -37,6 +37,7 @@ class CategoryResolver
         54 => ['name' => 'Software & Tools',  'icon' => 'laptop-outline',                          'color' => '#5C6BC0', 'type' => 'expense'],
         55 => ['name' => 'Donation',          'icon' => 'heart-outline',                           'color' => '#E74C3C', 'type' => 'expense'],
         56 => ['name' => 'Home Improvement',  'icon' => 'hammer-outline',                          'color' => '#8D6E63', 'type' => 'expense'],
+        57 => ['name' => 'Gift',              'icon' => 'gift-outline',                            'color' => '#EC407A', 'type' => 'expense'],
     ];
 
     /**
@@ -183,6 +184,13 @@ class CategoryResolver
         'painting'                   => 56, 'paint work'           => 56,
         'hardware store'             => 56, 'tiles'                => 56,
         'civil work'                 => 56,
+
+        // ── Gift (57) ────────────────────────────────────────────────
+        'gift'                       => 57, 'gifts'                => 57,
+        'gift item'                  => 57, 'gift purchase'        => 57,
+        'present'                    => 57, 'gift card'            => 57,
+        'gift voucher'               => 57, 'birthday gift'        => 57,
+        'wedding gift'               => 57, 'festival gift'        => 57,
 
         // ── Investments (13) ────────────────────────────────────────────
         'investments'                => 13, 'investment'           => 13,
