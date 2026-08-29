@@ -93,7 +93,7 @@ CANONICAL CATEGORY LIST — you MUST return one of these integer category_id val
 14 = Salary              (salary credit, payroll)
 15 = Refund              (refund, reversal, cashback credited)
 16 = Other Income        (any credit that is not salary/refund)
-17 = Transfer            (self transfer between own accounts)
+17 = Transfer            (self transfer between own accounts; ALSO use for a payment TOWARDS your own credit card bill — e.g. "payment received towards your Credit Card", autopay/NACH/e-mandate debit for a card bill, "credit card bill payment" — this settles debt already counted when the card's own purchases were recorded, so it is NOT a fresh expense)
 18 = Uncategorized       (use ONLY if truly unclassifiable)
 51 = Miscellaneous       (person-to-person UPI, ATM withdrawal, fees, tax, genuinely unclear debits)
 52 = Household Help      (cook, maid, driver, domestic worker salary)
@@ -111,6 +111,7 @@ RULES:
 - Interest credited (FD, savings, bond) → category_id 16 (Other Income)
 - ATM withdrawals → category_id 51
 - UPI to a person's name (not a business) → category_id 51
+- A debit paying your OWN credit card bill (autopay/NACH/e-mandate/manual payment towards a card) → category_id 17, never an expense category
 - Cook/maid/driver payments → category_id 52
 - Kids sports, dance, activity class fees → category_id 53
 - SaaS, cloud, hosting, dev tool subscriptions → category_id 54

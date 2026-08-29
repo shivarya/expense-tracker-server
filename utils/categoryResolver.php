@@ -206,6 +206,14 @@ class CategoryResolver
         'transfer'                   => 17, 'self transfer'        => 17,
         'internal transfer'          => 17, 'fund_transfer'        => 17,
         'fund transfer'              => 17, 'neft transfer'        => 17,
+        // Credit card BILL payments settle debt already counted when the
+        // card's own line items were recorded -- counting the payment too
+        // would double-count the same spend. Not the same as a plain card
+        // purchase ('card'/'card_spend' below), which stays Miscellaneous.
+        'card_payment'               => 17, 'card payment'         => 17,
+        'credit card payment'        => 17, 'cc payment'           => 17,
+        'card bill payment'          => 17, 'cc bill payment'      => 17,
+        'credit card bill'           => 17, 'credit card bill payment' => 17,
 
         // ── Uncategorized (18) ──────────────────────────────────────────
         'uncategorized'              => 18, 'unknown'              => 18,
@@ -215,8 +223,6 @@ class CategoryResolver
         'upi'                        => 51, 'upi payment'          => 51,
         'upi_transfer'               => 51, 'upi transfer'         => 51,
         'card'                       => 51, 'card_spend'           => 51,
-        'card_payment'               => 51, 'card payment'         => 51,
-        'credit card payment'        => 51, 'cc payment'           => 51,
         'atm'                        => 51, 'atm_withdrawal'       => 51,
         'atm withdrawal'             => 51, 'cash withdrawal'      => 51,
         'tax'                        => 51, 'tax (igst)'           => 51,

@@ -216,17 +216,41 @@ function computeSpendCapProgress($db, $userId, $goal)
   if (empty($categoryIds)) $categoryIds = [0]; // no matching categories -> zero spend, not a SQL error
 
   $placeholders = implode(',', array_fill(0, count($categoryIds), '?'));
-  $sum = $db->fetchOne(
-    "SELECT COALESCE(SUM(t.amount), 0) as total
+
+  // Net out allocated refunds/reimbursements (e.g. a spouse paying back part of
+  // an expense) -- without this join, an allocation is purely a display label
+  // elsewhere and never actually reduces what counts against the cap.
+  $rows = $db->fetchAll(
+    "SELECT t.category_id, c.name AS category_name, c.color AS category_color, c.icon AS category_icon,
+            SUM(t.amount - COALESCE(ra.allocated, 0)) as total
      FROM transactions t
+     JOIN categories c ON c.id = t.category_id
+     LEFT JOIN (
+       SELECT expense_transaction_id, SUM(amount) as allocated
+       FROM transaction_refund_allocations
+       WHERE user_id = ? AND deleted_at IS NULL
+       GROUP BY expense_transaction_id
+     ) ra ON ra.expense_transaction_id = t.id
      WHERE t.user_id = ?
        AND t.deleted_at IS NULL
        AND t.transaction_type = 'debit'
        AND YEAR(t.transaction_date) = YEAR(CURDATE())
        AND MONTH(t.transaction_date) = MONTH(CURDATE())
-       AND t.category_id IN ($placeholders)",
-    array_merge([$userId], $categoryIds)
+       AND t.category_id IN ($placeholders)
+     GROUP BY t.category_id, c.name, c.color, c.icon
+     ORDER BY total DESC",
+    array_merge([$userId, $userId], $categoryIds)
   );
+
+  $categoryBreakdown = array_map(static fn($row) => [
+    'category_id' => (int)$row['category_id'],
+    'category_name' => $row['category_name'],
+    'category_color' => $row['category_color'],
+    'category_icon' => $row['category_icon'],
+    'amount' => round((float)$row['total'], 2),
+  ], $rows);
+
+  $sum = ['total' => array_sum(array_column($rows, 'total'))];
 
   // Use the same "now" the transaction filter above used (MySQL CURDATE()),
   // not PHP's date() -- they can disagree by a day right around midnight IST
@@ -247,6 +271,7 @@ function computeSpendCapProgress($db, $userId, $goal)
     'current_amount' => $current,
     'target_amount' => $cap,
     'category_ids' => $categoryIds, // resolved set (goal's own list, or the default expense-minus-Rent/EMI fallback) -- lets the client link straight to a matching transaction filter without re-deriving this rule
+    'category_breakdown' => $categoryBreakdown, // per-category net spend within the cap, sorted desc -- lets the client render a tappable breakdown like the Expenses tab
     'days_in_month' => $daysInMonth,
     'days_elapsed' => $daysElapsed,
     'days_remaining' => $daysInMonth - $daysElapsed,

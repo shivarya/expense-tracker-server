@@ -572,7 +572,8 @@ class StatementController
                 throw new Exception('No transactions detected in the uploaded ' . strtoupper($bank) . ' statement.');
             }
 
-            $accountId = $this->getOrCreateCreditCardAccount($userId, $bank, $effectiveCardLastFour);
+            $cardType = $this->extractCardTypeForBank($bank, (string)$text);
+            $accountId = $this->getOrCreateCreditCardAccount($userId, $bank, $effectiveCardLastFour, $cardType !== '' ? $cardType : null);
             $stats = $this->persistParsedCardTransactions(
                 $userId,
                 $bank,
@@ -933,7 +934,8 @@ class StatementController
             // (and dedupe against SMS) instead of a synthetic XXXX0000 account.
             $detectedLast4 = ($cardLastFour === '' && isset($text)) ? $this->extractCardLast4ForBank($bank, (string)$text) : '';
             $effectiveCardLastFour = $cardLastFour !== '' ? $cardLastFour : ($detectedLast4 !== '' ? $detectedLast4 : '0000');
-            $accountId = $this->getOrCreateCreditCardAccount($userId, $bank, $effectiveCardLastFour);
+            $cardType = isset($text) ? $this->extractCardTypeForBank($bank, (string)$text) : '';
+            $accountId = $this->getOrCreateCreditCardAccount($userId, $bank, $effectiveCardLastFour, $cardType !== '' ? $cardType : null);
             $stats = $this->persistParsedCardTransactions(
                 $userId,
                 $bank,
@@ -2314,10 +2316,35 @@ PY;
         return in_array($bank, ['icici', 'sbi', 'rbl'], true);
     }
 
-    private function getOrCreateCreditCardAccount(int $userId, string $bank, string $cardLastFour): int
+    /**
+     * Detect the card product name from decrypted statement text (e.g. ICICI
+     * "Rubyx"/"Amazon Pay"/"Coral"/"Platinum", RBL "Play") so two cards from the
+     * same bank get distinct account names instead of both being "{BANK} Card".
+     * Mirrors scraper/src/transactions/credit-cards.ts's detectBankAndCardType.
+     */
+    private function extractCardTypeForBank(string $bank, string $text): string
+    {
+        if (trim($text) === '') {
+            return '';
+        }
+        $upper = strtoupper($text);
+
+        if ($bank === 'icici') {
+            if (str_contains($upper, 'RUBYX') || str_contains($upper, 'RUBY')) return 'Rubyx';
+            if (str_contains($upper, 'AMAZON PAY')) return 'Amazon Pay';
+            if (str_contains($upper, 'CORAL')) return 'Coral';
+            if (str_contains($upper, 'PLATINUM')) return 'Platinum';
+        } elseif ($bank === 'rbl') {
+            if (str_contains($upper, 'PLAY')) return 'Play';
+        }
+
+        return '';
+    }
+
+    private function getOrCreateCreditCardAccount(int $userId, string $bank, string $cardLastFour, ?string $cardType = null): int
     {
         $existing = $this->db->fetchOne(
-            "SELECT id FROM bank_accounts
+            "SELECT id, card_type FROM bank_accounts
              WHERE user_id = ? AND bank = ? AND account_type = 'credit_card'
                AND (card_last_four = ? OR account_number LIKE ?)
              ORDER BY id DESC
@@ -2326,21 +2353,29 @@ PY;
         );
 
         if ($existing && isset($existing['id'])) {
+            if ($cardType && empty($existing['card_type'])) {
+                $this->db->execute(
+                    "UPDATE bank_accounts SET card_type = ?, account_name = ? WHERE id = ?",
+                    [$cardType, strtoupper($bank) . ' ' . $cardType, $existing['id']]
+                );
+            }
             return (int)$existing['id'];
         }
 
         $accountNumber = 'XXXX' . $cardLastFour;
+        $accountName = $cardType ? (strtoupper($bank) . ' ' . $cardType) : (strtoupper($bank) . ' Card');
         try {
             return (int)$this->db->insert(
                 "INSERT INTO bank_accounts
-                 (user_id, bank, account_type, account_number, account_name, card_last_four, status)
-                 VALUES (?, ?, 'credit_card', ?, ?, ?, 'active')",
+                 (user_id, bank, account_type, account_number, account_name, card_last_four, card_type, status)
+                 VALUES (?, ?, 'credit_card', ?, ?, ?, ?, 'active')",
                 [
                     $userId,
                     $bank,
                     $accountNumber,
-                    strtoupper($bank) . ' Card',
+                    $accountName,
                     $cardLastFour,
+                    $cardType,
                 ]
             );
         } catch (Exception $e) {

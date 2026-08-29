@@ -24,40 +24,60 @@ function getWidgetSummary($userId)
 
     $hasStatus = widgetDetectColumn($db, 'transactions', 'status');
     $hasDeletedAt = widgetDetectColumn($db, 'transactions', 'deleted_at');
-    $statusClause = $hasStatus ? "AND status IN ('completed', 'pending')" : '';
-    $deletedClause = $hasDeletedAt ? 'AND deleted_at IS NULL' : '';
+    $statusClause = $hasStatus ? "AND t.status IN ('completed', 'pending')" : '';
+    $deletedClause = $hasDeletedAt ? 'AND t.deleted_at IS NULL' : '';
+
+    // Debit sums exclude Transfer-type categories (e.g. a credit card bill
+    // payment, which settles debt already counted via the card's own line
+    // items) and net out allocated refunds/reimbursements, which otherwise
+    // only ever show as a display label and never actually reduce spend.
+    $refundJoin = "LEFT JOIN (
+         SELECT expense_transaction_id, SUM(amount) as allocated
+         FROM transaction_refund_allocations
+         WHERE user_id = :ra_user_id AND deleted_at IS NULL
+         GROUP BY expense_transaction_id
+       ) ra ON ra.expense_transaction_id = t.id";
+    $notTransferClause = "(t.transaction_type != 'debit' OR c.type IS NULL OR c.type != 'transfer')";
 
     $monthTotalsStmt = $db->prepare(
       "SELECT
-          SUM(CASE WHEN transaction_type = 'debit' THEN amount ELSE 0 END) AS month_spent,
-          SUM(CASE WHEN transaction_type = 'credit' THEN amount ELSE 0 END) AS month_income,
-          SUM(CASE WHEN transaction_type = 'debit' THEN 1 ELSE 0 END) AS transaction_count
-       FROM transactions
-       WHERE user_id = :user_id
-         AND transaction_date >= :month_start
-         AND transaction_date < :next_month_start
+          SUM(CASE WHEN t.transaction_type = 'debit' THEN t.amount - COALESCE(ra.allocated, 0) ELSE 0 END) AS month_spent,
+          SUM(CASE WHEN t.transaction_type = 'credit' THEN t.amount ELSE 0 END) AS month_income,
+          SUM(CASE WHEN t.transaction_type = 'debit' THEN 1 ELSE 0 END) AS transaction_count
+       FROM transactions t
+       LEFT JOIN categories c ON c.id = t.category_id
+       {$refundJoin}
+       WHERE t.user_id = :user_id
+         AND t.transaction_date >= :month_start
+         AND t.transaction_date < :next_month_start
+         AND {$notTransferClause}
          {$deletedClause}
          {$statusClause}"
     );
     $monthTotalsStmt->execute([
       ':user_id' => $userId,
+      ':ra_user_id' => $userId,
       ':month_start' => $monthStart,
       ':next_month_start' => $nextMonthStart,
     ]);
     $monthTotals = $monthTotalsStmt->fetch(PDO::FETCH_ASSOC) ?: [];
 
     $previousSpendStmt = $db->prepare(
-      "SELECT COALESCE(SUM(amount), 0) AS previous_spent
-       FROM transactions
-       WHERE user_id = :user_id
-         AND transaction_type = 'debit'
-         AND transaction_date >= :previous_month_start
-         AND transaction_date < :month_start
+      "SELECT COALESCE(SUM(t.amount - COALESCE(ra.allocated, 0)), 0) AS previous_spent
+       FROM transactions t
+       LEFT JOIN categories c ON c.id = t.category_id
+       {$refundJoin}
+       WHERE t.user_id = :user_id
+         AND t.transaction_type = 'debit'
+         AND (c.type IS NULL OR c.type != 'transfer')
+         AND t.transaction_date >= :previous_month_start
+         AND t.transaction_date < :month_start
          {$deletedClause}
          {$statusClause}"
     );
     $previousSpendStmt->execute([
       ':user_id' => $userId,
+      ':ra_user_id' => $userId,
       ':previous_month_start' => $previousMonthStart,
       ':month_start' => $monthStart,
     ]);
@@ -70,11 +90,13 @@ function getWidgetSummary($userId)
           COALESCE(c.color, '#9E9E9E') AS color,
           COALESCE(c.icon, 'help-circle-outline') AS icon,
           COUNT(t.id) AS count,
-          COALESCE(SUM(t.amount), 0) AS amount
+          COALESCE(SUM(t.amount - COALESCE(ra.allocated, 0)), 0) AS amount
        FROM transactions t
        LEFT JOIN categories c ON t.category_id = c.id
+       {$refundJoin}
        WHERE t.user_id = :user_id
          AND t.transaction_type = 'debit'
+         AND (c.type IS NULL OR c.type != 'transfer')
          AND t.transaction_date >= :month_start
          AND t.transaction_date < :next_month_start
          {$deletedClause}
@@ -85,6 +107,7 @@ function getWidgetSummary($userId)
     );
     $topCategoriesStmt->execute([
       ':user_id' => $userId,
+      ':ra_user_id' => $userId,
       ':month_start' => $monthStart,
       ':next_month_start' => $nextMonthStart,
     ]);
@@ -93,20 +116,24 @@ function getWidgetSummary($userId)
 
     $monthlySeriesStmt = $db->prepare(
       "SELECT
-          DATE_FORMAT(transaction_date, '%Y-%m') AS month_key,
-          COALESCE(SUM(amount), 0) AS amount
-       FROM transactions
-       WHERE user_id = :user_id
-         AND transaction_type = 'debit'
-         AND transaction_date >= :series_start
-         AND transaction_date < :next_month_start
+          DATE_FORMAT(t.transaction_date, '%Y-%m') AS month_key,
+          COALESCE(SUM(t.amount - COALESCE(ra.allocated, 0)), 0) AS amount
+       FROM transactions t
+       LEFT JOIN categories c ON c.id = t.category_id
+       {$refundJoin}
+       WHERE t.user_id = :user_id
+         AND t.transaction_type = 'debit'
+         AND (c.type IS NULL OR c.type != 'transfer')
+         AND t.transaction_date >= :series_start
+         AND t.transaction_date < :next_month_start
          {$deletedClause}
          {$statusClause}
-       GROUP BY DATE_FORMAT(transaction_date, '%Y-%m')
+       GROUP BY DATE_FORMAT(t.transaction_date, '%Y-%m')
        ORDER BY month_key ASC"
     );
     $monthlySeriesStmt->execute([
       ':user_id' => $userId,
+      ':ra_user_id' => $userId,
       ':series_start' => $seriesStart,
       ':next_month_start' => $nextMonthStart,
     ]);

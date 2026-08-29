@@ -38,13 +38,18 @@ class ExpenseAnalyticsController {
             $hasSplits = $this->tableExists($pdo, 'transaction_splits');
             $hasRefundAllocations = $this->tableExists($pdo, 'transaction_refund_allocations');
 
-            // 1) Collect all debit transactions in scope (group-aware).
+            // 1) Collect all debit transactions in scope (group-aware). Excludes
+            //    Transfer-type categories (e.g. a credit card bill payment) since
+            //    those settle debt already counted via the card's own line items --
+            //    counting the payment too would double-count the same spend.
             $debitParams = [$userId, $startDate];
             $debitSql = "SELECT t.id, t.account_id, t.category_id, t.amount, t.transaction_date
                          FROM transactions t
+                         JOIN categories c ON c.id = t.category_id
                          WHERE t.user_id = ?
                            AND t.transaction_date >= ?
-                           AND t.transaction_type = 'debit'";
+                           AND t.transaction_type = 'debit'
+                           AND c.type != 'transfer'";
 
             $debitSql .= $this->buildTxnStateClause('t', $hasDeletedAt, $hasStatus);
             $debitSql .= buildGroupFilterSql($groupId, $debitParams, 't');

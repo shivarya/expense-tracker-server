@@ -45,7 +45,7 @@ function detectAccountTypeAndCardLastFour($txn) {
 }
 
 // Helper function to get or create bank account
-function getOrCreateBankAccount($db, $userId, $bankName, $accountNumber, $accountType = 'savings', $cardLastFour = null) {
+function getOrCreateBankAccount($db, $userId, $bankName, $accountNumber, $accountType = 'savings', $cardLastFour = null, $cardType = null) {
   // Normalize bank name to enum value
   $bankMap = [
     'HDFC Bank' => 'hdfc',
@@ -63,82 +63,88 @@ function getOrCreateBankAccount($db, $userId, $bankName, $accountNumber, $accoun
     'Kotak Bank' => 'kotak',
     'Kotak Mahindra Bank' => 'kotak',
   ];
-  
+
   $bank = $bankMap[$bankName] ?? 'other';
-  
+
   // Clean account number (remove masking)
   $cleanAccountNumber = preg_replace('/[*X\s-]/', '', $accountNumber);
   if (empty($cleanAccountNumber)) {
     $cleanAccountNumber = 'AUTO_' . substr(md5($bankName . $accountNumber), 0, 10);
   }
-  
+
   $accountType = normalizeAccountType($accountType);
   $lastFour = substr($cleanAccountNumber, -4);
 
-  // Reuse the exact unique-account row first, regardless of any legacy account_type mismatch.
+  // Look up strictly within the same account_type first. A credit card's synthetic
+  // account_number ('XXXX'.last4) can coincidentally equal a real bank account's
+  // masked digits, so account_type must always be part of the match -- dropping it
+  // (as this used to) risks silently flipping a real bank account into a credit
+  // card row or vice versa. See CLAUDE.md's account_type collision note.
   $existing = $db->fetchOne(
-    "SELECT id, account_type, card_last_four
+    "SELECT id, card_last_four, card_type
      FROM bank_accounts
-     WHERE user_id = ? AND bank = ? AND account_number = ?",
-    [$userId, $bank, $cleanAccountNumber]
+     WHERE user_id = ? AND bank = ? AND account_type = ? AND account_number = ?",
+    [$userId, $bank, $accountType, $cleanAccountNumber]
   );
 
-  // Check if account exists
   if (!$existing && $accountType === 'credit_card' && $cardLastFour) {
     $existing = $db->fetchOne(
-      "SELECT id, account_type, card_last_four
+      "SELECT id, card_last_four, card_type
        FROM bank_accounts
-       WHERE user_id = ? AND bank = ?
+       WHERE user_id = ? AND bank = ? AND account_type = 'credit_card'
          AND (card_last_four = ? OR account_number LIKE ?)",
       [$userId, $bank, $cardLastFour, '%' . $cardLastFour]
     );
   } elseif (!$existing) {
     $existing = $db->fetchOne(
-      "SELECT id, account_type, card_last_four
+      "SELECT id, card_last_four, card_type
        FROM bank_accounts
        WHERE user_id = ? AND bank = ? AND account_type = ? AND account_number LIKE ?",
       [$userId, $bank, $accountType, '%' . $lastFour]
     );
   }
-  
+
   if ($existing) {
-    if ($accountType === 'credit_card') {
-      if (($existing['account_type'] ?? '') !== 'credit_card') {
-        $db->execute(
-          "UPDATE bank_accounts SET account_type = 'credit_card' WHERE id = ?",
-          [$existing['id']]
-        );
-      }
-
-      if ($cardLastFour && empty($existing['card_last_four'])) {
-        $db->execute(
-          "UPDATE bank_accounts SET card_last_four = ? WHERE id = ?",
-          [$cardLastFour, $existing['id']]
-        );
-      }
-    }
-
-    if ($accountType !== 'credit_card' && $cardLastFour && empty($existing['card_last_four'])) {
+    if ($cardLastFour && empty($existing['card_last_four'])) {
       $db->execute(
         "UPDATE bank_accounts SET card_last_four = ? WHERE id = ?",
         [$cardLastFour, $existing['id']]
       );
     }
+    if ($cardType && empty($existing['card_type'])) {
+      $db->execute(
+        "UPDATE bank_accounts SET card_type = ?, account_name = ? WHERE id = ?",
+        [$cardType, strtoupper($bank) . ' ' . $cardType, $existing['id']]
+      );
+    }
     return $existing['id'];
   }
-  
+
   // Create new account
-  $sql = "INSERT INTO bank_accounts (user_id, bank, account_type, account_number, account_name, card_last_four, status)
-          VALUES (?, ?, ?, ?, ?, ?, ?)";
-  return $db->insert($sql, [
-    $userId,
-    $bank,
-    $accountType,
-    $cleanAccountNumber,
-    $bankName . ($accountType === 'credit_card' ? ' Card' : ' Account'),
-    $accountType === 'credit_card' ? $cardLastFour : null,
-    'active'
-  ]);
+  $accountName = $cardType
+    ? (strtoupper($bank) . ' ' . $cardType)
+    : ($bankName . ($accountType === 'credit_card' ? ' Card' : ' Account'));
+
+  try {
+    $sql = "INSERT INTO bank_accounts (user_id, bank, account_type, account_number, account_name, card_last_four, card_type, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)";
+    return $db->insert($sql, [
+      $userId,
+      $bank,
+      $accountType,
+      $cleanAccountNumber,
+      $accountName,
+      $accountType === 'credit_card' ? $cardLastFour : null,
+      $cardType,
+      'active'
+    ]);
+  } catch (Exception $e) {
+    // unique_account (user_id, bank, account_number) collision with a DIFFERENT
+    // account_type -- e.g. a credit card's synthetic number happens to match a
+    // real bank account's masked digits. Never silently repurpose that row (the
+    // old behavior here); surface it instead so it gets investigated.
+    throw new Exception("Cannot create {$accountType} account for {$bank}/{$cleanAccountNumber}: account_number is already used by a different-typed account for this user. Original error: " . $e->getMessage());
+  }
 }
 
 // Helper function to get or create category
@@ -507,13 +513,16 @@ function syncTransactions($userId)
             . ' ref=' . (string)($txn['reference_number'] ?? ''));
         }
 
+        $sourceCardType = trim((string)($txn['source_data']['card_type'] ?? ''));
+
         $accountId = getOrCreateBankAccount(
           $db,
           $userId,
           $txn['bank'],
           $txn['account_number'],
           $accountType,
-          $cardLastFour
+          $cardLastFour,
+          $sourceCardType !== '' ? $sourceCardType : null
         );
         
         // Get or create category

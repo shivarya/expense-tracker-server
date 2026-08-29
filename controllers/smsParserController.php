@@ -926,6 +926,14 @@ class SMSParserController {
             return $learnedCategoryId;
         }
 
+        // A payment TOWARDS your own credit card bill settles debt already counted
+        // when the card's own line items were recorded — categorizing it as a fresh
+        // expense would double-count that spend. Deterministic backstop independent
+        // of whether the AI followed the equivalent prompt instruction.
+        if ($this->looksLikeCreditCardBillPayment($transaction)) {
+            return 17; // Transfer
+        }
+
         // Check trusted contacts first — self-transfers should always be Transfer (17)
         $merchant = strtolower(trim($transaction['merchant'] ?? ''));
         if ($merchant !== '') {
@@ -947,6 +955,43 @@ class SMSParserController {
         }
 
         return CategoryResolver::resolveTransaction($transaction);
+    }
+
+    /**
+     * Detect a debit that pays down the user's own credit card bill (autopay,
+     * NACH/e-mandate, or a manual "credit card bill payment" transfer). This is
+     * distinct from a plain card purchase — it's money settling debt that was
+     * already counted as spend when the card's own line items were recorded.
+     */
+    private function looksLikeCreditCardBillPayment(array $transaction): bool
+    {
+        if (($transaction['transaction_type'] ?? '') !== 'debit') {
+            return false;
+        }
+
+        $haystack = strtolower(trim(($transaction['merchant'] ?? '') . ' ' . ($transaction['description'] ?? '')));
+        if ($haystack === '') {
+            return false;
+        }
+
+        $explicitPhrases = [
+            'credit card bill', 'credit card payment', 'card bill payment',
+            'towards your credit card', 'towards credit card', 'cc bill payment',
+            'card bill', 'credit card autopay', 'credit card auto debit',
+        ];
+        foreach ($explicitPhrases as $phrase) {
+            if (str_contains($haystack, $phrase)) {
+                return true;
+            }
+        }
+
+        // Generic combo: mentions "credit card" alongside payment/bill/due wording.
+        if (str_contains($haystack, 'credit card')
+            && (str_contains($haystack, 'payment') || str_contains($haystack, 'bill') || str_contains($haystack, 'due'))) {
+            return true;
+        }
+
+        return false;
     }
 
     private function getOrCreateBankAccount(int $userId, array $transaction): int {

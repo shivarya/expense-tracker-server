@@ -75,21 +75,33 @@ function getDashboardSummary($userId)
       [$userId]
     );
 
-    // Get current month expenses by category
+    // Get current month expenses by category. Excludes Transfer-type categories
+    // (e.g. a credit card bill payment) since those settle debt already counted
+    // via the card's own line items -- counting the payment too would double it.
+    // Also nets out allocated refunds/reimbursements (e.g. a spouse paying back
+    // part of an expense), which otherwise only ever show as a display label.
     $monthlyExpenses = $db->fetchAll(
-      "SELECT c.name, c.color, c.icon, COUNT(t.id) as count, SUM(t.amount) as total,
+      "SELECT c.name, c.color, c.icon, COUNT(t.id) as count,
+              SUM(t.amount - COALESCE(ra.allocated, 0)) as total,
               COALESCE(cb.monthly_budget, c.monthly_budget) AS monthly_budget
        FROM transactions t
        JOIN categories c ON t.category_id = c.id
        LEFT JOIN category_budgets cb ON cb.category_id = c.id AND cb.user_id = ?
+       LEFT JOIN (
+         SELECT expense_transaction_id, SUM(amount) as allocated
+         FROM transaction_refund_allocations
+         WHERE user_id = ? AND deleted_at IS NULL
+         GROUP BY expense_transaction_id
+       ) ra ON ra.expense_transaction_id = t.id
        WHERE t.user_id = ?
          AND t.deleted_at IS NULL
          AND t.transaction_type = 'debit'
+         AND c.type != 'transfer'
          AND YEAR(t.transaction_date) = YEAR(CURDATE())
          AND MONTH(t.transaction_date) = MONTH(CURDATE())
        GROUP BY c.id, c.name, c.color, c.icon, c.monthly_budget, cb.monthly_budget
        ORDER BY total DESC",
-      [$userId, $userId]
+      [$userId, $userId, $userId]
     );
 
     // Get investments maturing soon (next 90 days)
