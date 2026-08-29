@@ -165,13 +165,23 @@ function getTransactions($userId)
     enrichTransactionsWithSubscriptionMeta($db, (int)$userId, $transactions);
     normalizeTransactionDateFields($transactions);
 
-    // Get summary
-    $summaryParams = [$userId];
+    // Get summary. total_debit excludes Transfer-type categories (e.g. a credit
+    // card bill payment, which settles debt already counted via the card's own
+    // line items) and nets out allocated refunds/reimbursements, matching how
+    // "Spent" is computed everywhere else (Dashboard/Widget/Goals/Analytics).
+    $summaryParams = [$userId, $userId];
     $summarySQL = "SELECT
-                    SUM(CASE WHEN t.transaction_type = 'debit' THEN t.amount ELSE 0 END) as total_debit,
+                    SUM(CASE WHEN t.transaction_type = 'debit' AND c.type != 'transfer' THEN t.amount - COALESCE(ra.allocated, 0) ELSE 0 END) as total_debit,
                     SUM(CASE WHEN t.transaction_type = 'credit' THEN t.amount ELSE 0 END) as total_credit,
                     COUNT(*) as total_count
-                   FROM transactions t";
+                   FROM transactions t
+                   JOIN categories c ON c.id = t.category_id
+                   LEFT JOIN (
+                     SELECT expense_transaction_id, SUM(amount) as allocated
+                     FROM transaction_refund_allocations
+                     WHERE user_id = ? AND deleted_at IS NULL
+                     GROUP BY expense_transaction_id
+                   ) ra ON ra.expense_transaction_id = t.id";
 
     if ($keyword !== null) {
       $summarySQL .= " JOIN bank_accounts ba ON t.account_id = ba.id";
@@ -231,19 +241,27 @@ function getTransactions($userId)
     // Category breakdown for the same filtered scope (mirrors summarySQL's WHERE
     // clause) -- lets the client render a spend-by-category chart for whatever
     // filter combination is currently applied, not just the unfiltered list.
-    $categoryParams = [$userId];
+    // Transfer-type categories are excluded (same reasoning as total_debit above)
+    // and refund/reimbursement allocations are netted out of debit_amount.
+    $categoryParams = [$userId, $userId];
     $categorySQL = "SELECT t.category_id, c.name as category_name, c.color as category_color, c.icon as category_icon,
-                     SUM(CASE WHEN t.transaction_type = 'debit' THEN t.amount ELSE 0 END) as debit_amount,
+                     SUM(CASE WHEN t.transaction_type = 'debit' THEN t.amount - COALESCE(ra.allocated, 0) ELSE 0 END) as debit_amount,
                      SUM(CASE WHEN t.transaction_type = 'credit' THEN t.amount ELSE 0 END) as credit_amount,
                      COUNT(*) as transaction_count
                      FROM transactions t
-                     JOIN categories c ON t.category_id = c.id";
+                     JOIN categories c ON t.category_id = c.id
+                     LEFT JOIN (
+                       SELECT expense_transaction_id, SUM(amount) as allocated
+                       FROM transaction_refund_allocations
+                       WHERE user_id = ? AND deleted_at IS NULL
+                       GROUP BY expense_transaction_id
+                     ) ra ON ra.expense_transaction_id = t.id";
 
     if ($keyword !== null) {
       $categorySQL .= " JOIN bank_accounts ba ON t.account_id = ba.id";
     }
 
-    $categorySQL .= " WHERE t.user_id = ? AND t.deleted_at IS NULL";
+    $categorySQL .= " WHERE t.user_id = ? AND t.deleted_at IS NULL AND c.type != 'transfer'";
 
     if ($startDate) {
       $categorySQL .= " AND t.transaction_date >= ?";
