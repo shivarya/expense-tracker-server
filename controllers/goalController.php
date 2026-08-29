@@ -213,13 +213,22 @@ function computeSpendCapProgress($db, $userId, $goal)
     );
     $categoryIds = array_column($rows, 'id');
   }
+
+  // Excluded categories apply on top of either mode above -- e.g. a one-off
+  // "Gift" category the user never wants counted toward this particular cap.
+  $excludedCategoryIds = $goal['excluded_category_ids'] ? (json_decode($goal['excluded_category_ids'], true) ?? []) : [];
+  if (!empty($excludedCategoryIds)) {
+    $categoryIds = array_values(array_diff($categoryIds, $excludedCategoryIds));
+  }
+
   if (empty($categoryIds)) $categoryIds = [0]; // no matching categories -> zero spend, not a SQL error
 
   $placeholders = implode(',', array_fill(0, count($categoryIds), '?'));
 
   // Net out allocated refunds/reimbursements (e.g. a spouse paying back part of
   // an expense) -- without this join, an allocation is purely a display label
-  // elsewhere and never actually reduces what counts against the cap.
+  // elsewhere and never actually reduces what counts against the cap. Also
+  // skips any individual transaction the user has flagged exclude_from_cap.
   $rows = $db->fetchAll(
     "SELECT t.category_id, c.name AS category_name, c.color AS category_color, c.icon AS category_icon,
             SUM(t.amount - COALESCE(ra.allocated, 0)) as total
@@ -234,6 +243,7 @@ function computeSpendCapProgress($db, $userId, $goal)
      WHERE t.user_id = ?
        AND t.deleted_at IS NULL
        AND t.transaction_type = 'debit'
+       AND t.exclude_from_cap = 0
        AND YEAR(t.transaction_date) = YEAR(CURDATE())
        AND MONTH(t.transaction_date) = MONTH(CURDATE())
        AND t.category_id IN ($placeholders)
@@ -294,6 +304,7 @@ function getGoals($userId)
 
     foreach ($goals as &$goal) {
       $goal['linked_category_ids'] = $goal['linked_category_ids'] ? json_decode($goal['linked_category_ids'], true) : null;
+      $goal['excluded_category_ids'] = $goal['excluded_category_ids'] ? json_decode($goal['excluded_category_ids'], true) : null;
       $goal['linked_mutual_fund_ids'] = $goal['linked_mutual_fund_ids'] ? json_decode($goal['linked_mutual_fund_ids'], true) : null;
       $goal['linked_long_term_fund_ids'] = $goal['linked_long_term_fund_ids'] ? json_decode($goal['linked_long_term_fund_ids'], true) : null;
       $goal['progress'] = computeGoalProgress($db, $userId, $goal);
@@ -316,6 +327,7 @@ function getGoal($userId, $goalId)
     }
 
     $goal['linked_category_ids'] = $goal['linked_category_ids'] ? json_decode($goal['linked_category_ids'], true) : null;
+    $goal['excluded_category_ids'] = $goal['excluded_category_ids'] ? json_decode($goal['excluded_category_ids'], true) : null;
     $goal['linked_mutual_fund_ids'] = $goal['linked_mutual_fund_ids'] ? json_decode($goal['linked_mutual_fund_ids'], true) : null;
     $goal['linked_long_term_fund_ids'] = $goal['linked_long_term_fund_ids'] ? json_decode($goal['linked_long_term_fund_ids'], true) : null;
     $goal['progress'] = computeGoalProgress($db, $userId, $goal);
@@ -362,6 +374,7 @@ function createGoal($userId)
     $assumedReturn = null;
     $assumedContribution = null;
     $linkedCategoryIds = null;
+    $excludedCategoryIds = null;
 
     if ($goalType === 'debt_payoff') {
       if (empty($input['emi_id'])) {
@@ -404,12 +417,23 @@ function createGoal($userId)
         }
         $linkedCategoryIds = json_encode($ids);
       }
+      if (!empty($input['excluded_category_ids']) && is_array($input['excluded_category_ids'])) {
+        $ids = array_map('intval', $input['excluded_category_ids']);
+        $valid = $db->fetchAll(
+          "SELECT id FROM categories WHERE id IN (" . implode(',', array_fill(0, count($ids), '?')) . ") AND (user_id = ? OR user_id IS NULL)",
+          array_merge($ids, [$userId])
+        );
+        if (count($valid) !== count($ids)) {
+          Response::error('Validation failed', 422, ['excluded_category_ids' => 'One or more category ids are invalid for this user']);
+        }
+        $excludedCategoryIds = json_encode($ids);
+      }
     }
 
     $id = $db->insert(
       "INSERT INTO goals (user_id, goal_type, name, emi_id, target_amount, start_amount, target_date,
-              assumed_annual_return_percent, assumed_monthly_contribution, linked_category_ids, notes)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              assumed_annual_return_percent, assumed_monthly_contribution, linked_category_ids, excluded_category_ids, notes)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
       [
         $userId,
         $goalType,
@@ -421,6 +445,7 @@ function createGoal($userId)
         $assumedReturn,
         $assumedContribution,
         $linkedCategoryIds,
+        $excludedCategoryIds,
         $input['notes'] ?? null,
       ]
     );
@@ -486,6 +511,24 @@ function updateGoal($userId, $goalId)
       }
     }
 
+    // spend_cap only: re-scope which categories are excluded from this cap
+    // (e.g. a one-off "Gift" category). Sending an empty array clears back
+    // to no exclusions; omitting the field entirely leaves it unchanged.
+    $excludedCategoryIdsJson = $goal['excluded_category_ids'];
+    if ($goal['goal_type'] === 'spend_cap' && array_key_exists('excluded_category_ids', $input)) {
+      $ids = is_array($input['excluded_category_ids']) ? array_map('intval', $input['excluded_category_ids']) : [];
+      if (!empty($ids)) {
+        $valid = $db->fetchAll(
+          "SELECT id FROM categories WHERE id IN (" . implode(',', array_fill(0, count($ids), '?')) . ") AND (user_id = ? OR user_id IS NULL)",
+          array_merge($ids, [$userId])
+        );
+        if (count($valid) !== count($ids)) {
+          Response::error('Validation failed', 422, ['excluded_category_ids' => 'One or more category ids are invalid for this user']);
+        }
+      }
+      $excludedCategoryIdsJson = json_encode($ids);
+    }
+
     $db->execute(
       "UPDATE goals SET
         name = ?,
@@ -496,6 +539,7 @@ function updateGoal($userId, $goalId)
         assumed_monthly_contribution = COALESCE(?, assumed_monthly_contribution),
         linked_mutual_fund_ids = ?,
         linked_long_term_fund_ids = ?,
+        excluded_category_ids = ?,
         status = COALESCE(?, status),
         notes = ?
        WHERE id = ? AND user_id = ?",
@@ -508,6 +552,7 @@ function updateGoal($userId, $goalId)
         $input['assumed_monthly_contribution'] ?? null,
         $linkedMfIdsJson,
         $linkedLtfIdsJson,
+        $excludedCategoryIdsJson,
         $input['status'] ?? null,
         array_key_exists('notes', $input) ? $input['notes'] : $goal['notes'],
         $goalId,

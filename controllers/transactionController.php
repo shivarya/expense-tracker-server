@@ -31,6 +31,8 @@ function handleTransactionRoutes($uri, $method)
     updateTransactionRefundAllocations($userId, (int)$matches[1]);
   } elseif (preg_match('/^\/transactions\/(\d+)\/category$/', $uri, $matches) && ($method === 'PATCH' || $method === 'PUT')) {
     updateTransactionCategory($userId, $matches[1]);
+  } elseif (preg_match('/^\/transactions\/(\d+)\/exclude-from-cap$/', $uri, $matches) && ($method === 'PATCH' || $method === 'PUT')) {
+    updateTransactionCapExclusion($userId, (int)$matches[1]);
   } elseif (preg_match('/^\/transactions\/(\d+)$/', $uri, $matches) && ($method === 'PUT' || $method === 'PATCH')) {
     updateTransaction($userId, (int)$matches[1]);
   } elseif (preg_match('/^\/transactions\/(\d+)$/', $uri, $matches) && $method === 'DELETE') {
@@ -751,6 +753,45 @@ function updateTransactionCategory($userId, $transactionId)
     ], 'Transaction category updated successfully');
   } catch (Exception $e) {
     Response::error('Failed to update transaction category: ' . $e->getMessage(), 500);
+  }
+}
+
+// Excludes a single transaction from the Monthly Discretionary Cap without
+// affecting the overall "Spent" figures shown on Dashboard/Widget/Analytics --
+// e.g. a one-off large purchase the user doesn't want to count against this
+// month's cap.
+function updateTransactionCapExclusion($userId, $transactionId)
+{
+  try {
+    $input = getJsonInput();
+
+    if (!array_key_exists('exclude_from_cap', $input)) {
+      Response::error('exclude_from_cap is required', 422);
+    }
+
+    $exclude = (bool)$input['exclude_from_cap'];
+
+    $db = getDB();
+
+    $txn = $db->fetchOne(
+      "SELECT id FROM transactions WHERE id = ? AND user_id = ? AND deleted_at IS NULL",
+      [$transactionId, $userId]
+    );
+    if (!$txn) {
+      Response::error('Transaction not found', 404);
+    }
+
+    $db->execute(
+      "UPDATE transactions SET exclude_from_cap = ? WHERE id = ? AND user_id = ?",
+      [$exclude ? 1 : 0, $transactionId, $userId]
+    );
+
+    Response::success([
+      'id' => (int)$transactionId,
+      'exclude_from_cap' => $exclude,
+    ], 'Transaction cap exclusion updated successfully');
+  } catch (Exception $e) {
+    Response::error('Failed to update transaction: ' . $e->getMessage(), 500);
   }
 }
 
