@@ -1031,7 +1031,15 @@ class StatementController
                 throw new Exception('Could not decrypt/parse SBI e-statement with available passwords.');
             }
 
-            $parsed = $this->parseSbiCasStatement($text);
+            // Two distinct e-statement layouts share this same sender pool:
+            // the netbanking-requested one has a "TRANSACTION DETAILS" block
+            // per account with one line per transaction; the YONO-app one is
+            // titled "STATEMENT OF ACCOUNT" with no such marker and spreads
+            // each transaction across several lines instead (see
+            // parseSbiYonoStatement's docblock for the exact layout).
+            $parsed = str_contains($text, 'TRANSACTION DETAILS')
+                ? $this->parseSbiCasStatement($text)
+                : $this->parseSbiYonoStatement($text);
             $transactions = $parsed['transactions'];
             if (empty($transactions)) {
                 throw new Exception('No transactions found in SBI e-statement.');
@@ -1131,6 +1139,127 @@ class StatementController
         }
 
         return ['account_last_four' => $accountLastFour, 'transactions' => $transactions];
+    }
+
+    /**
+     * Parse the YONO-app-requested SBI e-statement -- a structurally
+     * different layout from parseSbiCasStatement() above: titled "STATEMENT
+     * OF ACCOUNT" (no "TRANSACTION DETAILS" marker), account number shown in
+     * full rather than masked, and each transaction spread across several
+     * lines instead of one:
+     *   "02/08/2026 02/08/2026"           transaction date, value date (DD/MM/YYYY)
+     *   "WDL TFR"                          transaction mode/type code
+     *   "UPI/DR/774803736478/ASHISH"       description, wraps across an
+     *   "T/HDFC/shivarya3@/Paym"             arbitrary number of lines
+     *   "0097695162091 AT 00219 SME"
+     *   "BRANCH, INDUSTRIAL ESTATE,"
+     *   "KANPUR"
+     *   "- 25,000.00 - 1,45,375.50"        Cheque/RefNo, Debit, Credit, Balance
+     * A credit line has the debit/credit slots swapped:
+     * "- - 1,000.00 96,160.68". A stray page-break pair (a "<N>Page no."
+     * line followed by a lone "Balance" header line) can land mid-
+     * description on a page boundary and is filtered out rather than folded
+     * into the description text.
+     */
+    private function parseSbiYonoStatement(string $text): array
+    {
+        $accountLastFour = $this->extractYonoAccountLastFour($text);
+
+        $lines = preg_split('/\r\n|\n|\r/', $text) ?: [];
+        $dateRe = '/^(\d{2}\/\d{2}\/\d{4})\s+\d{2}\/\d{2}\/\d{4}$/';
+        $amountsRe = '/^(-|[\d,]+\.\d{2})\s+(-|[\d,]+\.\d{2})\s+(-|[\d,]+\.\d{2})\s+([\d,]+\.\d{2})$/';
+
+        $transactions = [];
+        $currentDate = '';
+        $descriptionParts = [];
+
+        foreach ($lines as $rawLine) {
+            $line = trim((string)$rawLine);
+            if ($line === '') {
+                continue;
+            }
+            if (preg_match('/^\d*Page no\.?$/i', $line) || strcasecmp($line, 'Balance') === 0) {
+                continue; // page-break furniture, not description text
+            }
+
+            if (preg_match($dateRe, $line, $dm)) {
+                $currentDate = $dm[1];
+                $descriptionParts = [];
+                continue;
+            }
+
+            if ($currentDate === '') {
+                continue; // still in the header, before the first transaction
+            }
+
+            if (preg_match($amountsRe, $line, $am)) {
+                [, , $debitStr, $creditStr] = $am;
+                $debit = $debitStr === '-' ? 0.0 : (float)str_replace(',', '', $debitStr);
+                $credit = $creditStr === '-' ? 0.0 : (float)str_replace(',', '', $creditStr);
+                $isCredit = $credit > 0;
+                $amount = $isCredit ? $credit : $debit;
+
+                if ($amount > 0) {
+                    $desc = $this->stripYonoTransactionModePrefix(trim(implode(' ', $descriptionParts)));
+                    $transactions[] = [
+                        'transaction_type' => $isCredit ? 'credit' : 'debit',
+                        'amount' => $amount,
+                        'merchant' => $this->cleanSbiCasMerchant($desc),
+                        'description' => $desc,
+                        'transaction_date' => $this->toIsoDateDdMmYyyy($currentDate),
+                        'reference_number' => $this->extractSbiCasReference($desc),
+                        'raw_line' => $line,
+                    ];
+                }
+
+                $currentDate = '';
+                $descriptionParts = [];
+                continue;
+            }
+
+            $descriptionParts[] = $line;
+        }
+
+        return ['account_last_four' => $accountLastFour, 'transactions' => $transactions];
+    }
+
+    /**
+     * The YONO statement's header lists two 11-digit numbers close together
+     * with no distinguishing mask -- CIF Number first, Account Number second
+     * (the PDF's text layer extracts labels and values as separate groups,
+     * not interleaved 1:1 with each other, so matching by label adjacency
+     * isn't reliable). Scoped to the header only (before the statement body
+     * begins) to avoid an accidental match against a later UPI reference
+     * number.
+     */
+    private function extractYonoAccountLastFour(string $text): string
+    {
+        $bodyStart = strpos($text, 'STATEMENT OF ACCOUNT');
+        $header = $bodyStart !== false ? substr($text, 0, $bodyStart) : substr($text, 0, 2000);
+
+        if (preg_match_all('/\b\d{11}\b/', $header, $matches) && count($matches[0]) >= 2) {
+            return substr($matches[0][1], -4);
+        }
+        return '';
+    }
+
+    /** "02/08/2026" -> "2026-08-02" */
+    private function toIsoDateDdMmYyyy(string $ddmmyyyy): string
+    {
+        [$d, $m, $y] = explode('/', $ddmmyyyy);
+        return $y . '-' . $m . '-' . $d;
+    }
+
+    /**
+     * The YONO layout prefixes every description with a transaction-mode code
+     * ("WDL TFR", "DEP TFR", "DEBIT", "CREDIT") that the netbanking-format
+     * cleanSbiCasMerchant() below doesn't expect -- e.g. "WDL TFR UPI/DR/..."
+     * never matches its str_starts_with($desc, 'UPI/') check. Strip it first
+     * so both parsers can share the same merchant-cleaning logic.
+     */
+    private function stripYonoTransactionModePrefix(string $desc): string
+    {
+        return trim((string)preg_replace('/^(WDL\s+TFR|DEP\s+TFR|DEBIT|CREDIT)\s+/i', '', $desc));
     }
 
     /** e.g. "UPI/DR/345394731537/ASHISH T/HDFC/shivarya3@/Payme" -> "ASHISH T" */
