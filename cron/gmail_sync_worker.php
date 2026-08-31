@@ -57,21 +57,23 @@ const SOURCES = [
         'source' => 'credit_cards',
         // Only SBI/ICICI statement PDFs are parseable today (parseTransactionsByBank);
         // others are fetched but will log a parser error until their parsers land.
-        // cbssbi.cas@alerts.sbi.bank.in is a different format entirely (SBI's
-        // consolidated *savings-account* e-statement, not a credit-card
-        // statement) and is routed separately in dispatchMessage() below.
+        // cbssbi.cas@alerts.sbi.bank.in and yonobysbi@alerts.sbi.bank.in are a
+        // different format entirely (SBI's consolidated *savings-account*
+        // e-statement -- same underlying report, just requested via netbanking
+        // vs the YONO app -- not a credit-card statement) and are routed
+        // separately in dispatchMessage() below.
         'senders' => [
             'statements@hdfcbank.net', 'statements@rbl.bank.in',
             'credit_cards@icicibank.com', 'credit_cards@icici.bank.in',
             'creditcardservices@sbicard.com', 'statements@axisbank.com',
-            'cbssbi.cas@alerts.sbi.bank.in',
+            'cbssbi.cas@alerts.sbi.bank.in', 'yonobysbi@alerts.sbi.bank.in',
         ],
         'implemented' => true, // CC statements (reuses StatementController::ingestCreditCardPdf)
     ],
 ];
 
-/** Sender for SBI's consolidated account-statement (CAS) email — a savings-account layout, not a CC statement. */
-const SBI_CAS_SENDER = 'cbssbi.cas@alerts.sbi.bank.in';
+/** Senders for SBI's consolidated account-statement (CAS) email — a savings-account layout, not a CC statement. Same report, requested via netbanking or the YONO app. */
+const SBI_CAS_SENDERS = ['cbssbi.cas@alerts.sbi.bank.in', 'yonobysbi@alerts.sbi.bank.in'];
 
 // Map a credit-card statement sender address to a bank enum value.
 const CC_SENDER_BANK = [
@@ -251,8 +253,10 @@ function dispatchMessage(
         case 'transactions':
             $message = GmailFetcher::getMessage($client, $messageId);
             $from = GmailFetcher::getHeader($message, 'From');
-            if (stripos($from, SBI_CAS_SENDER) !== false) {
-                return processSbiCasMessage($client, $sc, $userId, $messageId, $message, $passwords);
+            foreach (SBI_CAS_SENDERS as $sbiCasSender) {
+                if (stripos($from, $sbiCasSender) !== false) {
+                    return processSbiCasMessage($client, $sc, $userId, $messageId, $message, $passwords);
+                }
             }
             return processCreditCardMessage($db, $client, $sc, $ai, $userId, $messageId, $message, $passwords);
         default:
