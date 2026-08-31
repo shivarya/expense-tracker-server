@@ -64,6 +64,12 @@ function getTransactions($userId)
     $maxAmount = parseOptionalTransactionAmountFilter($_GET['max_amount'] ?? null, 'max_amount');
     $limit = $_GET['limit'] ?? 100;
     $offset = isset($_GET['offset']) ? (int)$_GET['offset'] : 0;
+    // Opt-in only -- set when drilling in from the Spend Cap card, so what's
+    // shown matches what actually counted toward the cap (a transaction
+    // flagged exclude_from_cap is real spend and stays visible everywhere
+    // else -- Dashboard/Widget/Analytics/normal browsing here -- just not
+    // when the user is specifically looking at "what made up this cap").
+    $respectCapExclusions = !empty($_GET['respect_cap_exclusions']);
 
     if ((int)$limit <= 0) {
       Response::error('Invalid limit', 422);
@@ -111,6 +117,9 @@ function getTransactions($userId)
             JOIN bank_accounts ba ON t.account_id = ba.id
             WHERE t.user_id = ? AND t.deleted_at IS NULL";
 
+    if ($respectCapExclusions) {
+      $sql .= " AND t.exclude_from_cap = 0";
+    }
     if ($startDate) {
       $sql .= " AND t.transaction_date >= ?";
       $params[] = $startDate;
@@ -192,6 +201,9 @@ function getTransactions($userId)
     $summarySQL .= "
                    WHERE t.user_id = ? AND t.deleted_at IS NULL";
 
+    if ($respectCapExclusions) {
+      $summarySQL .= " AND t.exclude_from_cap = 0";
+    }
     if ($startDate) {
       $summarySQL .= " AND t.transaction_date >= ?";
       $summaryParams[] = $startDate;
@@ -265,6 +277,9 @@ function getTransactions($userId)
 
     $categorySQL .= " WHERE t.user_id = ? AND t.deleted_at IS NULL AND c.type != 'transfer'";
 
+    if ($respectCapExclusions) {
+      $categorySQL .= " AND t.exclude_from_cap = 0";
+    }
     if ($startDate) {
       $categorySQL .= " AND t.transaction_date >= ?";
       $categoryParams[] = $startDate;
