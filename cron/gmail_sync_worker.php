@@ -48,11 +48,14 @@ const SOURCES = [
         'senders' => ['eCAS@cdslstatement.com'],
         'implemented' => true, // CDSL eCAS (stocks + MF)
     ],
-    'long_term' => [
-        'source' => 'nps',
-        'senders' => ['nps-statements@mailer.proteantech.in'],
-        'implemented' => true, // NPS
-    ],
+    // 'transactions' comes before 'long_term' deliberately: NPS statements
+    // routinely fail with locked-PDF/wrong-password errors that burn through
+    // several password-candidate attempts per message, and a slow-failing
+    // source ahead of this one can exhaust WORKER_BUDGET_SECONDS via the
+    // `break 2` below before this source's loop is ever entered -- silently
+    // skipping (not failing -- just never attempted) credit-card and SBI CAS
+    // statement processing for that run. Keep this the highest-priority
+    // implemented source since it's the most-used pipeline.
     'transactions' => [
         'source' => 'credit_cards',
         // Only SBI/ICICI statement PDFs are parseable today (parseTransactionsByBank);
@@ -69,6 +72,11 @@ const SOURCES = [
             'cbssbi.cas@alerts.sbi.bank.in', 'yonobysbi@alerts.sbi.bank.in',
         ],
         'implemented' => true, // CC statements (reuses StatementController::ingestCreditCardPdf)
+    ],
+    'long_term' => [
+        'source' => 'nps',
+        'senders' => ['nps-statements@mailer.proteantech.in'],
+        'implemented' => true, // NPS
     ],
 ];
 

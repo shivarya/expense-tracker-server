@@ -19,6 +19,17 @@ class Database
         PDO::ATTR_EMULATE_PREPARES => false,
       ];
       $this->connection = new PDO($dsn, DB_USER, DB_PASS, $options);
+      // The cPanel host's OS/MySQL SYSTEM timezone is NOT Asia/Kolkata (found
+      // 2026-08-31 to be ~12h30m off real IST -- MySQL's own NOW()/CURDATE()/
+      // CURRENT_TIMESTAMP were silently computed in that wrong zone). PHP's
+      // own date()/DateTime calls are correct (config.php sets IST there),
+      // but every TIMESTAMP DEFAULT CURRENT_TIMESTAMP column and every
+      // NOW()/CURDATE() call inside a raw SQL query bypasses PHP entirely --
+      // this is what actually matters for month/day-boundary logic (spend
+      // cap day counts, "today"/"this month" WHERE clauses, EMI due-date
+      // windows). Set explicitly per-connection rather than touching the
+      // server's OS timezone, which is shared with other apps on this host.
+      $this->connection->exec("SET time_zone = '+05:30'");
     } catch (PDOException $e) {
       throw new Exception("Database connection failed: " . $e->getMessage());
     }
