@@ -27,120 +27,148 @@ function getWidgetSummary($userId)
     $statusClause = $hasStatus ? "AND t.status IN ('completed', 'pending')" : '';
     $deletedClause = $hasDeletedAt ? 'AND t.deleted_at IS NULL' : '';
 
-    // Debit sums exclude Transfer-type categories (e.g. a credit card bill
-    // payment, which settles debt already counted via the card's own line
-    // items) and net out allocated refunds/reimbursements, which otherwise
-    // only ever show as a display label and never actually reduce spend.
-    $refundJoin = "LEFT JOIN (
-         SELECT expense_transaction_id, SUM(amount) as allocated
-         FROM transaction_refund_allocations
-         WHERE user_id = :ra_user_id AND deleted_at IS NULL
-         GROUP BY expense_transaction_id
-       ) ra ON ra.expense_transaction_id = t.id";
-    $notTransferClause = "(t.transaction_type != 'debit' OR c.type IS NULL OR c.type != 'transfer')";
-
+    // Income + transaction count come straight from transactions -- credits
+    // are never split, and "how many transactions" is a distinct concept from
+    // the per-category spend breakdown below.
     $monthTotalsStmt = $db->prepare(
       "SELECT
-          SUM(CASE WHEN t.transaction_type = 'debit' THEN t.amount - COALESCE(ra.allocated, 0) ELSE 0 END) AS month_spent,
           SUM(CASE WHEN t.transaction_type = 'credit' THEN t.amount ELSE 0 END) AS month_income,
           SUM(CASE WHEN t.transaction_type = 'debit' THEN 1 ELSE 0 END) AS transaction_count
        FROM transactions t
-       LEFT JOIN categories c ON c.id = t.category_id
-       {$refundJoin}
        WHERE t.user_id = :user_id
          AND t.transaction_date >= :month_start
          AND t.transaction_date < :next_month_start
-         AND {$notTransferClause}
          {$deletedClause}
          {$statusClause}"
     );
     $monthTotalsStmt->execute([
       ':user_id' => $userId,
-      ':ra_user_id' => $userId,
       ':month_start' => $monthStart,
       ':next_month_start' => $nextMonthStart,
     ]);
     $monthTotals = $monthTotalsStmt->fetch(PDO::FETCH_ASSOC) ?: [];
 
-    $previousSpendStmt = $db->prepare(
-      "SELECT COALESCE(SUM(t.amount - COALESCE(ra.allocated, 0)), 0) AS previous_spent
-       FROM transactions t
-       LEFT JOIN categories c ON c.id = t.category_id
-       {$refundJoin}
-       WHERE t.user_id = :user_id
-         AND t.transaction_type = 'debit'
+    // Debit sums are split-aware (v_effective_debit_lines) and exclude
+    // Transfer-type categories (e.g. a credit card bill payment, which
+    // settles debt already counted via the card's own line items). Refund/
+    // reimbursement allocations are netted out via a separate query merged
+    // in PHP -- not a JOIN here -- because a JOIN would repeat (and thus
+    // over-subtract) the same allocation once per split line on a
+    // transaction that's both split and refunded.
+    $refundStmt = $db->prepare(
+      "SELECT e.category_id, e.transaction_date, SUM(a.amount) AS allocated
+       FROM transaction_refund_allocations a
+       JOIN transactions e ON e.id = a.expense_transaction_id
+       LEFT JOIN categories c ON c.id = e.category_id
+       WHERE a.user_id = :user_id
+         AND a.deleted_at IS NULL
+         AND e.deleted_at IS NULL
+         AND e.transaction_type = 'debit'
          AND (c.type IS NULL OR c.type != 'transfer')
-         AND t.transaction_date >= :previous_month_start
-         AND t.transaction_date < :month_start
-         {$deletedClause}
-         {$statusClause}"
+         AND e.transaction_date >= :series_start
+         AND e.transaction_date < :next_month_start
+       GROUP BY e.category_id, e.transaction_date"
     );
-    $previousSpendStmt->execute([
+    $refundStmt->execute([
       ':user_id' => $userId,
-      ':ra_user_id' => $userId,
-      ':previous_month_start' => $previousMonthStart,
-      ':month_start' => $monthStart,
-    ]);
-    $previousSpend = (float) (($previousSpendStmt->fetch(PDO::FETCH_ASSOC)['previous_spent'] ?? 0));
-
-    $topCategoriesStmt = $db->prepare(
-      "SELECT
-          c.id AS category_id,
-          COALESCE(c.name, 'Uncategorized') AS name,
-          COALESCE(c.color, '#9E9E9E') AS color,
-          COALESCE(c.icon, 'help-circle-outline') AS icon,
-          COUNT(t.id) AS count,
-          COALESCE(SUM(t.amount - COALESCE(ra.allocated, 0)), 0) AS amount
-       FROM transactions t
-       LEFT JOIN categories c ON t.category_id = c.id
-       {$refundJoin}
-       WHERE t.user_id = :user_id
-         AND t.transaction_type = 'debit'
-         AND (c.type IS NULL OR c.type != 'transfer')
-         AND t.transaction_date >= :month_start
-         AND t.transaction_date < :next_month_start
-         {$deletedClause}
-         {$statusClause}
-       GROUP BY COALESCE(c.id, 0), COALESCE(c.name, 'Uncategorized'), COALESCE(c.color, '#9E9E9E'), COALESCE(c.icon, 'help-circle-outline')
-       ORDER BY amount DESC
-       LIMIT 3"
-    );
-    $topCategoriesStmt->execute([
-      ':user_id' => $userId,
-      ':ra_user_id' => $userId,
-      ':month_start' => $monthStart,
-      ':next_month_start' => $nextMonthStart,
-    ]);
-    $topCategoriesRows = $topCategoriesStmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
-    $topCategories = array_map('widgetMapCategorySummary', $topCategoriesRows);
-
-    $monthlySeriesStmt = $db->prepare(
-      "SELECT
-          DATE_FORMAT(t.transaction_date, '%Y-%m') AS month_key,
-          COALESCE(SUM(t.amount - COALESCE(ra.allocated, 0)), 0) AS amount
-       FROM transactions t
-       LEFT JOIN categories c ON c.id = t.category_id
-       {$refundJoin}
-       WHERE t.user_id = :user_id
-         AND t.transaction_type = 'debit'
-         AND (c.type IS NULL OR c.type != 'transfer')
-         AND t.transaction_date >= :series_start
-         AND t.transaction_date < :next_month_start
-         {$deletedClause}
-         {$statusClause}
-       GROUP BY DATE_FORMAT(t.transaction_date, '%Y-%m')
-       ORDER BY month_key ASC"
-    );
-    $monthlySeriesStmt->execute([
-      ':user_id' => $userId,
-      ':ra_user_id' => $userId,
       ':series_start' => $seriesStart,
       ':next_month_start' => $nextMonthStart,
     ]);
-    $monthlySeriesRows = $monthlySeriesStmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
-    $monthlySpendSeries = widgetBuildMonthlySpendSeries($seriesStart, $monthlySeriesRows);
+    $refundRows = $refundStmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
 
-    $monthSpent = (float) ($monthTotals['month_spent'] ?? 0);
+    $categoryMetaStmt = $db->prepare("SELECT id, name, color, icon FROM categories WHERE user_id = :user_id OR user_id IS NULL");
+    $categoryMetaStmt->execute([':user_id' => $userId]);
+    $categoryMeta = [];
+    foreach ($categoryMetaStmt->fetchAll(PDO::FETCH_ASSOC) ?: [] as $row) {
+      $categoryMeta[(int)$row['id']] = $row;
+    }
+
+    $inMonthRange = static fn(string $date) => $date >= $monthStart && $date < $nextMonthStart;
+    $inPreviousMonthRange = static fn(string $date) => $date >= $previousMonthStart && $date < $monthStart;
+
+    $monthCategoryTotals = []; // category_id => ['amount' => .., 'count' => ..]
+    $previousSpend = 0.0;
+    $monthlyAmountByKey = []; // 'Y-m' => amount
+
+    // Row-per-effective-line (not pre-grouped) since month/previous-month/
+    // top-categories/series all need different slices of the same window.
+    $grossByDateStmt = $db->prepare(
+      "SELECT ed.category_id, ed.transaction_date, ed.amount
+       FROM v_effective_debit_lines ed
+       LEFT JOIN categories c ON c.id = ed.category_id
+       WHERE ed.user_id = :user_id
+         AND ed.deleted_at IS NULL
+         AND (c.type IS NULL OR c.type != 'transfer')
+         AND ed.transaction_date >= :series_start
+         AND ed.transaction_date < :next_month_start"
+    );
+    $grossByDateStmt->execute([
+      ':user_id' => $userId,
+      ':series_start' => $seriesStart,
+      ':next_month_start' => $nextMonthStart,
+    ]);
+
+    $monthSpent = 0.0;
+    foreach ($grossByDateStmt->fetchAll(PDO::FETCH_ASSOC) ?: [] as $row) {
+      $date = substr((string)$row['transaction_date'], 0, 10);
+      $monthKey = substr((string)$row['transaction_date'], 0, 7);
+      $amount = (float)$row['amount'];
+      $categoryId = $row['category_id'] !== null ? (int)$row['category_id'] : 0;
+
+      $monthlyAmountByKey[$monthKey] = ($monthlyAmountByKey[$monthKey] ?? 0.0) + $amount;
+
+      if ($inMonthRange($date)) {
+        $monthSpent += $amount;
+        if (!isset($monthCategoryTotals[$categoryId])) {
+          $monthCategoryTotals[$categoryId] = ['amount' => 0.0, 'count' => 0];
+        }
+        $monthCategoryTotals[$categoryId]['amount'] += $amount;
+        $monthCategoryTotals[$categoryId]['count'] += 1;
+      } elseif ($inPreviousMonthRange($date)) {
+        $previousSpend += $amount;
+      }
+    }
+
+    foreach ($refundRows as $row) {
+      $date = substr((string)$row['transaction_date'], 0, 10);
+      $monthKey = substr((string)$row['transaction_date'], 0, 7);
+      $allocated = (float)$row['allocated'];
+      $categoryId = $row['category_id'] !== null ? (int)$row['category_id'] : 0;
+
+      $monthlyAmountByKey[$monthKey] = ($monthlyAmountByKey[$monthKey] ?? 0.0) - $allocated;
+
+      if ($inMonthRange($date)) {
+        $monthSpent -= $allocated;
+        if (!isset($monthCategoryTotals[$categoryId])) {
+          $monthCategoryTotals[$categoryId] = ['amount' => 0.0, 'count' => 0];
+        }
+        $monthCategoryTotals[$categoryId]['amount'] -= $allocated;
+      } elseif ($inPreviousMonthRange($date)) {
+        $previousSpend -= $allocated;
+      }
+    }
+
+    $topCategories = [];
+    foreach ($monthCategoryTotals as $categoryId => $data) {
+      $meta = $categoryMeta[$categoryId] ?? null;
+      $topCategories[] = [
+        'category_id' => $categoryId > 0 ? $categoryId : null,
+        'name' => $meta['name'] ?? 'Uncategorized',
+        'color' => $meta['color'] ?? '#9E9E9E',
+        'icon' => $meta['icon'] ?? 'help-circle-outline',
+        'count' => $data['count'],
+        'amount' => round($data['amount'], 2),
+      ];
+    }
+    usort($topCategories, static fn($a, $b) => $b['amount'] <=> $a['amount']);
+    $topCategories = array_slice($topCategories, 0, 3);
+
+    $monthlySpendSeries = widgetBuildMonthlySpendSeries($seriesStart, array_map(
+      static fn($key, $amount) => ['month_key' => $key, 'amount' => $amount],
+      array_keys($monthlyAmountByKey),
+      array_values($monthlyAmountByKey)
+    ));
+
     $monthIncome = (float) ($monthTotals['month_income'] ?? 0);
     $transactionCount = (int) ($monthTotals['transaction_count'] ?? 0);
     $monthSavings = $monthIncome - $monthSpent;
@@ -195,18 +223,6 @@ function widgetDetectColumn(PDO $db, $table, $column)
   } catch (Exception $e) {
     return false;
   }
-}
-
-function widgetMapCategorySummary($row)
-{
-  return [
-    'category_id' => isset($row['category_id']) ? (int)$row['category_id'] : null,
-    'name' => $row['name'] ?? 'Uncategorized',
-    'color' => $row['color'] ?? '#9E9E9E',
-    'icon' => $row['icon'] ?? 'help-circle-outline',
-    'count' => (int) ($row['count'] ?? 0),
-    'amount' => round((float) ($row['amount'] ?? 0), 2),
-  ];
 }
 
 function widgetBuildMonthlySpendSeries($seriesStart, $rows)

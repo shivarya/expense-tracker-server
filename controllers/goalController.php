@@ -225,42 +225,86 @@ function computeSpendCapProgress($db, $userId, $goal)
 
   $placeholders = implode(',', array_fill(0, count($categoryIds), '?'));
 
-  // Net out allocated refunds/reimbursements (e.g. a spouse paying back part of
-  // an expense) -- without this join, an allocation is purely a display label
-  // elsewhere and never actually reduces what counts against the cap. Also
-  // skips any individual transaction the user has flagged exclude_from_cap.
+  // Gross spend per category, split-aware: v_effective_debit_lines resolves a
+  // split transaction (e.g. a 5000 cash withdrawal split 3000 Household Help /
+  // 2000 Miscellaneous) into its per-line categories instead of leaving the
+  // whole amount attributed to the transaction's own single category_id.
   $rows = $db->fetchAll(
-    "SELECT t.category_id, c.name AS category_name, c.color AS category_color, c.icon AS category_icon,
-            SUM(t.amount - COALESCE(ra.allocated, 0)) as total
-     FROM transactions t
-     JOIN categories c ON c.id = t.category_id
-     LEFT JOIN (
-       SELECT expense_transaction_id, SUM(amount) as allocated
-       FROM transaction_refund_allocations
-       WHERE user_id = ? AND deleted_at IS NULL
-       GROUP BY expense_transaction_id
-     ) ra ON ra.expense_transaction_id = t.id
-     WHERE t.user_id = ?
-       AND t.deleted_at IS NULL
-       AND t.transaction_type = 'debit'
-       AND t.exclude_from_cap = 0
-       AND YEAR(t.transaction_date) = YEAR(CURDATE())
-       AND MONTH(t.transaction_date) = MONTH(CURDATE())
-       AND t.category_id IN ($placeholders)
-     GROUP BY t.category_id, c.name, c.color, c.icon
-     ORDER BY total DESC",
-    array_merge([$userId, $userId], $categoryIds)
+    "SELECT ed.category_id, c.name AS category_name, c.color AS category_color, c.icon AS category_icon,
+            SUM(ed.amount) as total
+     FROM v_effective_debit_lines ed
+     JOIN categories c ON c.id = ed.category_id
+     WHERE ed.user_id = ?
+       AND ed.deleted_at IS NULL
+       AND ed.exclude_from_cap = 0
+       AND YEAR(ed.transaction_date) = YEAR(CURDATE())
+       AND MONTH(ed.transaction_date) = MONTH(CURDATE())
+       AND ed.category_id IN ($placeholders)
+     GROUP BY ed.category_id, c.name, c.color, c.icon",
+    array_merge([$userId], $categoryIds)
   );
 
-  $categoryBreakdown = array_map(static fn($row) => [
-    'category_id' => (int)$row['category_id'],
-    'category_name' => $row['category_name'],
-    'category_color' => $row['category_color'],
-    'category_icon' => $row['category_icon'],
-    'amount' => round((float)$row['total'], 2),
-  ], $rows);
+  $categoryTotals = [];
+  foreach ($rows as $row) {
+    $categoryTotals[(int)$row['category_id']] = [
+      'category_name' => $row['category_name'],
+      'category_color' => $row['category_color'],
+      'category_icon' => $row['category_icon'],
+      'amount' => round((float)$row['total'], 2),
+    ];
+  }
 
-  $sum = ['total' => array_sum(array_column($rows, 'total'))];
+  // Net out allocated refunds/reimbursements (e.g. a spouse paying back part of
+  // an expense) -- without this, an allocation is purely a display label
+  // elsewhere and never actually reduces what counts against the cap. Applied
+  // against the expense transaction's own original category_id, not
+  // split-resolved -- a transaction that's both split AND partially refunded
+  // is a rare enough combo that this matches the same simplification already
+  // accepted in the Expense Summary screen (expenseAnalyticsController.php).
+  $refundRows = $db->fetchAll(
+    "SELECT e.category_id, c.name AS category_name, c.color AS category_color, c.icon AS category_icon,
+            SUM(a.amount) as allocated
+     FROM transaction_refund_allocations a
+     JOIN transactions e ON e.id = a.expense_transaction_id
+     JOIN categories c ON c.id = e.category_id
+     WHERE a.user_id = ?
+       AND a.deleted_at IS NULL
+       AND e.deleted_at IS NULL
+       AND e.transaction_type = 'debit'
+       AND e.exclude_from_cap = 0
+       AND YEAR(e.transaction_date) = YEAR(CURDATE())
+       AND MONTH(e.transaction_date) = MONTH(CURDATE())
+       AND e.category_id IN ($placeholders)
+     GROUP BY e.category_id, c.name, c.color, c.icon",
+    array_merge([$userId], $categoryIds)
+  );
+
+  foreach ($refundRows as $row) {
+    $categoryId = (int)$row['category_id'];
+    if (!isset($categoryTotals[$categoryId])) {
+      $categoryTotals[$categoryId] = [
+        'category_name' => $row['category_name'],
+        'category_color' => $row['category_color'],
+        'category_icon' => $row['category_icon'],
+        'amount' => 0.0,
+      ];
+    }
+    $categoryTotals[$categoryId]['amount'] = round($categoryTotals[$categoryId]['amount'] - (float)$row['allocated'], 2);
+  }
+
+  $categoryBreakdown = [];
+  foreach ($categoryTotals as $categoryId => $data) {
+    $categoryBreakdown[] = [
+      'category_id' => $categoryId,
+      'category_name' => $data['category_name'],
+      'category_color' => $data['category_color'],
+      'category_icon' => $data['category_icon'],
+      'amount' => $data['amount'],
+    ];
+  }
+  usort($categoryBreakdown, static fn($a, $b) => $b['amount'] <=> $a['amount']);
+
+  $sum = ['total' => array_sum(array_column($categoryBreakdown, 'amount'))];
 
   // Use the same "now" the transaction filter above used (MySQL CURDATE()),
   // not PHP's date() -- they can disagree by a day right around midnight IST

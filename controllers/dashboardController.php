@@ -78,31 +78,75 @@ function getDashboardSummary($userId)
     // Get current month expenses by category. Excludes Transfer-type categories
     // (e.g. a credit card bill payment) since those settle debt already counted
     // via the card's own line items -- counting the payment too would double it.
-    // Also nets out allocated refunds/reimbursements (e.g. a spouse paying back
-    // part of an expense), which otherwise only ever show as a display label.
-    $monthlyExpenses = $db->fetchAll(
-      "SELECT c.name, c.color, c.icon, COUNT(t.id) as count,
-              SUM(t.amount - COALESCE(ra.allocated, 0)) as total,
+    // Split-aware via v_effective_debit_lines (e.g. a 5000 cash withdrawal split
+    // 3000 Household Help / 2000 Miscellaneous lands in both, not just whichever
+    // category the whole transaction was originally tagged).
+    $grossRows = $db->fetchAll(
+      "SELECT ed.category_id, c.name, c.color, c.icon, COUNT(*) as count,
+              SUM(ed.amount) as total,
               COALESCE(cb.monthly_budget, c.monthly_budget) AS monthly_budget
-       FROM transactions t
-       JOIN categories c ON t.category_id = c.id
+       FROM v_effective_debit_lines ed
+       JOIN categories c ON c.id = ed.category_id
        LEFT JOIN category_budgets cb ON cb.category_id = c.id AND cb.user_id = ?
-       LEFT JOIN (
-         SELECT expense_transaction_id, SUM(amount) as allocated
-         FROM transaction_refund_allocations
-         WHERE user_id = ? AND deleted_at IS NULL
-         GROUP BY expense_transaction_id
-       ) ra ON ra.expense_transaction_id = t.id
-       WHERE t.user_id = ?
-         AND t.deleted_at IS NULL
-         AND t.transaction_type = 'debit'
+       WHERE ed.user_id = ?
+         AND ed.deleted_at IS NULL
          AND c.type != 'transfer'
-         AND YEAR(t.transaction_date) = YEAR(CURDATE())
-         AND MONTH(t.transaction_date) = MONTH(CURDATE())
-       GROUP BY c.id, c.name, c.color, c.icon, c.monthly_budget, cb.monthly_budget
-       ORDER BY total DESC",
-      [$userId, $userId, $userId]
+         AND YEAR(ed.transaction_date) = YEAR(CURDATE())
+         AND MONTH(ed.transaction_date) = MONTH(CURDATE())
+       GROUP BY ed.category_id, c.name, c.color, c.icon, c.monthly_budget, cb.monthly_budget",
+      [$userId, $userId]
     );
+
+    $monthlyExpensesByCategory = [];
+    foreach ($grossRows as $row) {
+      $monthlyExpensesByCategory[(int)$row['category_id']] = [
+        'name' => $row['name'],
+        'color' => $row['color'],
+        'icon' => $row['icon'],
+        'count' => (int)$row['count'],
+        'total' => round((float)$row['total'], 2),
+        'monthly_budget' => $row['monthly_budget'],
+      ];
+    }
+
+    // Net out allocated refunds/reimbursements (e.g. a spouse paying back part
+    // of an expense), which otherwise only ever show as a display label.
+    // Applied against the expense transaction's own original category_id, not
+    // split-resolved -- see goalController.php's computeSpendCapProgress for
+    // why (same accepted simplification for the rare split+refund combo).
+    $refundRows = $db->fetchAll(
+      "SELECT e.category_id, c.name, c.color, c.icon, SUM(a.amount) as allocated
+       FROM transaction_refund_allocations a
+       JOIN transactions e ON e.id = a.expense_transaction_id
+       JOIN categories c ON c.id = e.category_id
+       WHERE a.user_id = ?
+         AND a.deleted_at IS NULL
+         AND e.deleted_at IS NULL
+         AND e.transaction_type = 'debit'
+         AND c.type != 'transfer'
+         AND YEAR(e.transaction_date) = YEAR(CURDATE())
+         AND MONTH(e.transaction_date) = MONTH(CURDATE())
+       GROUP BY e.category_id, c.name, c.color, c.icon",
+      [$userId]
+    );
+
+    foreach ($refundRows as $row) {
+      $categoryId = (int)$row['category_id'];
+      if (!isset($monthlyExpensesByCategory[$categoryId])) {
+        $monthlyExpensesByCategory[$categoryId] = [
+          'name' => $row['name'],
+          'color' => $row['color'],
+          'icon' => $row['icon'],
+          'count' => 0,
+          'total' => 0.0,
+          'monthly_budget' => null,
+        ];
+      }
+      $monthlyExpensesByCategory[$categoryId]['total'] = round($monthlyExpensesByCategory[$categoryId]['total'] - (float)$row['allocated'], 2);
+    }
+
+    $monthlyExpenses = array_values($monthlyExpensesByCategory);
+    usort($monthlyExpenses, static fn($a, $b) => $b['total'] <=> $a['total']);
 
     // Get investments maturing soon (next 90 days)
     $upcomingMaturities = [];
