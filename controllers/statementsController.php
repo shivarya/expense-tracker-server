@@ -38,12 +38,8 @@ class StatementController
         $cardLastFour = $this->normalizeCardLastFour($rawCardLastFour);
         $password = (string)($input['password'] ?? '');
 
-        if (!$this->isSupportedBank($bank)) {
-            Response::error('Only SBI and ICICI statement password setup is currently supported.', 400);
-        }
-
-        if ($accountType !== 'credit_card') {
-            Response::error('Only credit card statements are supported in this release.', 400);
+        if (!$this->isValidBankAccountTypeCombo($bank, $accountType)) {
+            Response::error('Only SBI, ICICI, RBL credit card statements, or HDFC savings statements are currently supported.', 400);
         }
 
         if (trim($rawCardLastFour) !== '' && strlen($cardLastFour) !== 4) {
@@ -393,13 +389,11 @@ class StatementController
         $rawCardLastFour = (string)($_POST['card_last_four'] ?? '');
         $cardLastFour = $this->normalizeCardLastFour($rawCardLastFour);
 
-        if (!$this->isSupportedBank($bank)) {
-            Response::error('Only SBI and ICICI statement uploads are currently supported.', 400);
+        if (!$this->isValidBankAccountTypeCombo($bank, $accountType)) {
+            Response::error('Only SBI, ICICI, RBL credit card statements, or HDFC savings statements are currently supported.', 400);
         }
 
-        if ($accountType !== 'credit_card') {
-            Response::error('Only credit card statement uploads are supported in this release.', 400);
-        }
+        $isHdfcSavings = ($bank === 'hdfc' && $accountType === 'savings');
 
         if (trim($rawCardLastFour) !== '' && strlen($cardLastFour) !== 4) {
             Response::error('card_last_four must contain 4 digits when provided.', 400);
@@ -533,7 +527,9 @@ class StatementController
                     $candidateCardContext = $cardLastFour !== '' ? $cardLastFour : $candidateCardLastFour;
 
                     $text = $this->extractPdfText($workingFile, $password, $cleanupFiles);
-                    $parsedResult = $this->parseTransactionsByBank($bank, $text, $candidateCardContext);
+                    $parsedResult = $isHdfcSavings
+                        ? array_merge($this->parseHdfcSavingsStatement($text), ['parser' => 'hdfc_savings_v1'])
+                        : $this->parseTransactionsByBank($bank, $text, $candidateCardContext);
                     $lastParserUsed = (string)($parsedResult['parser'] ?? '');
                     $lastExtractedPreview = $this->buildTextPreview($text);
                     $resolvedCardLastFour = $candidateCardContext;
@@ -558,7 +554,7 @@ class StatementController
 
             $effectiveCardLastFour = $resolvedCardLastFour !== '' ? $resolvedCardLastFour : '0000';
 
-            if ($effectiveCardLastFour !== ($cardLastFourFilter ?? '')) {
+            if (!$isHdfcSavings && $effectiveCardLastFour !== ($cardLastFourFilter ?? '')) {
                 $this->db->execute(
                     "UPDATE statement_uploads SET card_last_four = ? WHERE id = ?",
                     [$effectiveCardLastFour, $uploadId]
@@ -572,18 +568,34 @@ class StatementController
                 throw new Exception('No transactions detected in the uploaded ' . strtoupper($bank) . ' statement.');
             }
 
-            $cardType = $this->extractCardTypeForBank($bank, (string)$text);
-            $accountId = $this->getOrCreateCreditCardAccount($userId, $bank, $effectiveCardLastFour, $cardType !== '' ? $cardType : null);
-            $stats = $this->persistParsedCardTransactions(
-                $userId,
-                $bank,
-                $effectiveCardLastFour,
-                $accountId,
-                $parsedTransactions,
-                $parserName,
-                $uploadId,
-                $fileHash
-            );
+            if ($isHdfcSavings) {
+                $accountLastFour = (string)($parsedResult['account_last_four'] ?? '');
+                $accountLastFour = $accountLastFour !== '' ? $accountLastFour : '0000';
+                $accountId = $this->getOrCreateSavingsAccount($userId, $bank, $accountLastFour);
+                $stats = $this->persistParsedSavingsTransactions(
+                    $userId,
+                    $bank,
+                    $accountId,
+                    $accountLastFour,
+                    $parsedTransactions,
+                    $parserName,
+                    $uploadId,
+                    $fileHash
+                );
+            } else {
+                $cardType = $this->extractCardTypeForBank($bank, (string)$text);
+                $accountId = $this->getOrCreateCreditCardAccount($userId, $bank, $effectiveCardLastFour, $cardType !== '' ? $cardType : null);
+                $stats = $this->persistParsedCardTransactions(
+                    $userId,
+                    $bank,
+                    $effectiveCardLastFour,
+                    $accountId,
+                    $parsedTransactions,
+                    $parserName,
+                    $uploadId,
+                    $fileHash
+                );
+            }
 
             $savedCount = $stats['saved'];
             $skippedHighConfidence = $stats['skipped_high_confidence'];
@@ -1047,7 +1059,7 @@ class StatementController
 
             $accountLastFour = $parsed['account_last_four'] !== '' ? $parsed['account_last_four'] : '0000';
             $accountId = $this->getOrCreateSavingsAccount($userId, 'sbi', $accountLastFour);
-            $stats = $this->persistParsedSbiCasTransactions($userId, $accountId, $accountLastFour, $transactions, $uploadId, $fileHash);
+            $stats = $this->persistParsedSavingsTransactions($userId, 'sbi', $accountId, $accountLastFour, $transactions, 'sbi_cas', $uploadId, $fileHash);
 
             $this->db->execute(
                 "UPDATE statement_uploads
@@ -1341,21 +1353,186 @@ class StatementController
     }
 
     /**
-     * AI-refine, dedupe and insert parsed SBI CAS transactions. Mirrors
-     * persistParsedCardTransactions but for a savings-account statement (no
-     * card-specific fields, no foreign-currency handling needed — CAS
-     * statements are INR-only).
+     * Parse an HDFC savings-account "SmartStatement" PDF (the emailed monthly
+     * statement, unlike SBI's CAS/YONO layouts). Table columns are Date /
+     * Narration / Chq.-Ref No. / Value Date / Withdrawal / Deposit / Closing
+     * Balance, but the text layer wraps narration across an arbitrary number
+     * of lines before the trailing Ref-No/Value-Date/amounts land together on
+     * one line, e.g.:
+     *   "01/08/2026"
+     *   "UPI-NIRMAL BEHERA-NB2137247@OKICICI-BKID"
+     *   "0008434-515065211295-PAYMENT FROM PHONE"
+     *   "515065211295	01/08/2026	2,000.00 0.00	56,543.83"
+     * Short rows fit on one line instead:
+     *   "05/08/2026 ACH D- HDFC BANK LTD-471795462	002864704217	05/08/2026	12,506.00 0.00	29,693.33"
+     * Verified against a real statement by cross-summing parsed debit/credit
+     * counts and totals against the statement's own printed summary block.
      */
-    private function persistParsedSbiCasTransactions(
+    private function parseHdfcSavingsStatement(string $text): array
+    {
+        $accountLastFour = $this->extractHdfcSavingsAccountLastFour($text);
+
+        $lines = preg_split('/\r\n|\n|\r/', $text) ?: [];
+        $fullRowRe = '/^(\d{2}\/\d{2}\/\d{4})\s+(.*?)(?:\s+(\d+))?\s+(\d{2}\/\d{2}\/\d{4})\s+([\d,]+\.\d{2})\s+([\d,]+\.\d{2})\s+([\d,]+\.\d{2})$/';
+        $dateStartRe = '/^(\d{2}\/\d{2}\/\d{4})\b/';
+        $trailerRe = '/^(.*?)(?:(\d+)\s+)?(\d{2}\/\d{2}\/\d{4})\s+([\d,]+\.\d{2})\s+([\d,]+\.\d{2})\s+([\d,]+\.\d{2})$/';
+
+        $transactions = [];
+        $currentDate = '';
+        $descriptionParts = [];
+
+        foreach ($lines as $rawLine) {
+            $line = trim((string)$rawLine);
+            if ($line === '') {
+                continue;
+            }
+            $line = preg_replace('/\s+/', ' ', $line) ?? $line;
+
+            if ($currentDate === '') {
+                if (preg_match($dateStartRe, $line)) {
+                    if (preg_match($fullRowRe, $line, $m)) {
+                        $this->addHdfcSavingsTransaction($transactions, $m[1], $m[2], (string)($m[3] ?? ''), $m[5], $m[6], $line);
+                        continue;
+                    }
+                    preg_match($dateStartRe, $line, $dm);
+                    $currentDate = $dm[1];
+                    $remainder = trim(substr($line, strlen($dm[1])));
+                    $descriptionParts = $remainder !== '' ? [$remainder] : [];
+                }
+                continue;
+            }
+
+            // Mid-accumulation of a wrapped narration: bail out defensively if
+            // boilerplate (repeated per-page header/footer) leaks in before a
+            // trailer line is found, rather than folding it into a description.
+            if (count($descriptionParts) > 15 || $this->looksLikeHdfcBoilerplate($line)) {
+                $currentDate = '';
+                $descriptionParts = [];
+                continue;
+            }
+
+            if (preg_match($trailerRe, $line, $m)) {
+                if (trim($m[1]) !== '') {
+                    $descriptionParts[] = trim($m[1]);
+                }
+                $this->addHdfcSavingsTransaction($transactions, $currentDate, implode(' ', $descriptionParts), (string)($m[2] ?? ''), $m[4], $m[5], $line);
+                $currentDate = '';
+                $descriptionParts = [];
+                continue;
+            }
+
+            $descriptionParts[] = $line;
+        }
+
+        return ['account_last_four' => $accountLastFour, 'transactions' => $transactions];
+    }
+
+    private function addHdfcSavingsTransaction(
+        array &$transactions,
+        string $date,
+        string $narration,
+        string $refNo,
+        string $withdrawalRaw,
+        string $depositRaw,
+        string $rawLine
+    ): void {
+        $withdrawal = (float)str_replace(',', '', $withdrawalRaw);
+        $deposit = (float)str_replace(',', '', $depositRaw);
+        $isCredit = $deposit > 0;
+        $amount = $isCredit ? $deposit : $withdrawal;
+        if ($amount <= 0) {
+            return;
+        }
+
+        $narration = trim((string)preg_replace('/\s+/', ' ', $narration));
+        $transactions[] = [
+            'transaction_type' => $isCredit ? 'credit' : 'debit',
+            'amount' => round($amount, 2),
+            'merchant' => $this->cleanHdfcSavingsMerchant($narration),
+            'description' => $narration,
+            'transaction_date' => $this->toIsoDateDdMmYyyy($date),
+            'reference_number' => $this->extractHdfcSavingsReference($narration, $refNo),
+            'raw_line' => $rawLine,
+        ];
+    }
+
+    /** e.g. "UPI-NIRMAL BEHERA-NB2137247@OKICICI-BKID..." -> "NIRMAL BEHERA" */
+    private function cleanHdfcSavingsMerchant(string $desc): string
+    {
+        if (preg_match('/^UPI-AUTOPAY-([^-]+)-/i', $desc, $m)) {
+            return trim($m[1]);
+        }
+        if (preg_match('/^REV-UPI-/i', $desc)) {
+            return 'UPI Reversal';
+        }
+        if (preg_match('/^UPI-([^-]+)-/i', $desc, $m)) {
+            return trim($m[1]);
+        }
+        if (preg_match('/^ACH\s?[DC]-\s*(.+)$/i', $desc, $m)) {
+            return trim($m[1]);
+        }
+        if (preg_match('/^EAW-/i', $desc)) {
+            return 'Cash Withdrawal';
+        }
+        return $this->extractMerchant($desc, 'HDFC Account Transaction');
+    }
+
+    private function extractHdfcSavingsReference(string $desc, string $refNo): ?string
+    {
+        if ($refNo !== '') {
+            return 'HDFC_' . $refNo;
+        }
+        if (preg_match('/-(\d{6,})-/', $desc, $m)) {
+            return 'HDFC_' . $m[1];
+        }
+        if (preg_match('/\b(\d{6,})\b/', $desc, $m)) {
+            return 'HDFC_' . $m[1];
+        }
+        return null;
+    }
+
+    /**
+     * The account number ("Account number : 50100124361453") is the only
+     * colon-prefixed 13-16 digit field in the header — every other numeric
+     * field there (Cust ID, Pr.Code, Br.Code, MICR, phone numbers) is
+     * shorter, so a length-scoped match is enough without needing to solve
+     * this PDF's jumbled label/value column ordering.
+     */
+    private function extractHdfcSavingsAccountLastFour(string $text): string
+    {
+        if (preg_match('/:\s*(\d{13,16})\b/', $text, $m)) {
+            return substr($m[1], -4);
+        }
+        return '';
+    }
+
+    private function looksLikeHdfcBoilerplate(string $line): bool
+    {
+        return (bool)preg_match(
+            '/^(HDFC BANK LIMITED|Generation Date|Requesting Branch code|Generated by|Contents of this statement|State account branch GSTIN|HDFC Bank GSTIN|Registered Office Address|Page \d+ of \d+|Statement From|Account Branch|A\/C Open Date|Cust ID|Account Status|Account number|RTGS\/NEFT IFSC|JOINT HOLDERS|Nomination|Expected AMB|\*\*END OF STATEMENT\*\*|STATEMENT SUMMARY|Cr Count|Dr Count|Opening Balance|Closing Balance|Debits|Credits)\b/i',
+            $line
+        );
+    }
+
+    /**
+     * AI-refine, dedupe and insert parsed savings-account statement
+     * transactions (SBI CAS/YONO, HDFC). Mirrors persistParsedCardTransactions
+     * but for a savings-account statement (no card-specific fields, no
+     * foreign-currency handling needed — these statements are INR-only).
+     */
+    private function persistParsedSavingsTransactions(
         int $userId,
+        string $bank,
         int $accountId,
         string $accountLastFour,
         array $parsedTransactions,
+        string $parserName,
         int $uploadId,
         string $fileHash
     ): array {
+        $bankLabel = strtoupper($bank);
         $statementAi = new AzureOpenAI();
-        $aiRefinements = $statementAi->refineStatementTransactions($parsedTransactions, 'SBI');
+        $aiRefinements = $statementAi->refineStatementTransactions($parsedTransactions, $bankLabel);
         if (!empty($aiRefinements)) {
             foreach ($parsedTransactions as $idx => $parsedTxn) {
                 if (!isset($aiRefinements[$idx]) || !is_array($aiRefinements[$idx])) {
@@ -1374,20 +1551,26 @@ class StatementController
             }
         }
 
-        $paymentMethod = 'SBI Savings *' . $accountLastFour;
+        $paymentMethod = $bankLabel . ' Savings *' . $accountLastFour;
 
         $savedCount = 0;
         $skippedHighConfidence = 0;
         $flaggedPossibleDuplicates = 0;
         $aiChecked = 0;
         $fallbackUsed = 0;
+        $savedDebitCount = 0;
+        $savedCreditCount = 0;
+        $savedDebitAmount = 0.0;
+        $savedCreditAmount = 0.0;
+        $savedDateMin = null;
+        $savedDateMax = null;
         $errors = [];
 
         foreach ($parsedTransactions as $txn) {
             try {
                 $normalizedType = ($txn['transaction_type'] ?? 'debit') === 'credit' ? 'credit' : 'debit';
                 $normalizedDescription = trim((string)($txn['description'] ?? ''));
-                $normalizedMerchant = trim((string)($txn['merchant'] ?? '')) ?: 'SBI Transaction';
+                $normalizedMerchant = trim((string)($txn['merchant'] ?? '')) ?: ($bankLabel . ' Transaction');
 
                 // Rules-first: a user's learned merchant->category correction
                 // beats the AI guess (mirrors the credit-card statement path).
@@ -1400,7 +1583,7 @@ class StatementController
                     : (isset($txn['category_id']) ? (int)$txn['category_id'] : null);
 
                 $transactionPayload = [
-                    'bank' => 'SBI',
+                    'bank' => $bankLabel,
                     'account_number' => $accountLastFour,
                     'transaction_type' => $normalizedType,
                     'amount' => $txn['amount'],
@@ -1438,8 +1621,8 @@ class StatementController
                 $categoryId = CategoryResolver::resolveTransaction($transactionPayload);
                 $sourceData = [
                     'source' => 'statement_pdf',
-                    'parser' => 'sbi_cas',
-                    'bank' => 'sbi',
+                    'parser' => $parserName,
+                    'bank' => $bank,
                     'account_last_four' => $accountLastFour,
                     'upload_id' => $uploadId,
                     'file_hash' => $fileHash,
@@ -1470,6 +1653,25 @@ class StatementController
                 MerchantSubscriptionDetector::evaluateTransaction($this->db, $userId, (int)$newTxnId);
 
                 $savedCount++;
+
+                $txnAmount = (float)$txn['amount'];
+                if ($normalizedType === 'credit') {
+                    $savedCreditCount++;
+                    $savedCreditAmount += $txnAmount;
+                } else {
+                    $savedDebitCount++;
+                    $savedDebitAmount += $txnAmount;
+                }
+
+                $txnDate = (string)($txn['transaction_date'] ?? '');
+                if ($txnDate !== '') {
+                    if ($savedDateMin === null || strtotime($txnDate) < strtotime($savedDateMin)) {
+                        $savedDateMin = $txnDate;
+                    }
+                    if ($savedDateMax === null || strtotime($txnDate) > strtotime($savedDateMax)) {
+                        $savedDateMax = $txnDate;
+                    }
+                }
             } catch (Exception $recordError) {
                 $errors[] = $recordError->getMessage();
             }
@@ -1481,6 +1683,12 @@ class StatementController
             'flagged' => $flaggedPossibleDuplicates,
             'ai_checked' => $aiChecked,
             'fallback_used' => $fallbackUsed,
+            'debit_count' => $savedDebitCount,
+            'credit_count' => $savedCreditCount,
+            'debit_amount' => $savedDebitAmount,
+            'credit_amount' => $savedCreditAmount,
+            'date_min' => $savedDateMin,
+            'date_max' => $savedDateMax,
             'errors' => $errors,
         ];
     }
@@ -2443,6 +2651,21 @@ PY;
     private function isSupportedBank(string $bank): bool
     {
         return in_array($bank, ['icici', 'sbi', 'rbl'], true);
+    }
+
+    /**
+     * Gate for the manual password-setup/upload entry points: SBI/ICICI/RBL
+     * are credit-card-only there, while HDFC is savings-account-only (its
+     * "SmartStatement" PDF). Kept separate from isSupportedBank(), which
+     * additionally gates the credit-card-specific ingest path used by the
+     * Gmail worker and must not start accepting 'hdfc' as a credit-card bank.
+     */
+    private function isValidBankAccountTypeCombo(string $bank, string $accountType): bool
+    {
+        if ($bank === 'hdfc') {
+            return $accountType === 'savings';
+        }
+        return $this->isSupportedBank($bank) && $accountType === 'credit_card';
     }
 
     /**
