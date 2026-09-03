@@ -203,7 +203,7 @@ function computeNetWorthProgress($db, $userId, $goal)
 function computeSpendCapProgress($db, $userId, $goal)
 {
   if ($goal['linked_category_ids']) {
-    $categoryIds = json_decode($goal['linked_category_ids'], true) ?? [];
+    $categoryIds = $goal['linked_category_ids'];
   } else {
     // Default: all expense-type categories except the fixed EMI/rent bucket.
     // Investments/Transfer are already excluded because they're type != 'expense'.
@@ -216,7 +216,7 @@ function computeSpendCapProgress($db, $userId, $goal)
 
   // Excluded categories apply on top of either mode above -- e.g. a one-off
   // "Gift" category the user never wants counted toward this particular cap.
-  $excludedCategoryIds = $goal['excluded_category_ids'] ? (json_decode($goal['excluded_category_ids'], true) ?? []) : [];
+  $excludedCategoryIds = $goal['excluded_category_ids'] ?: [];
   if (!empty($excludedCategoryIds)) {
     $categoryIds = array_values(array_diff($categoryIds, $excludedCategoryIds));
   }
@@ -728,6 +728,7 @@ function computeMonthlyPlan($db, int $userId): array
   );
   foreach ($goals as &$g) {
     $g['linked_category_ids'] = $g['linked_category_ids'] ? json_decode($g['linked_category_ids'], true) : null;
+    $g['excluded_category_ids'] = $g['excluded_category_ids'] ? json_decode($g['excluded_category_ids'], true) : null;
     $g['linked_mutual_fund_ids'] = $g['linked_mutual_fund_ids'] ? json_decode($g['linked_mutual_fund_ids'], true) : null;
     $g['linked_long_term_fund_ids'] = $g['linked_long_term_fund_ids'] ? json_decode($g['linked_long_term_fund_ids'], true) : null;
     $g['progress'] = computeGoalProgress($db, $userId, $g);
