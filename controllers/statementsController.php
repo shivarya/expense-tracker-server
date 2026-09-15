@@ -1259,6 +1259,12 @@ class StatementController
     private function toIsoDateDdMmYyyy(string $ddmmyyyy): string
     {
         [$d, $m, $y] = explode('/', $ddmmyyyy);
+        // Some HDFC savings statement templates print a 2-digit year
+        // (DD/MM/YY) — every other caller of this helper only ever passes a
+        // 4-digit year, so this expansion is a no-op for them.
+        if (strlen($y) === 2) {
+            $y = '20' . $y;
+        }
         return $y . '-' . $m . '-' . $d;
     }
 
@@ -1373,9 +1379,12 @@ class StatementController
         $accountLastFour = $this->extractHdfcSavingsAccountLastFour($text);
 
         $lines = preg_split('/\r\n|\n|\r/', $text) ?: [];
-        $fullRowRe = '/^(\d{2}\/\d{2}\/\d{4})\s+(.*?)(?:\s+(\d+))?\s+(\d{2}\/\d{2}\/\d{4})\s+([\d,]+\.\d{2})\s+([\d,]+\.\d{2})\s+([\d,]+\.\d{2})$/';
-        $dateStartRe = '/^(\d{2}\/\d{2}\/\d{4})\b/';
-        $trailerRe = '/^(.*?)(?:(\d+)\s+)?(\d{2}\/\d{2}\/\d{4})\s+([\d,]+\.\d{2})\s+([\d,]+\.\d{2})\s+([\d,]+\.\d{2})$/';
+        // Year is \d{2,4} — some HDFC savings statement templates print DD/MM/YY
+        // (2-digit year) instead of DD/MM/YYYY; toIsoDateDdMmYyyy() below expands
+        // a 2-digit year back to 4 digits.
+        $fullRowRe = '/^(\d{2}\/\d{2}\/\d{2,4})\s+(.*?)(?:\s+(\d+))?\s+(\d{2}\/\d{2}\/\d{2,4})\s+([\d,]+\.\d{2})\s+([\d,]+\.\d{2})\s+([\d,]+\.\d{2})$/';
+        $dateStartRe = '/^(\d{2}\/\d{2}\/\d{2,4})\b/';
+        $trailerRe = '/^(.*?)(?:(\d+)\s+)?(\d{2}\/\d{2}\/\d{2,4})\s+([\d,]+\.\d{2})\s+([\d,]+\.\d{2})\s+([\d,]+\.\d{2})$/';
 
         $transactions = [];
         $currentDate = '';
