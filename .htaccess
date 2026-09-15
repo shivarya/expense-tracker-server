@@ -14,22 +14,32 @@ RewriteBase /expense_tracker/
 RewriteCond %{HTTPS} off
 RewriteRule ^(.*)$ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]
 
-# CORS Headers
+# Security headers. CORS is handled entirely in index.php (real per-origin
+# allowlist, no wildcard) — setting Access-Control-* headers here too would
+# let Apache's mod_headers silently override or duplicate PHP's own headers
+# depending on processing order, undermining the allowlist.
 <IfModule mod_headers.c>
-    Header set Access-Control-Allow-Origin "*"
-    Header set Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS"
-    Header set Access-Control-Allow-Headers "Authorization, Content-Type, X-Requested-With"
-    Header set Access-Control-Allow-Credentials "true"
-    
-    # Security Headers
     Header set X-Frame-Options "SAMEORIGIN"
     Header set X-Content-Type-Options "nosniff"
     Header set X-XSS-Protection "1; mode=block"
 </IfModule>
 
-# Handle OPTIONS Requests
-RewriteCond %{REQUEST_METHOD} OPTIONS
-RewriteRule ^(.*)$ $1 [R=204,L]
+# OPTIONS preflight requests are NOT redirected here — they fall through to
+# the normal routing below and reach index.php, which already answers them
+# directly with the correct CORS headers and a 200. A previous version of
+# this rule used `RewriteRule ... [R=204,L]`, but the `R` flag always issues
+# an external redirect regardless of the status code passed to it, and
+# browsers do not follow redirects for CORS preflight requests — that
+# silently broke every cross-origin request that needed a preflight
+# (anything sending Authorization or a non-simple method) without ever
+# reaching PHP's own correct OPTIONS handling.
+
+# Web app SPA fallback — serve app/index.html for virtual client-side routes
+# under /app/ (React Navigation's browser routing, e.g. /app/expenses/current)
+# that aren't real files, instead of falling through to the PHP router below.
+RewriteCond %{REQUEST_URI} ^/expense_tracker/app(/.*)?$
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteRule ^app/.*$ /expense_tracker/app/index.html [L]
 
 # Route all requests to index.php (subfolder aware)
 RewriteCond %{REQUEST_FILENAME} !-f

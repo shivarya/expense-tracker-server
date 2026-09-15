@@ -10,18 +10,16 @@ require_once __DIR__ . '/config/database.php';
 require_once __DIR__ . '/utils/response.php';
 require_once __DIR__ . '/utils/jwt.php';
 
-// Handle CORS
+// Handle CORS. Always checked against a real allowlist — no wildcard, in dev
+// or prod. Auth is Bearer-token only (never cookies), so no
+// Access-Control-Allow-Credentials header is needed here.
 $origin = isset($_SERVER['HTTP_ORIGIN']) ? $_SERVER['HTTP_ORIGIN'] : '';
-// In development, allow all origins; in production, check ALLOWED_ORIGINS
-$isDev = (DB_HOST === 'localhost' || DB_HOST === '127.0.0.1');
-if ($isDev) {
-  header("Access-Control-Allow-Origin: *");
-} elseif (in_array($origin, ALLOWED_ORIGINS) || strpos($origin, 'exp://') === 0) {
+if ($origin !== '' && (in_array($origin, ALLOWED_ORIGINS) || strpos($origin, 'exp://') === 0)) {
   header("Access-Control-Allow-Origin: $origin");
+  header('Vary: Origin');
 }
 header('Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS');
 header('Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With');
-header('Access-Control-Allow-Credentials: true');
 header('Content-Type: application/json; charset=utf-8');
 
 // Handle preflight requests

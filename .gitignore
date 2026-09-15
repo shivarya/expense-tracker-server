@@ -50,6 +50,9 @@ uploads/
 storage/
 data/
 
+# Web app static build (deployed via expense-web-deploy skill, not git-pull)
+/app/
+
 # Config files are safe to commit - they only read from .env
 # config/config.php
 # config/database.php

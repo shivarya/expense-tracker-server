@@ -59,8 +59,9 @@ ini_set('error_log', __DIR__ . '/../php_errors.log');
 
 // CORS settings
 define('ALLOWED_ORIGINS', [
-  'http://localhost:19006', // Expo web
-  'http://localhost:8081',  // Metro bundler
-  'exp://*',                // Expo Go
+  'http://localhost:19006',       // Expo web (local dev)
+  'http://localhost:8081',        // Metro bundler
+  'exp://*',                      // Expo Go
+  'https://shivarya.dev',         // Production web app (served same-origin under /expense_tracker/app/, but listed for defense in depth)
 ]);
 
