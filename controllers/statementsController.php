@@ -39,7 +39,7 @@ class StatementController
         $password = (string)($input['password'] ?? '');
 
         if (!$this->isValidBankAccountTypeCombo($bank, $accountType)) {
-            Response::error('Only SBI, ICICI, RBL credit card statements, or HDFC savings statements are currently supported.', 400);
+            Response::error('Only SBI/ICICI/RBL credit card statements, HDFC savings statements, or SBI savings statements are currently supported.', 400);
         }
 
         if (trim($rawCardLastFour) !== '' && strlen($cardLastFour) !== 4) {
@@ -375,6 +375,40 @@ class StatementController
         }, $rows);
     }
 
+    /**
+     * Flat plaintext password list for ingestSbiCasStatement()'s
+     * try-each-password loop — mirrors gatherCandidatePasswords() in
+     * cron/gmail_sync_worker.php (the Gmail auto-sync path already uses this
+     * exact same pattern for this same parser), pooling both the generic
+     * candidate passwords and any bank-specific saved ones.
+     */
+    private function collectAllPlaintextPasswords(int $userId): array
+    {
+        $out = [];
+        $sources = [
+            "SELECT encrypted_password, iv, auth_tag FROM statement_password_candidates WHERE user_id = ?",
+            "SELECT encrypted_password, iv, auth_tag FROM statement_passwords WHERE user_id = ?",
+        ];
+        foreach ($sources as $sql) {
+            try {
+                $rows = $this->db->fetchAll($sql, [$userId]);
+            } catch (Exception $e) {
+                continue;
+            }
+            foreach ($rows as $row) {
+                try {
+                    $pwd = StatementPasswordVault::decrypt((string)$row['encrypted_password'], (string)$row['iv'], (string)$row['auth_tag']);
+                    if ($pwd !== '') {
+                        $out[] = $pwd;
+                    }
+                } catch (Throwable $e) {
+                    // skip undecryptable rows
+                }
+            }
+        }
+        return array_values(array_unique($out));
+    }
+
     public function uploadStatement(): void
     {
         $tokenData = JWTHandler::requireAuth();
@@ -390,7 +424,7 @@ class StatementController
         $cardLastFour = $this->normalizeCardLastFour($rawCardLastFour);
 
         if (!$this->isValidBankAccountTypeCombo($bank, $accountType)) {
-            Response::error('Only SBI, ICICI, RBL credit card statements, or HDFC savings statements are currently supported.', 400);
+            Response::error('Only SBI/ICICI/RBL credit card statements, HDFC savings statements, or SBI savings statements are currently supported.', 400);
         }
 
         $isHdfcSavings = ($bank === 'hdfc' && $accountType === 'savings');
@@ -401,6 +435,35 @@ class StatementController
 
         $file = $_FILES['statement_pdf'];
         $this->validateUploadedPdf($file);
+
+        // SBI savings (CAS e-statement) reuses the same worker-facing parser
+        // the Gmail auto-sync path already uses for this bank/account-type
+        // combo (ingestSbiCasStatement) — structurally unrelated to a
+        // credit-card statement, so it gets its own short-circuit here
+        // instead of going through the generic card-statement flow below.
+        if ($bank === 'sbi' && $accountType === 'savings') {
+            $workingFile = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'statement_' . uniqid() . '.pdf';
+            if (!move_uploaded_file($file['tmp_name'], $workingFile)) {
+                Response::error('Failed to persist uploaded statement file.', 500);
+            }
+            try {
+                $passwordPlaintexts = $this->collectAllPlaintextPasswords($userId);
+                $result = $this->ingestSbiCasStatement($userId, $workingFile, basename((string)$file['name']), $passwordPlaintexts);
+                Response::success(
+                    $result,
+                    !empty($result['duplicate_upload'])
+                        ? 'This statement file was already processed earlier.'
+                        : 'Statement parsed and synced successfully.'
+                );
+            } catch (Exception $e) {
+                Response::error('Statement upload failed: ' . $e->getMessage(), 500);
+            } finally {
+                if (file_exists($workingFile)) {
+                    @unlink($workingFile);
+                }
+            }
+            return;
+        }
 
         if ($cardLastFour !== '') {
             // When a card is provided, try both card-specific and generic (NULL) passwords.
@@ -1016,7 +1079,16 @@ class StatementController
             [$userId, $fileHash]
         );
         if ($existing) {
-            return ['duplicate_upload' => true, 'extracted_transactions' => 0, 'saved_transactions' => 0];
+            return [
+                'upload_id' => (int)$existing['id'],
+                'duplicate_upload' => true,
+                'extracted_transactions' => 0,
+                'saved_transactions' => 0,
+                'skipped_high_confidence' => 0,
+                'flagged_possible_duplicates' => 0,
+                'ai_checked_transactions' => 0,
+                'duplicate_fallback_used' => 0,
+            ];
         }
 
         $uploadId = (int)$this->db->insert(
@@ -1080,9 +1152,14 @@ class StatementController
             );
 
             return [
+                'upload_id' => $uploadId,
                 'duplicate_upload' => false,
                 'extracted_transactions' => count($transactions),
                 'saved_transactions' => $stats['saved'],
+                'skipped_high_confidence' => $stats['skipped_high_confidence'],
+                'flagged_possible_duplicates' => $stats['flagged'],
+                'ai_checked_transactions' => $stats['ai_checked'],
+                'duplicate_fallback_used' => $stats['fallback_used'],
             ];
         } catch (Exception $e) {
             $this->db->execute(
@@ -2711,6 +2788,9 @@ PY;
     {
         if ($bank === 'hdfc') {
             return $accountType === 'savings';
+        }
+        if ($bank === 'sbi' && $accountType === 'savings') {
+            return true;
         }
         return $this->isSupportedBank($bank) && $accountType === 'credit_card';
     }
