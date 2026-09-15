@@ -2239,12 +2239,17 @@ PY;
 
     private function buildTextPreview(string $text): string
     {
-        $preview = trim((string)preg_replace('/\s+/', ' ', $text));
+        // TEMP DEBUG (2026-09-15): widened + newlines preserved as literal
+        // "\n" to diagnose the HDFC savings parser's exact line layout for a
+        // real statement — revert to the 220-char single-line preview once
+        // that's fixed and confirmed.
+        $preview = trim(str_replace(["\r\n", "\r"], "\n", $text));
         if ($preview === '') {
             return '';
         }
 
-        return substr($preview, 0, 220);
+        $preview = preg_replace('/\n{2,}/', "\n", $preview) ?? $preview;
+        return str_replace("\n", '\\n', substr($preview, 0, 1500));
     }
 
     private function parseIciciTransactions(string $text, string $cardLastFour): array
