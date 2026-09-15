@@ -1553,12 +1553,22 @@ class StatementController
             $amount = $amount1;
             if ($previousBalance !== null) {
                 $isCredit = $balance > $previousBalance;
+            } elseif (preg_match('/^ACH\s?D-/i', $narration)) {
+                $isCredit = false;
+            } elseif (preg_match('/^ACH\s?C-/i', $narration)) {
+                $isCredit = true;
             } else {
-                // No prior balance to compare against (first transaction in
-                // the statement) — best-effort default. Narration-coded
-                // transfers (ACH C-/ACH D-) are unambiguous; anything else
-                // defaults to credit.
-                $isCredit = !preg_match('/^ACH\s?D-/i', $narration);
+                // No prior balance to compare against (only possible for the
+                // very first transaction in the statement) AND no unambiguous
+                // narration marker either — direction genuinely can't be
+                // determined from this row alone. A wrong guess here creates
+                // a real, wrongly-signed transaction: this happened once in
+                // production ("NetBanking Standing Instruction" — actually a
+                // debit — was guessed as credit, producing a duplicate of an
+                // SMS-sourced transaction with the opposite sign). Skip this
+                // one row rather than risk that; still record its balance so
+                // every later row's delta stays correct.
+                return $balance;
             }
         }
 
