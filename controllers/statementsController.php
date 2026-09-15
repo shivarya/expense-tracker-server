@@ -1373,6 +1373,13 @@ class StatementController
      *   "05/08/2026 ACH D- HDFC BANK LTD-471795462	002864704217	05/08/2026	12,506.00 0.00	29,693.33"
      * Verified against a real statement by cross-summing parsed debit/credit
      * counts and totals against the statement's own printed summary block.
+     *
+     * A second real "SmartStatement" template omits the zero-valued
+     * withdrawal/deposit cell entirely instead of printing "0.00" for it, so
+     * a row's trailing amounts are sometimes just "amount balance" (2
+     * numbers) rather than "withdrawal deposit balance" (3). When only one
+     * amount is present, credit/debit is inferred from the running balance
+     * delta instead of column position — see addHdfcSavingsTransaction().
      */
     private function parseHdfcSavingsStatement(string $text): array
     {
@@ -1382,13 +1389,15 @@ class StatementController
         // Year is \d{2,4} — some HDFC savings statement templates print DD/MM/YY
         // (2-digit year) instead of DD/MM/YYYY; toIsoDateDdMmYyyy() below expands
         // a 2-digit year back to 4 digits.
-        $fullRowRe = '/^(\d{2}\/\d{2}\/\d{2,4})\s+(.*?)(?:\s+(\d+))?\s+(\d{2}\/\d{2}\/\d{2,4})\s+([\d,]+\.\d{2})\s+([\d,]+\.\d{2})\s+([\d,]+\.\d{2})$/';
+        $amountsTail = '([\d,]+\.\d{2})(?:\s+([\d,]+\.\d{2}))?\s+([\d,]+\.\d{2})';
+        $fullRowRe = '/^(\d{2}\/\d{2}\/\d{2,4})\s+(.*?)(?:\s+(\d+))?\s+(\d{2}\/\d{2}\/\d{2,4})\s+' . $amountsTail . '$/';
         $dateStartRe = '/^(\d{2}\/\d{2}\/\d{2,4})\b/';
-        $trailerRe = '/^(.*?)(?:(\d+)\s+)?(\d{2}\/\d{2}\/\d{2,4})\s+([\d,]+\.\d{2})\s+([\d,]+\.\d{2})\s+([\d,]+\.\d{2})$/';
+        $trailerRe = '/^(.*?)(?:(\d+)\s+)?(\d{2}\/\d{2}\/\d{2,4})\s+' . $amountsTail . '$/';
 
         $transactions = [];
         $currentDate = '';
         $descriptionParts = [];
+        $runningBalance = null;
 
         foreach ($lines as $rawLine) {
             $line = trim((string)$rawLine);
@@ -1400,7 +1409,9 @@ class StatementController
             if ($currentDate === '') {
                 if (preg_match($dateStartRe, $line)) {
                     if (preg_match($fullRowRe, $line, $m)) {
-                        $this->addHdfcSavingsTransaction($transactions, $m[1], $m[2], (string)($m[3] ?? ''), $m[5], $m[6], $line);
+                        $runningBalance = $this->addHdfcSavingsTransaction(
+                            $transactions, $m[1], $m[2], (string)($m[3] ?? ''), $m[5], (string)($m[6] ?? ''), $m[7], $runningBalance, $line
+                        );
                         continue;
                     }
                     preg_match($dateStartRe, $line, $dm);
@@ -1424,7 +1435,9 @@ class StatementController
                 if (trim($m[1]) !== '') {
                     $descriptionParts[] = trim($m[1]);
                 }
-                $this->addHdfcSavingsTransaction($transactions, $currentDate, implode(' ', $descriptionParts), (string)($m[2] ?? ''), $m[4], $m[5], $line);
+                $runningBalance = $this->addHdfcSavingsTransaction(
+                    $transactions, $currentDate, implode(' ', $descriptionParts), (string)($m[2] ?? ''), $m[4], (string)($m[5] ?? ''), $m[6], $runningBalance, $line
+                );
                 $currentDate = '';
                 $descriptionParts = [];
                 continue;
@@ -1441,16 +1454,39 @@ class StatementController
         string $date,
         string $narration,
         string $refNo,
-        string $withdrawalRaw,
-        string $depositRaw,
+        string $amount1Raw,
+        string $amount2Raw,
+        string $balanceRaw,
+        ?float $previousBalance,
         string $rawLine
-    ): void {
-        $withdrawal = (float)str_replace(',', '', $withdrawalRaw);
-        $deposit = (float)str_replace(',', '', $depositRaw);
-        $isCredit = $deposit > 0;
-        $amount = $isCredit ? $deposit : $withdrawal;
+    ): ?float {
+        $balance = (float)str_replace(',', '', $balanceRaw);
+        $amount1 = (float)str_replace(',', '', $amount1Raw);
+
+        if ($amount2Raw !== '') {
+            // Original 3-number format: withdrawal, deposit, balance, always
+            // printed explicitly (0.00 for whichever side is unused).
+            $amount2 = (float)str_replace(',', '', $amount2Raw);
+            $isCredit = $amount2 > 0;
+            $amount = $isCredit ? $amount2 : $amount1;
+        } else {
+            // 2-number format: the zero-valued column was omitted entirely.
+            // Infer direction from the balance delta, deterministic whenever
+            // a prior balance is known.
+            $amount = $amount1;
+            if ($previousBalance !== null) {
+                $isCredit = $balance > $previousBalance;
+            } else {
+                // No prior balance to compare against (first transaction in
+                // the statement) — best-effort default. Narration-coded
+                // transfers (ACH C-/ACH D-) are unambiguous; anything else
+                // defaults to credit.
+                $isCredit = !preg_match('/^ACH\s?D-/i', $narration);
+            }
+        }
+
         if ($amount <= 0) {
-            return;
+            return $balance;
         }
 
         $narration = trim((string)preg_replace('/\s+/', ' ', $narration));
@@ -1463,6 +1499,8 @@ class StatementController
             'reference_number' => $this->extractHdfcSavingsReference($narration, $refNo),
             'raw_line' => $rawLine,
         ];
+
+        return $balance;
     }
 
     /** e.g. "UPI-NIRMAL BEHERA-NB2137247@OKICICI-BKID..." -> "NIRMAL BEHERA" */
@@ -2239,17 +2277,12 @@ PY;
 
     private function buildTextPreview(string $text): string
     {
-        // TEMP DEBUG (2026-09-15): widened + newlines preserved as literal
-        // "\n" to diagnose the HDFC savings parser's exact line layout for a
-        // real statement — revert to the 220-char single-line preview once
-        // that's fixed and confirmed.
-        $preview = trim(str_replace(["\r\n", "\r"], "\n", $text));
+        $preview = trim((string)preg_replace('/\s+/', ' ', $text));
         if ($preview === '') {
             return '';
         }
 
-        $preview = preg_replace('/\n{2,}/', "\n", $preview) ?? $preview;
-        return str_replace("\n", '\\n', substr($preview, 0, 1500));
+        return substr($preview, 0, 220);
     }
 
     private function parseIciciTransactions(string $text, string $cardLastFour): array
