@@ -630,6 +630,7 @@ class StatementController
             if (empty($parsedTransactions)) {
                 throw new Exception('No transactions detected in the uploaded ' . strtoupper($bank) . ' statement.');
             }
+            $this->assertStatementReconciled($parsedResult);
 
             if ($isHdfcSavings) {
                 $accountLastFour = (string)($parsedResult['account_last_four'] ?? '');
@@ -797,6 +798,7 @@ class StatementController
         $savedDateMin = null;
         $savedDateMax = null;
         $errors = [];
+        $consumedMatchIds = []; // existing rows already claimed by an earlier line of this statement
 
         foreach ($parsedTransactions as $txn) {
             try {
@@ -844,6 +846,11 @@ class StatementController
                     'skip_threshold' => 76,
                     'duplicate_threshold' => 51,
                     'source_hint' => 'statement_pdf',
+                    // Credit-card statements: an exact same-card/amount/type row from another
+                    // source (SMS, scraper) within 2 days IS this line, whatever its merchant
+                    // text says. Each existing row can absorb only ONE statement line.
+                    'statement_twin_match' => true,
+                    'consumed_match_ids' => $consumedMatchIds,
                 ]);
 
                 if (!empty($duplicateCheck['ai_used'])) {
@@ -854,6 +861,9 @@ class StatementController
                 }
                 if (!empty($duplicateCheck['should_skip'])) {
                     $skippedHighConfidence++;
+                    if (!empty($duplicateCheck['matched_transaction_id'])) {
+                        $consumedMatchIds[] = (int)$duplicateCheck['matched_transaction_id'];
+                    }
                     continue;
                 }
                 if (!empty($duplicateCheck['possible_duplicate'])) {
@@ -1023,6 +1033,7 @@ class StatementController
                     . '.'
                 );
             }
+            $this->assertStatementReconciled($parsedResult);
 
             // Statement PDFs have no card number passed in; detect the masked last
             // digits from the decrypted text so transactions file under the real card
@@ -1055,7 +1066,7 @@ class StatementController
                     $stats['flagged'],
                     $stats['ai_checked'],
                     $stats['fallback_used'],
-                    !empty($stats['errors']) ? implode(' | ', array_slice($stats['errors'], 0, 5)) : null,
+                    $this->joinStatementMessages($parsedResult['notes'] ?? [], $stats['errors'] ?? []),
                     $uploadId,
                 ]
             );
@@ -2219,11 +2230,13 @@ PY;
             ];
         }
 
-        $transactions = $this->parseIciciTransactions($text, $cardLastFour);
-        if (!empty($transactions)) {
+        $icici = $this->parseIciciStatement($text, $cardLastFour);
+        if (!empty($icici['transactions'])) {
             return [
-                'transactions' => $transactions,
+                'transactions' => $icici['transactions'],
                 'parser' => 'icici_v1',
+                'notes' => $icici['notes'],
+                'reconciled' => $icici['reconciled'],
             ];
         }
 
@@ -2392,78 +2405,277 @@ PY;
         return substr($preview, 0, 220);
     }
 
-    private function parseIciciTransactions(string $text, string $cardLastFour): array
+    /**
+     * Parser notes (e.g. "totals do not reconcile") and per-row errors, as one string for
+     * statement_uploads.error_message; null when there is nothing to say.
+     */
+    private function joinStatementMessages(array $notes, array $errors): ?string
+    {
+        $messages = array_merge(array_map('strval', $notes), array_map('strval', array_slice($errors, 0, 5)));
+
+        return $messages === [] ? null : substr(implode(' | ', $messages), 0, 1000);
+    }
+
+    /**
+     * ICICI credit-card statement parser.
+     *
+     * A transaction starts at a "dd/mm/yyyy <serial>" line and normally ends with its
+     * amount. Two things used to make rows vanish silently, so the statement's own
+     * "Purchases / Charges" and "Payments / Credits" totals never added up:
+     *   1. A row followed by page furniture (footer/header text) instead of the next
+     *      transaction, or whose amount wraps onto the next line (e.g. an EMI
+     *      "Principal Amount Amortization" row), no longer ended with its amount and was
+     *      dropped. Rows that parse the old way are unchanged; the rest are recovered by
+     *      taking the shortest prefix of the record that ends with an amount.
+     *   2. Some statements carry a SECOND, letter-scrambled copy of a page's amounts
+     *      (digits 1-9,0 rendered as X Y Z A B C D E F G) next to the readable one, and
+     *      the readable copy can be off (seen: exactly 1/1.2 of the real amount). We
+     *      therefore compare the parsed totals with the statement summary and only when
+     *      they do NOT reconcile try the scrambled amounts, using them only if that makes
+     *      the totals reconcile.
+     *
+     * @return array{transactions: array<int, array<string, mixed>>, notes: string[]}
+     */
+    private function parseIciciStatement(string $text, string $cardLastFour): array
     {
         $lines = preg_split('/\r\n|\n|\r/', $text) ?: [];
-        $combinedLines = [];
-        $currentLine = '';
+        $count = count($lines);
+        $startPattern = '/^\d{2}\/\d{2}\/\d{4}\s+\d{8,}/';
+        $rowPattern = '/^(\d{2}\/\d{2}\/\d{4})\s+(\d{8,})\s+(.+?)\s+([\d,]+\.\d{2})\s*(CR)?\s*$/i';
 
-        foreach ($lines as $line) {
-            $line = trim($line);
-            if ($line === '') {
-                continue;
+        $starts = [];
+        foreach ($lines as $i => $line) {
+            if (preg_match($startPattern, trim((string)$line))) {
+                $starts[] = $i;
             }
-
-            if (preg_match('/^\d{2}\/\d{2}\/\d{4}\s+\d{8,}/', $line)) {
-                if ($currentLine !== '') {
-                    $combinedLines[] = $currentLine;
-                }
-                $currentLine = $line;
-                continue;
-            }
-
-            if ($currentLine !== '') {
-                $currentLine .= ' ' . $line;
-            }
-        }
-
-        if ($currentLine !== '') {
-            $combinedLines[] = $currentLine;
         }
 
         $transactions = [];
+        $seenRows = [];
+        foreach ($starts as $k => $startIdx) {
+            $endIdx = $starts[$k + 1] ?? $count;
+            $parts = [];
+            for ($j = $startIdx; $j < $endIdx; $j++) {
+                $part = trim((string)$lines[$j]);
+                if ($part !== '') {
+                    $parts[] = $part;
+                }
+            }
+            $record = implode(' ', $parts);
 
-        foreach ($combinedLines as $line) {
-            if (!preg_match('/^(\d{2}\/\d{2}\/\d{4})\s+(\d{8,})\s+(.+?)\s+([\d,]+\.\d{2})\s*(CR)?\s*$/i', $line, $match)) {
+            if (!preg_match($rowPattern, $record, $match)) {
+                $match = null;
+                $prefix = '';
+                foreach ($parts as $idx => $part) {
+                    if ($idx > 3 || ($idx > 0 && $this->looksLikeIciciPageFurniture($part))) {
+                        break;
+                    }
+                    $prefix = $prefix === '' ? $part : $prefix . ' ' . $part;
+                    if (preg_match($rowPattern, $prefix, $found)) {
+                        $match = $found;
+                        $record = $prefix;
+                        break;
+                    }
+                }
+                if ($match === null) {
+                    continue;
+                }
+            }
+
+            $row = $this->buildIciciRow($match, $record, $cardLastFour);
+            if ($row === null) {
                 continue;
             }
 
-            $dateRaw = $match[1];
-            $serialNo = $match[2];
-            $middlePart = trim($match[3]);
-            $amountRaw = $match[4];
-            $isCredit = !empty($match[5]);
-
-            $amount = (float)str_replace(',', '', $amountRaw);
-            if ($amount <= 0) {
+            // The extracted text can repeat a page's rows (seen: page 1 twice, readable and
+            // scrambled copies). A serial number identifies one transaction line, so an
+            // identical repeat is the same line, not a second transaction.
+            $key = $row['reference_number'] . '|' . $row['transaction_type'] . '|' . number_format((float)$row['amount'], 2, '.', '');
+            if (isset($seenRows[$key])) {
                 continue;
             }
-
-            if (str_contains(strtolower($middlePart), 'transaction details')) {
-                continue;
-            }
-
-            $description = $middlePart;
-            if (preg_match('/^(.+?)\s+(-?\d+)(?:\s+[\d,]+\.\d{2})?\s*$/', $middlePart, $descMatch)) {
-                $description = trim($descMatch[1]);
-            }
-
-            $normalizedDate = $this->normalizeIciciDate($dateRaw);
-            $merchant = $this->extractMerchant($description, 'ICICI Card Transaction');
-
-            $transactions[] = [
-                'transaction_type' => $isCredit ? 'credit' : 'debit',
-                'amount' => round($amount, 2),
-                'merchant' => $merchant,
-                'description' => $description,
-                'transaction_date' => $normalizedDate,
-                'reference_number' => 'ICICI_' . $serialNo,
-                'raw_line' => $line,
-                'card_last_four' => $cardLastFour,
-            ];
+            $seenRows[$key] = true;
+            $transactions[] = $row;
         }
 
-        return $transactions;
+        $notes = [];
+        $reconciled = null; // null = the statement has no summary line to check against
+        $totals = $this->extractIciciStatementTotals($text);
+        if ($totals !== null) {
+            $off = static fn(array $sums): float => max(abs($sums[0] - $totals['debits']), abs($sums[1] - $totals['credits']));
+            $sums = $this->sumStatementRows($transactions);
+
+            if ($off($sums) > 0.05) {
+                $alt = $this->applyIciciScrambledAmounts($lines, $transactions, $cardLastFour);
+                if ($alt !== null) {
+                    $altSums = $this->sumStatementRows($alt['transactions']);
+                    if ($off($altSums) <= 0.05) {
+                        $transactions = $alt['transactions'];
+                        $sums = $altSums;
+                        $notes[] = "statement's readable amounts did not add up; used its second amount layer for {$alt['changed']} line(s) so totals reconcile";
+                    }
+                }
+            }
+
+            if ($off($sums) > 0.05) {
+                $notes[] = sprintf(
+                    'totals do not reconcile: parsed debits %.2f / credits %.2f vs statement %.2f / %.2f',
+                    $sums[0],
+                    $sums[1],
+                    $totals['debits'],
+                    $totals['credits']
+                );
+            }
+            // Paise-level noise is tolerated; anything bigger means lines are missing or amounts are wrong.
+            $reconciled = $off($sums) <= 1.00;
+        }
+
+        return ['transactions' => $transactions, 'notes' => $notes, 'reconciled' => $reconciled];
+    }
+
+    /**
+     * Refuse to import a statement whose rows are demonstrably wrong (they do not add up to
+     * the statement's own totals) -- saving them silently corrupted a card's history once.
+     */
+    private function assertStatementReconciled(array $parsedResult): void
+    {
+        if (($parsedResult['reconciled'] ?? null) === false) {
+            $detail = implode('; ', array_map('strval', (array)($parsedResult['notes'] ?? [])));
+            throw new Exception('Statement rows do not add up to the statement totals, so nothing was imported (' . $detail . '). The statement layout may have changed.');
+        }
+    }
+
+    /** Turn a matched statement row into the parser's transaction shape (null = not a real transaction). */
+    private function buildIciciRow(array $match, string $line, string $cardLastFour): ?array
+    {
+        $middlePart = trim($match[3]);
+        $amount = (float)str_replace(',', '', $match[4]);
+        if ($amount <= 0 || str_contains(strtolower($middlePart), 'transaction details')) {
+            return null;
+        }
+
+        $description = $middlePart;
+        if (preg_match('/^(.+?)\s+(-?\d+)(?:\s+[\d,]+\.\d{2})?\s*$/', $middlePart, $descMatch)) {
+            $description = trim($descMatch[1]);
+        }
+
+        return [
+            'transaction_type' => !empty($match[5]) ? 'credit' : 'debit',
+            'amount' => round($amount, 2),
+            'merchant' => $this->extractMerchant($description, 'ICICI Card Transaction'),
+            'description' => $description,
+            'transaction_date' => $this->normalizeIciciDate($match[1]),
+            'reference_number' => 'ICICI_' . $match[2],
+            'raw_line' => $line,
+            'card_last_four' => $cardLastFour,
+        ];
+    }
+
+    /** Footer/header text that must never be glued onto a transaction row. */
+    private function looksLikeIciciPageFurniture(string $line): bool
+    {
+        return preg_match(
+            '/Credit Limit|Available (?:Credit|Cash)|Page \d+ of \d+|Statement period|GST Number|CREDIT CARD STATEMENT|Date\s+SerNo|International Spends|Reward Points|Previous Balance|Total Amount due|Minimum Amount due|Place of supply/i',
+            $line
+        ) === 1;
+    }
+
+    /**
+     * The statement's own summary line: "Previous Balance | Purchases / Charges | Cash
+     * Advances | Payments / Credits" followed by the four amounts. Returns the expected
+     * debit total (purchases + cash advances) and credit total, or null if not found.
+     *
+     * @return array{debits: float, credits: float}|null
+     */
+    private function extractIciciStatementTotals(string $text): ?array
+    {
+        if (!preg_match(
+            '/Previous Balance\s+Purchases\s*\/\s*Charges\s+Cash Advances\s+Payments\s*\/\s*Credits\s+\D{0,4}?([\d,]+\.\d{2})\s+\D{0,4}?([\d,]+\.\d{2})\s+\D{0,4}?([\d,]+\.\d{2})\s+\D{0,4}?([\d,]+\.\d{2})/su',
+            $text,
+            $m
+        )) {
+            return null;
+        }
+
+        $num = static fn(string $v): float => (float)str_replace(',', '', $v);
+
+        return ['debits' => $num($m[2]) + $num($m[3]), 'credits' => $num($m[4])];
+    }
+
+    /** @return array{0: float, 1: float} [debit total, credit total] */
+    private function sumStatementRows(array $transactions): array
+    {
+        $debits = 0.0;
+        $credits = 0.0;
+        foreach ($transactions as $t) {
+            if (($t['transaction_type'] ?? '') === 'credit') {
+                $credits += (float)$t['amount'];
+            } else {
+                $debits += (float)$t['amount'];
+            }
+        }
+
+        return [round($debits, 2), round($credits, 2)];
+    }
+
+    /**
+     * Rebuild the row list using the scrambled amount layer where a statement has one:
+     * "26/08/2026 14051006786 UPI-...-Green fi eld parking IN 0 ZG.GG" (= 30.00). Rows are
+     * matched by serial number; scrambled rows with no readable twin are added.
+     *
+     * @return array{transactions: array<int, array<string, mixed>>, changed: int}|null
+     */
+    private function applyIciciScrambledAmounts(array $lines, array $transactions, string $cardLastFour): ?array
+    {
+        $scrambled = [];
+        foreach ($lines as $line) {
+            if (preg_match('/^(\d{2}\/\d{2}\/\d{4})\s+(\d{8,})\s+(.*?)\s([A-GX-Z,]+\.[A-GX-Z]{2})(\s+CR)?\s*$/', trim((string)$line), $m)) {
+                $scrambled[$m[2]] = [
+                    'date' => $m[1],
+                    'middle' => $m[3],
+                    'amount' => (float)str_replace(',', '', strtr($m[4], 'XYZABCDEFG', '1234567890')),
+                    'credit' => !empty($m[5]),
+                    'line' => trim((string)$line),
+                ];
+            }
+        }
+        if (empty($scrambled)) {
+            return null;
+        }
+
+        $changed = 0;
+        $seen = [];
+        foreach ($transactions as $idx => $t) {
+            $serial = preg_replace('/^ICICI_/', '', (string)$t['reference_number']);
+            if (!isset($scrambled[$serial])) {
+                continue;
+            }
+            $seen[$serial] = true;
+            $s = $scrambled[$serial];
+            $type = $s['credit'] ? 'credit' : 'debit';
+            if (abs((float)$t['amount'] - $s['amount']) > 0.005 || $t['transaction_type'] !== $type) {
+                $transactions[$idx]['amount'] = round($s['amount'], 2);
+                $transactions[$idx]['transaction_type'] = $type;
+                $changed++;
+            }
+        }
+
+        foreach ($scrambled as $serial => $s) {
+            if (isset($seen[$serial]) || $s['amount'] <= 0) {
+                continue;
+            }
+            $row = $this->buildIciciRow(
+                [$s['line'], $s['date'], (string)$serial, $s['middle'], number_format($s['amount'], 2, '.', ''), $s['credit'] ? 'CR' : ''],
+                $s['line'],
+                $cardLastFour
+            );
+            if ($row !== null) {
+                $transactions[] = $row;
+                $changed++;
+            }
+        }
+
+        return ['transactions' => $transactions, 'changed' => $changed];
     }
 
     /**

@@ -32,6 +32,11 @@ class TransactionDuplicateDetector
         $accountId = isset($options['account_id']) ? (int)$options['account_id'] : null;
         $expandLinkedAccounts = (bool)($options['expand_linked_accounts'] ?? false);
         $sourceHint = strtolower(trim((string)($options['source_hint'] ?? '')));
+        // Existing rows a caller has already matched to an earlier line of the same batch:
+        // one existing row can absorb only one incoming line (two genuine same-amount
+        // charges must not collapse into one).
+        $consumedIds = array_values(array_unique(array_map('intval', (array)($options['consumed_match_ids'] ?? []))));
+        $statementTwinMatch = (bool)($options['statement_twin_match'] ?? false);
 
         $normalized = $this->normalizeIncoming($transaction);
 
@@ -49,10 +54,22 @@ class TransactionDuplicateDetector
         // card account is the same physical transaction mis-attributed (the reference
         // number differs only because the card last4 was wrong). Catch it by
         // (calendar date, amount, type, normalized raw description) instead of the ref.
-        $crossCardMatch = $this->findStatementLineDuplicate($userId, $normalized, $accountId, $excludeTransactionId, $sourceHint);
+        $crossCardMatch = $this->findStatementLineDuplicate($userId, $normalized, $accountId, $excludeTransactionId, $sourceHint, $consumedIds);
         if ($crossCardMatch !== null) {
             $match = $this->decorateMatchWithScore($crossCardMatch, 100, 'cross_card_statement_match');
             return $this->buildResult(true, true, 100, 'cross_card_statement_match', (int)$crossCardMatch['id'], [$match], false, false);
+        }
+
+        // Card statement line vs a row already captured from another source (SMS, the
+        // scraper, ...) on the SAME card: identical type + amount within 2 days is the same
+        // transaction even when the merchant wording differs ("Urban Company" vs
+        // "UrbanClap"). Text/AI scoring used to let these through as new rows.
+        if ($statementTwinMatch && $accountId !== null && $accountId > 0) {
+            $twin = $this->findStatementTwinOnSameCard($userId, $normalized, $accountId, $excludeTransactionId, $consumedIds);
+            if ($twin !== null) {
+                $match = $this->decorateMatchWithScore($twin, 96, 'statement_same_card_twin');
+                return $this->buildResult(true, true, 96, 'statement_same_card_twin', (int)$twin['id'], [$match], false, false);
+            }
         }
 
         $accountIds = [];
@@ -246,7 +263,7 @@ class TransactionDuplicateDetector
      * account is unknown (e.g. preview), we require an exact raw-line match to stay
      * conservative.
      */
-    private function findStatementLineDuplicate(int $userId, array $normalized, ?int $accountId, ?int $excludeTransactionId, string $sourceHint = ''): ?array
+    private function findStatementLineDuplicate(int $userId, array $normalized, ?int $accountId, ?int $excludeTransactionId, string $sourceHint = '', array $consumedIds = []): ?array
     {
         $incomingRaw = $this->normalizeText($normalized['raw_description']);
         $incomingMerchant = $this->normalizeText($normalized['merchant']);
@@ -291,6 +308,9 @@ class TransactionDuplicateDetector
         $incomingIsStatement = in_array($sourceHint, ['statement_pdf', 'email'], true);
 
         foreach ($rows as $row) {
+            if (in_array((int)$row['id'], $consumedIds, true)) {
+                continue;
+            }
             $sameAccount = ($accountId !== null && (int)$row['account_id'] === $accountId);
             $candIsSms = in_array(strtolower((string)($row['source'] ?? '')), ['sms', 'sms_webhook'], true);
             // Same card is normally left to deterministic/AI scoring, EXCEPT a statement
@@ -318,6 +338,95 @@ class TransactionDuplicateDetector
                     || $this->textsLikelySame($normalized['description'], $candMerchant)) {
                     return $row;
                 }
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * The nearest existing, non-statement row on the same account with the same type and
+     * exact amount within 2 calendar days (statement dates are posting dates; SMS/scraper
+     * dates can differ by a day or two). Failing that, a near amount (within 2% / Rs 1) on
+     * the same or adjacent day whose merchant text agrees (fuel surcharge + GST). Rows in
+     * $consumedIds are skipped so each can be matched by only one statement line.
+     * Statement-sourced rows are excluded: a re-import of the same statement is caught by
+     * the file hash / reference number.
+     */
+    private function findStatementTwinOnSameCard(int $userId, array $normalized, int $accountId, ?int $excludeTransactionId, array $consumedIds): ?array
+    {
+        $day = date('Y-m-d', strtotime($normalized['transaction_date']));
+        $amount = $normalized['amount'];
+
+        $sql = "SELECT id, account_id, transaction_type, amount, merchant, description, transaction_date, reference_number, source
+                FROM transactions
+                WHERE user_id = ?
+                  AND account_id = ?
+                  AND deleted_at IS NULL
+                  AND transaction_type = ?
+                  AND amount BETWEEN ? AND ?
+                  AND DATE(transaction_date) BETWEEN DATE_SUB(?, INTERVAL 2 DAY) AND DATE_ADD(?, INTERVAL 2 DAY)
+                  AND source <> 'statement_pdf'";
+        $params = [$userId, $accountId, $normalized['transaction_type'], $amount - 0.01, $amount + 0.01, $day, $day];
+
+        if ($excludeTransactionId !== null) {
+            $sql .= " AND id <> ?";
+            $params[] = $excludeTransactionId;
+        }
+        if (!empty($consumedIds)) {
+            $sql .= " AND id NOT IN (" . implode(',', array_fill(0, count($consumedIds), '?')) . ")";
+            foreach ($consumedIds as $id) {
+                $params[] = (int)$id;
+            }
+        }
+
+        $sql .= " ORDER BY ABS(DATEDIFF(DATE(transaction_date), ?)) ASC, id DESC LIMIT 1";
+        $params[] = $day;
+
+        $stmt = $this->pdo->prepare($sql);
+        $stmt->execute($params);
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        if ($row) {
+            return $row;
+        }
+
+        // Fuel-style rows: the statement amount can carry a surcharge + GST that the SMS
+        // alert did not (3,541.30 on the statement vs 3,500.00 in the SMS). Accept a near
+        // amount (within 2% / Rs 1) only on the same or adjacent day AND only when the
+        // merchant text agrees, so two unrelated purchases of similar size never merge.
+        $tolerance = max(1.00, $amount * 0.02);
+        $sql = "SELECT id, account_id, transaction_type, amount, merchant, description, transaction_date, reference_number, source
+                FROM transactions
+                WHERE user_id = ?
+                  AND account_id = ?
+                  AND deleted_at IS NULL
+                  AND transaction_type = ?
+                  AND amount BETWEEN ? AND ?
+                  AND DATE(transaction_date) BETWEEN DATE_SUB(?, INTERVAL 1 DAY) AND DATE_ADD(?, INTERVAL 1 DAY)
+                  AND source <> 'statement_pdf'";
+        $params = [$userId, $accountId, $normalized['transaction_type'], $amount - $tolerance, $amount + $tolerance, $day, $day];
+        if ($excludeTransactionId !== null) {
+            $sql .= " AND id <> ?";
+            $params[] = $excludeTransactionId;
+        }
+        if (!empty($consumedIds)) {
+            $sql .= " AND id NOT IN (" . implode(',', array_fill(0, count($consumedIds), '?')) . ")";
+            foreach ($consumedIds as $id) {
+                $params[] = (int)$id;
+            }
+        }
+        $sql .= " ORDER BY ABS(DATEDIFF(DATE(transaction_date), ?)) ASC, ABS(amount - ?) ASC, id DESC LIMIT 5";
+        $params[] = $day;
+        $params[] = $amount;
+
+        $stmt = $this->pdo->prepare($sql);
+        $stmt->execute($params);
+        foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $near) {
+            if ($this->textsLikelySame($normalized['merchant'], (string)($near['merchant'] ?? ''))
+                || $this->textsLikelySame($normalized['description'], (string)($near['description'] ?? ''))
+                || $this->textsLikelySame($normalized['merchant'], (string)($near['description'] ?? ''))
+                || $this->textsLikelySame($normalized['description'], (string)($near['merchant'] ?? ''))) {
+                return $near;
             }
         }
 
