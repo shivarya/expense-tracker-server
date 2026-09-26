@@ -986,22 +986,42 @@ class StatementController
 
         try {
             $parsedResult = ['transactions' => [], 'parser' => ''];
+            // Track *which* stage failed: "no password opened the PDF" and "the PDF
+            // opened but the parser found nothing" were both reported as the same
+            // "available passwords" error, which sent a months-long key problem
+            // looking like a parser bug.
+            $pdfOpened = false;
+            $openError = '';
+            $openedChars = 0;
             foreach (array_merge([''], $passwordPlaintexts) as $pwd) {
                 try {
                     $text = $this->extractTextFromPdf($workingFile, (string)$pwd);
+                    $pdfOpened = true;
+                    $openedChars = strlen($text);
                     $candidate = $this->parseTransactionsByBank($bank, $text, $cardLastFour);
                     if (!empty($candidate['transactions'])) {
                         $parsedResult = $candidate;
                         break;
                     }
                 } catch (Exception $e) {
+                    if (!$pdfOpened) {
+                        $openError = $e->getMessage();
+                    }
                     // try next password
                 }
             }
 
             $parsedTransactions = $parsedResult['transactions'];
             if (empty($parsedTransactions)) {
-                throw new Exception('Could not parse statement with available passwords.');
+                if ($pdfOpened) {
+                    throw new Exception("Statement PDF opened ({$openedChars} chars of text) but no {$bank} transactions could be parsed from it -- the statement layout may have changed.");
+                }
+                $tried = count($passwordPlaintexts);
+                throw new Exception(
+                    "Could not open statement PDF: none of {$tried} saved password(s) worked"
+                    . ($openError !== '' ? ' (' . substr(preg_replace('/\s+/', ' ', $openError) ?? $openError, 0, 220) . ')' : '')
+                    . '.'
+                );
             }
 
             // Statement PDFs have no card number passed in; detect the masked last

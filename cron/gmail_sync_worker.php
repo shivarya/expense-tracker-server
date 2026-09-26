@@ -35,6 +35,7 @@ require_once __DIR__ . '/../controllers/statementsController.php';
 const WORKER_BUDGET_SECONDS = 50;   // stay under cPanel max_execution_time
 const MAX_JOBS_PER_RUN = 5;
 const MAX_MESSAGES_PER_SOURCE = 25;
+const MAX_REQUEUES = 5;              // times one job may hand its remaining work to the next cron run
 
 // Gmail senders per source (mirrors scraper/src/config/senders.ts).
 const SOURCES = [
@@ -148,20 +149,39 @@ function processJob(Database $db, int $jobId, int $userId, $paramsRaw): void
         }
 
         $afterClause = gmailAfterClause($range);
-        $passwords = gatherCandidatePasswords($db, $userId);
+        $undecryptablePasswords = 0;
+        $passwords = gatherCandidatePasswords($db, $userId, $undecryptablePasswords);
         $statementController = new StatementController();
         $ai = new AzureOpenAI();
 
-        $totalProcessed = 0;
-        $totalSaved = 0;
-        $totalSkipped = 0;
-        $sourceSummaries = [];
+        // A job that ran out of time budget is handed back to the queue (below) with
+        // its running totals in params.carry, so a long sync finishes across several
+        // cron runs instead of being marked "completed" with later sources skipped.
+        $requeues = (int)($params['requeues'] ?? 0);
+        $carry = is_array($params['carry'] ?? null) ? $params['carry'] : [];
+        $totalProcessed = (int)($carry['processed'] ?? 0);
+        $totalSaved = (int)($carry['saved'] ?? 0);
+        $totalSkipped = 0; // re-counted every run (already-synced mail is re-listed each time)
+        $sourceSummaries = is_array($carry['summaries'] ?? null) ? $carry['summaries'] : [];
+        $budgetHit = false;
+
+        if ($undecryptablePasswords > 0 && $requeues === 0) {
+            $warning = "WARNING: {$undecryptablePasswords} saved statement password(s) cannot be decrypted with the current server key "
+                . '(' . count($passwords) . ' usable) -- re-add them under Statement Passwords, otherwise the PDFs they protect will keep failing';
+            error_log("[gmail-worker] user {$userId}: {$warning}");
+            $sourceSummaries[] = $warning;
+        }
 
         foreach ($requestedTypes as $dataType) {
             if (!isset(SOURCES[$dataType])) {
                 continue;
             }
             $cfg = SOURCES[$dataType];
+
+            if (time() - $startTime > WORKER_BUDGET_SECONDS) {
+                $budgetHit = true;
+                break;
+            }
 
             if (empty($cfg['implemented'])) {
                 logScrape($db, $userId, $dataType, $cfg['source'], 'partial', 0, 0, 'Source recognized; processing not yet implemented in this build.');
@@ -179,14 +199,18 @@ function processJob(Database $db, int $jobId, int $userId, $paramsRaw): void
             $srcFailureReasons = [];
 
             foreach ($messageIds as $messageId) {
-                if (time() - $startTime > WORKER_BUDGET_SECONDS) {
-                    break 2;
-                }
-
                 $syncId = 'gmail:' . $messageId;
                 if (alreadySynced($db, $userId, $dataType, $cfg['source'], $syncId)) {
                     $totalSkipped++;
                     continue;
+                }
+
+                // Only out of time if there is real work left (checked after the cheap
+                // already-synced skip). Stop this source, but still write its summary
+                // and scrape log below -- a bare `break 2` used to drop both.
+                if (time() - $startTime > WORKER_BUDGET_SECONDS) {
+                    $budgetHit = true;
+                    break;
                 }
 
                 try {
@@ -216,11 +240,40 @@ function processJob(Database $db, int $jobId, int $userId, $paramsRaw): void
             if ($srcFailed > 0) {
                 $summary .= " ({$srcFailed} failed: " . implode(' | ', array_slice($srcFailureReasons, 0, 2)) . ")";
             }
-            $sourceSummaries[] = $summary;
+            if ($budgetHit) {
+                $summary .= ' [time budget reached; more to do]';
+            }
+            // On continuation runs every source is re-listed; don't repeat a "0 emails" line for each.
+            if (!($requeues > 0 && $srcProcessed === 0 && $srcFailed === 0)) {
+                $sourceSummaries[] = $summary;
+            }
 
             $scrapeStatus = $srcFailed === 0 ? 'success' : ($srcSaved > 0 ? 'partial' : 'failed');
             $scrapeError = $srcFailed > 0 ? implode(' | ', array_slice($srcFailureReasons, 0, 5)) : null;
             logScrape($db, $userId, $dataType, $cfg['source'], $scrapeStatus, $srcProcessed, $srcSaved, $scrapeError);
+
+            if ($budgetHit) {
+                break;
+            }
+        }
+
+        if ($budgetHit) {
+            if ($requeues < MAX_REQUEUES) {
+                // Not finished: hand the rest to the next cron run. Everything already
+                // processed is in scraper_sync_log, so it won't be redone.
+                $params['requeues'] = $requeues + 1;
+                $params['carry'] = ['processed' => $totalProcessed, 'saved' => $totalSaved, 'summaries' => $sourceSummaries];
+                $db->execute(
+                    "UPDATE sync_jobs
+                     SET status = 'pending', started_at = NULL, params = ?,
+                         processed_items = ?, saved_items = ?, skipped_items = ?, error_message = ?
+                     WHERE id = ?",
+                    [json_encode($params), $totalProcessed, $totalSaved, $totalSkipped, implode('; ', $sourceSummaries) . ' [continuing in next run]', $jobId]
+                );
+                echo "[gmail-worker] job {$jobId} out of time budget; re-queued (run " . ($requeues + 1) . '/' . MAX_REQUEUES . "): " . implode('; ', $sourceSummaries) . "\n";
+                return;
+            }
+            $sourceSummaries[] = 'stopped early: hit the time budget on every retry -- run Sync again to continue';
         }
 
         $db->execute(
@@ -616,10 +669,19 @@ function extractAmc(string $fundName): string
     return 'Other';
 }
 
-/** Decrypt the user's candidate + card-specific stored passwords to plaintext. */
-function gatherCandidatePasswords(Database $db, int $userId): array
+/**
+ * Decrypt the user's candidate + card-specific stored passwords to plaintext.
+ *
+ * Rows that no longer decrypt (typically because STATEMENT_PASSWORD_KEY -- or
+ * the JWT_SECRET it falls back to -- changed after they were saved) are skipped
+ * but counted in $undecryptable, so the caller can say so. Skipping them
+ * silently made every statement they protected fail as a plain "wrong
+ * password" for months.
+ */
+function gatherCandidatePasswords(Database $db, int $userId, int &$undecryptable = 0): array
 {
     $out = [];
+    $undecryptable = 0;
     $sources = [
         "SELECT encrypted_password, iv, auth_tag FROM statement_password_candidates WHERE user_id = ?",
         "SELECT encrypted_password, iv, auth_tag FROM statement_passwords WHERE user_id = ?",
@@ -632,7 +694,7 @@ function gatherCandidatePasswords(Database $db, int $userId): array
                     $out[] = $pwd;
                 }
             } catch (Throwable $e) {
-                // skip undecryptable rows
+                $undecryptable++;
             }
         }
     }
@@ -641,7 +703,7 @@ function gatherCandidatePasswords(Database $db, int $userId): array
 
 function gmailAfterClause(string $range): string
 {
-    $map = ['1m' => '-1 month', '2m' => '-2 months', '6m' => '-6 months', '1y' => '-1 year'];
+    $map = ['1m' => '-1 month', '2m' => '-2 months', '3m' => '-3 months', '6m' => '-6 months', '1y' => '-1 year'];
     if ($range === 'all' || !isset($map[$range])) {
         return $range === 'all' ? '' : 'after:' . date('Y/m/d', strtotime('-6 months'));
     }
