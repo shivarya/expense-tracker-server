@@ -41,7 +41,7 @@ class GmailService
      * Exchange a mobile serverAuthCode for tokens and store them encrypted.
      * Returns ['connected' => true, 'email' => string|null].
      */
-    public static function connectFromAuthCode(int $userId, string $authCode): array
+    public static function connectFromAuthCode(int $userId, string $authCode, string $redirectUri = ''): array
     {
         $clientId = (string)(defined('GOOGLE_CLIENT_ID') ? GOOGLE_CLIENT_ID : '');
         $clientSecret = (string)(defined('GOOGLE_CLIENT_SECRET') ? GOOGLE_CLIENT_SECRET : '');
@@ -53,6 +53,7 @@ class GmailService
         // redirect_uri (per Google's offline-access docs). The google-api-php-client
         // rejects an empty redirect_uri ("must be absolute") and 'postmessage'
         // yields redirect_uri_mismatch — so POST the exchange directly.
+        // Web GIS popup codes are the exception: they require 'postmessage'.
         $ch = curl_init('https://oauth2.googleapis.com/token');
         curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
         curl_setopt($ch, CURLOPT_POST, true);
@@ -61,7 +62,7 @@ class GmailService
             'client_id' => $clientId,
             'client_secret' => $clientSecret,
             'grant_type' => 'authorization_code',
-            'redirect_uri' => '',
+            'redirect_uri' => $redirectUri,
         ]));
         curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/x-www-form-urlencoded']);
         curl_setopt($ch, CURLOPT_TIMEOUT, 30);

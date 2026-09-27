@@ -164,8 +164,12 @@ function gmailConnect(): void
         return;
     }
 
+    // Web (GIS popup code client) codes must be exchanged with 'postmessage';
+    // native codes with an empty redirect_uri. Only these two are accepted.
+    $redirectUri = (($input['redirect_uri'] ?? '') === 'postmessage') ? 'postmessage' : '';
+
     try {
-        $result = GmailService::connectFromAuthCode($userId, (string)$code);
+        $result = GmailService::connectFromAuthCode($userId, (string)$code, $redirectUri);
         Response::success($result, 'Gmail connected successfully');
     } catch (Throwable $e) {
         error_log('Gmail connect error: ' . $e->getMessage());
