@@ -1,5 +1,7 @@
 <?php
 
+require_once __DIR__ . '/../utils/emiSchedule.php';
+
 function handleEmiRoutes($uri, $method)
 {
   // Require authentication
@@ -32,6 +34,11 @@ function getEmis($userId)
        ORDER BY e.status ASC, e.next_payment_date ASC",
       [$userId]
     );
+
+    foreach ($emis as &$emi) {
+      $emi['next_payment_date'] = emiRolledNextPaymentDate($emi);
+    }
+    unset($emi);
 
     Response::success($emis, 'EMIs retrieved successfully');
   } catch (Exception $e) {

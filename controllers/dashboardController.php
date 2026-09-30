@@ -1,5 +1,7 @@
 <?php
 
+require_once __DIR__ . '/../utils/emiSchedule.php';
+
 function handleDashboardRoutes($uri, $method)
 {
   // Require authentication
@@ -61,19 +63,26 @@ function getDashboardSummary($userId)
       [$userId]
     );
 
-    // Get upcoming EMIs (next 30 days)
+    // Get upcoming EMIs (next 30 days). Stored next_payment_date goes stale between syncs, so auto-debit
+    // EMIs are rolled forward (see utils/emiSchedule.php) before the 30-day window is applied.
+    $today = new DateTimeImmutable('today');
+    $horizon = $today->modify('+30 days')->format('Y-m-d');
     $upcomingEmis = $db->fetchAll(
-      "SELECT e.id, e.loan_name, e.loan_type, e.emi_amount, e.next_payment_date, e.bank,
+      "SELECT e.id, e.loan_name, e.loan_type, e.emi_amount, e.next_payment_date, e.due_date, e.auto_debit, e.status, e.bank,
               e.remaining_months, e.tenure_months,
               (e.tenure_months - e.remaining_months) AS paid_installments,
               e.tenure_months AS total_installments
        FROM emis e
-       WHERE e.user_id = ? AND e.status = 'active'
-         AND e.next_payment_date <= DATE_ADD(CURDATE(), INTERVAL 30 DAY)
-       ORDER BY e.next_payment_date ASC
-       LIMIT 5",
+       WHERE e.user_id = ? AND e.status = 'active' AND e.next_payment_date IS NOT NULL",
       [$userId]
     );
+    foreach ($upcomingEmis as &$emiRow) {
+      $emiRow['next_payment_date'] = emiRolledNextPaymentDate($emiRow, $today);
+    }
+    unset($emiRow);
+    $upcomingEmis = array_values(array_filter($upcomingEmis, fn($r) => $r['next_payment_date'] <= $horizon));
+    usort($upcomingEmis, fn($a, $b) => strcmp($a['next_payment_date'], $b['next_payment_date']));
+    $upcomingEmis = array_slice($upcomingEmis, 0, 5);
 
     // Get current month expenses by category. Excludes Transfer-type categories
     // (e.g. a credit card bill payment) since those settle debt already counted
