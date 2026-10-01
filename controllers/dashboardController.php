@@ -69,18 +69,21 @@ function getDashboardSummary($userId)
     $horizon = $today->modify('+30 days')->format('Y-m-d');
     $upcomingEmis = $db->fetchAll(
       "SELECT e.id, e.loan_name, e.loan_type, e.emi_amount, e.next_payment_date, e.due_date, e.auto_debit, e.status, e.bank,
-              e.remaining_months, e.tenure_months,
-              (e.tenure_months - e.remaining_months) AS paid_installments,
-              e.tenure_months AS total_installments
+              e.start_date, e.remaining_months, e.tenure_months, e.remaining_principal, ba.account_type
        FROM emis e
-       WHERE e.user_id = ? AND e.status = 'active' AND e.next_payment_date IS NOT NULL",
+       LEFT JOIN bank_accounts ba ON ba.id = e.account_id
+       WHERE e.user_id = ? AND e.status = 'active'",
       [$userId]
     );
     foreach ($upcomingEmis as &$emiRow) {
-      $emiRow['next_payment_date'] = emiRolledNextPaymentDate($emiRow, $today);
+      emiApplyProgress($emiRow, $today);
     }
     unset($emiRow);
-    $upcomingEmis = array_values(array_filter($upcomingEmis, fn($r) => $r['next_payment_date'] <= $horizon));
+    // A fully paid-off EMI (status flips to 'paid' once its last installment date has passed) is not upcoming.
+    $upcomingEmis = array_values(array_filter(
+      $upcomingEmis,
+      fn($r) => $r['status'] === 'active' && $r['next_payment_date'] !== null && $r['next_payment_date'] <= $horizon
+    ));
     usort($upcomingEmis, fn($a, $b) => strcmp($a['next_payment_date'], $b['next_payment_date']));
     $upcomingEmis = array_slice($upcomingEmis, 0, 5);
 

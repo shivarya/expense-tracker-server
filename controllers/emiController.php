@@ -27,7 +27,7 @@ function getEmis($userId)
     $db = getDB();
     
     $emis = $db->fetchAll(
-      "SELECT e.*, ba.account_name, ba.bank as bank_name
+      "SELECT e.*, ba.account_name, ba.bank as bank_name, ba.account_type
        FROM emis e
        JOIN bank_accounts ba ON e.account_id = ba.id
        WHERE e.user_id = ?
@@ -36,7 +36,7 @@ function getEmis($userId)
     );
 
     foreach ($emis as &$emi) {
-      $emi['next_payment_date'] = emiRolledNextPaymentDate($emi);
+      emiApplyProgress($emi);
     }
     unset($emi);
 
