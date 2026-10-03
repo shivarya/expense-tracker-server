@@ -524,7 +524,12 @@ class SMSParserController {
                     continue;
                 }
 
-                $duplicateCheck = $this->evaluateDuplicateTransactionSafely($userId, $transaction, null, $useAiDedupe);
+                // A source that is the only record of its payments (a meal-card alert: no SMS, no notification)
+                // has nothing to be a duplicate of — the detector would only mistake a same-amount same-day order
+                // paid by card for it. Exact replays are already caught above.
+                $duplicateCheck = !empty($transaction['skip_duplicate_detector'])
+                    ? ['should_skip' => false, 'possible_duplicate' => false, 'confidence' => 0]
+                    : $this->evaluateDuplicateTransactionSafely($userId, $transaction, null, $useAiDedupe);
 
                 if (!empty($duplicateCheck['ai_used'])) {
                     $aiCheckedCount++;

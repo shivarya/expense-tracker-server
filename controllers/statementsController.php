@@ -1119,6 +1119,9 @@ class StatementController
                 'flagged_possible_duplicates' => 0,
                 'ai_checked_transactions' => 0,
                 'duplicate_fallback_used' => 0,
+                // Transactions are already in; the closing balance is still worth reading (a statement imported
+                // before balances were tracked).
+                'balances' => $this->sbiStatementBalances($workingFile, $passwordPlaintexts),
             ];
         }
 
@@ -1201,6 +1204,25 @@ class StatementController
             );
             throw $e;
         }
+    }
+
+    /** Closing balance per account (last4 => [balance, date]) of an SBI e-statement; [] if it won't open. */
+    private function sbiStatementBalances(string $workingFile, array $passwordPlaintexts): array
+    {
+        foreach (array_merge([''], $passwordPlaintexts) as $pwd) {
+            try {
+                $text = $this->extractTextFromPdf($workingFile, (string)$pwd);
+            } catch (Exception $e) {
+                continue;
+            }
+            if (trim($text) !== '') {
+                $parsed = str_contains($text, 'TRANSACTION DETAILS')
+                    ? $this->parseSbiCasStatement($text)
+                    : $this->parseSbiYonoStatement($text);
+                return $parsed['balances'] ?? [];
+            }
+        }
+        return [];
     }
 
     /**

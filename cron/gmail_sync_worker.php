@@ -235,7 +235,11 @@ function processJob(Database $db, int $jobId, int $userId, $paramsRaw): void
 
             foreach ($messageIds as $messageId) {
                 $syncId = 'gmail:' . $messageId;
-                if (alreadySynced($db, $userId, $dataType, $cfg['source'], $syncId)) {
+                // params.reprocess names sources whose already-synced mail should be read again (e.g. to pick up
+                // the closing balance of a statement imported before balances were tracked). Safe: statement
+                // imports dedupe on file hash, alerts on UPI reference / message hash.
+                $reprocess = in_array($sourceKey, (array)($params['reprocess'] ?? []), true);
+                if (!$reprocess && alreadySynced($db, $userId, $dataType, $cfg['source'], $syncId)) {
                     $totalSkipped++;
                     continue;
                 }

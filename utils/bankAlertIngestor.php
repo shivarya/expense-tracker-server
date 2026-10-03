@@ -106,6 +106,8 @@ class BankAlertIngestor
                 'payment_method' => 'Meal card',
                 // A meal card can only be spent on food; its monthly load is an allowance.
                 'category_id' => $credit ? 16 : 1,
+                // Pluxee mail is the only record of these payments; replays are caught by the message hash.
+                'skip_duplicate_detector' => true,
             ];
         }
 
