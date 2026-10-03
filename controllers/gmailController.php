@@ -46,7 +46,7 @@ function handleGmailRoutes(string $uri, string $method): void
 
 /** Allowed Gmail fetch ranges and their cron-worker meaning. */
 const GMAIL_SYNC_RANGES = ['all', '1y', '6m', '2m', '1m'];
-const GMAIL_SYNC_TYPES = ['mutual_funds', 'stocks', 'long_term', 'transactions'];
+const GMAIL_SYNC_TYPES = ['mutual_funds', 'stocks', 'long_term', 'transactions', 'bank_alerts', 'balances'];
 
 /**
  * POST /gmail/sync  body: { range: all|1y|6m|2m|1m, types?: string[] }

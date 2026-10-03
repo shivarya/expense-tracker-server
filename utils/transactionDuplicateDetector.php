@@ -159,6 +159,7 @@ class TransactionDuplicateDetector
             'merchant' => trim((string)($transaction['merchant'] ?? '')),
             'description' => trim((string)($transaction['description'] ?? '')),
             'reference_number' => trim((string)($transaction['reference_number'] ?? '')),
+            'upi_ref' => trim((string)($transaction['upi_ref'] ?? '')),
             'account_last4' => $accountLast4,
             'raw_description' => $this->extractRawDescription($transaction),
         ];
@@ -472,7 +473,7 @@ class TransactionDuplicateDetector
         $dateFrom = date('Y-m-d H:i:s', strtotime($date . ' -2 days'));
         $dateTo = date('Y-m-d H:i:s', strtotime($date . ' +2 days'));
 
-        $sql = "SELECT id, account_id, transaction_type, amount, merchant, description, transaction_date, reference_number, source
+        $sql = "SELECT id, account_id, transaction_type, amount, merchant, description, transaction_date, reference_number, source, upi_ref
                 FROM transactions
                 WHERE user_id = ?
                   AND deleted_at IS NULL
@@ -507,9 +508,19 @@ class TransactionDuplicateDetector
 
         $stmt = $this->pdo->prepare($sql);
         $stmt->execute($params);
-        $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        $rows = $stmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
 
-        return $rows ?: [];
+        // Two different UPI references are two different payments, however alike the rest looks (two ₹100
+        // payments to the same person a minute apart). Drop those before the deterministic or AI scoring.
+        $incomingRef = $normalized['upi_ref'] ?? '';
+        if ($incomingRef !== '') {
+            $rows = array_values(array_filter(
+                $rows,
+                static fn($r) => trim((string)($r['upi_ref'] ?? '')) === '' || $r['upi_ref'] === $incomingRef
+            ));
+        }
+
+        return $rows;
     }
 
     private function scoreDeterministic(array $normalized, array $candidates, array $accountIds, string $sourceHint = ''): array

@@ -414,6 +414,19 @@ class SMSParserController {
         return false;
     }
 
+    /**
+     * Transactions parsed deterministically from bank/wallet alert emails (utils/bankAlertIngestor.php). Same
+     * merge + dedupe + insert path as SMS; no AI involved, so none for duplicate scoring either.
+     */
+    public function ingestAlertTransactions(int $userId, array $transactions): array
+    {
+        return $this->persistParsedTransactions($userId, $transactions, [
+            'summary_tag' => 'GMAIL_ALERT',
+            'source' => 'email',
+            'use_ai_dedupe' => false,
+        ]);
+    }
+
     public function processBankMessagesForUser(int $userId, array $bankSMS, array $options = []): array
     {
         error_log("Processing " . count($bankSMS) . " bank SMS messages");
@@ -1072,7 +1085,7 @@ class SMSParserController {
                 return $this->getOrCreateSyntheticAccount(
                     $userId,
                     'WALLET-' . ($transaction['source_app_key'] ?? 'APP'),
-                    ($transaction['source_app'] ?? 'App') . ' Wallet'
+                    $transaction['wallet_name'] ?? (($transaction['source_app'] ?? 'App') . ' Wallet')
                 );
             case 'bank_guess':
                 return $this->findSoleBankAccount($userId, $transaction)

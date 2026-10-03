@@ -1191,6 +1191,8 @@ class StatementController
                 'flagged_possible_duplicates' => $stats['flagged'],
                 'ai_checked_transactions' => $stats['ai_checked'],
                 'duplicate_fallback_used' => $stats['fallback_used'],
+                // Closing balance per account (last4 => [balance, date]) for the Gmail sync to store.
+                'balances' => $parsed['balances'] ?? [],
             ];
         } catch (Exception $e) {
             $this->db->execute(
@@ -1216,6 +1218,7 @@ class StatementController
     {
         $blocks = preg_split('/(?=TRANSACTION DETAILS)/', $text);
         $transactions = [];
+        $balances = [];
         $accountLastFour = '';
         $lineRe = '/^(\d{2}-\d{2}-\d{2})\s+(.+?)\s+-\s+([\d,]+(?:\.\d{2})?)\s+([\d,]+(?:\.\d{2})?)\s+([\d,]+(?:\.\d{2})?)$/';
 
@@ -1236,7 +1239,9 @@ class StatementController
                 if ($line === '' || !preg_match($lineRe, $line, $m)) {
                     continue;
                 }
-                [, $date, $desc, $creditStr, $debitStr] = $m;
+                [, $date, $desc, $creditStr, $debitStr, $balanceStr] = $m;
+                // Lines are chronological, so the last one seen per account is its closing balance.
+                $balances[$blockLastFour] = ['balance' => (float)str_replace(',', '', $balanceStr), 'date' => $this->toIsoDateDdMmYy($date)];
                 $credit = (float)str_replace(',', '', $creditStr);
                 $debit = (float)str_replace(',', '', $debitStr);
                 $isCredit = $credit > 0;
@@ -1258,7 +1263,7 @@ class StatementController
             }
         }
 
-        return ['account_last_four' => $accountLastFour, 'transactions' => $transactions];
+        return ['account_last_four' => $accountLastFour, 'transactions' => $transactions, 'balances' => $balances];
     }
 
     /**
@@ -1290,6 +1295,7 @@ class StatementController
         $amountsRe = '/^(-|[\d,]+\.\d{2})\s+(-|[\d,]+\.\d{2})\s+(-|[\d,]+\.\d{2})\s+([\d,]+\.\d{2})$/';
 
         $transactions = [];
+        $balances = [];
         $currentDate = '';
         $descriptionParts = [];
 
@@ -1313,7 +1319,10 @@ class StatementController
             }
 
             if (preg_match($amountsRe, $line, $am)) {
-                [, , $debitStr, $creditStr] = $am;
+                [, , $debitStr, $creditStr, $balanceStr] = $am;
+                if ($accountLastFour !== '') {
+                    $balances[$accountLastFour] = ['balance' => (float)str_replace(',', '', $balanceStr), 'date' => $this->toIsoDateDdMmYyyy($currentDate)];
+                }
                 $debit = $debitStr === '-' ? 0.0 : (float)str_replace(',', '', $debitStr);
                 $credit = $creditStr === '-' ? 0.0 : (float)str_replace(',', '', $creditStr);
                 $isCredit = $credit > 0;
@@ -1340,7 +1349,7 @@ class StatementController
             $descriptionParts[] = $line;
         }
 
-        return ['account_last_four' => $accountLastFour, 'transactions' => $transactions];
+        return ['account_last_four' => $accountLastFour, 'transactions' => $transactions, 'balances' => $balances];
     }
 
     /**

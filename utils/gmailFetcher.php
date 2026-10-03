@@ -64,6 +64,37 @@ class GmailFetcher
     }
 
     /**
+     * The message's readable body: text/plain if present anywhere in the MIME tree, else the HTML part
+     * (callers strip tags). Unlike getPlainText() this walks nested multiparts — alert emails are typically
+     * multipart/alternative inside multipart/related, which the one-level walk misses.
+     */
+    public static function getReadableText(\Google\Service\Gmail\Message $message): string
+    {
+        $plain = '';
+        $html = '';
+        $walk = function ($part) use (&$walk, &$plain, &$html): void {
+            if ($part === null) {
+                return;
+            }
+            $mime = strtolower((string)$part->getMimeType());
+            $data = $part->getBody() ? $part->getBody()->getData() : null;
+            if ($data && (string)$part->getFilename() === '') {
+                if ($mime === 'text/plain') {
+                    $plain .= "\n" . self::decodeBase64Url($data);
+                } elseif ($mime === 'text/html') {
+                    $html .= "\n" . self::decodeBase64Url($data);
+                }
+            }
+            foreach (($part->getParts() ?? []) as $child) {
+                $walk($child);
+            }
+        };
+        $walk($message->getPayload());
+
+        return trim($plain) !== '' ? $plain : $html;
+    }
+
+    /**
      * Download all PDF attachments of a message.
      * @return array<int, array{filename: string, bytes: string}>
      */

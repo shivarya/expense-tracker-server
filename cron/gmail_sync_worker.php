@@ -31,13 +31,21 @@ require_once __DIR__ . '/../utils/gmailFetcher.php';
 require_once __DIR__ . '/../utils/statementPasswordVault.php';
 require_once __DIR__ . '/../utils/azureOpenAI.php';
 require_once __DIR__ . '/../controllers/statementsController.php';
+require_once __DIR__ . '/../utils/bankAlertIngestor.php';
+require_once __DIR__ . '/../utils/accountBalance.php';
+require_once __DIR__ . '/../utils/statementBalanceExtractor.php';
+require_once __DIR__ . '/../utils/subscriptionService.php';
+require_once __DIR__ . '/../utils/npsAccounts.php';
 
 const WORKER_BUDGET_SECONDS = 50;   // stay under cPanel max_execution_time
 const MAX_JOBS_PER_RUN = 5;
 const MAX_MESSAGES_PER_SOURCE = 25;
 const MAX_REQUEUES = 5;              // times one job may hand its remaining work to the next cron run
+const AUTO_SYNC_EVERY_SECONDS = 6 * 3600; // a recent-mail sync per connected user, so alerts land the same day
 
-// Gmail senders per source (mirrors scraper/src/config/senders.ts).
+// Gmail senders per source (mirrors scraper/src/config/senders.ts). The key is what a job's `types` names;
+// 'data_type' (default: the key) is the scraper_sync_log / scrape_logs bucket; 'attachments' => false lists
+// body-only mail; 'sender_filters' narrows one sender with extra Gmail search terms.
 const SOURCES = [
     'mutual_funds' => [
         'source' => 'cams',
@@ -74,12 +82,38 @@ const SOURCES = [
         ],
         'implemented' => true, // CC statements (reuses StatementController::ingestCreditCardPdf)
     ],
+    // Body-only alert emails, parsed without AI (utils/alertEmailParsers.php): HDFC UPI debits/credits — kept
+    // only when no SMS/notification already recorded that UPI reference (HDFC sends no SMS for UPI debits
+    // <= ₹100 / credits <= ₹500) — HDFC's daily available balance, and Pluxee meal-card spends/loads/balance.
+    // HDFC's ATM / e-mandate "Account update" mails are left alone: no UPI reference to dedupe on, and the
+    // bank SMS already covers them.
+    'bank_alerts' => [
+        'source' => 'bank_alerts',
+        'data_type' => 'transactions',
+        'senders' => ['alerts@hdfcbank.bank.in', 'alerts@hdfcbank.net', 'noreply-cardinfo@services.pluxee.in'],
+        'attachments' => false,
+        'subject' => 'subject:("UPI txn" OR "Account update" OR "Transaction confirmation" OR "credited")',
+        'max_messages' => 200,
+        'implemented' => true,
+    ],
     'long_term' => [
         'source' => 'nps',
-        'senders' => ['nps-statements@mailer.proteantech.in'],
+        // Protean CRA, and KFintech CRA (the employer-paid corporate NPS); both PDFs open with the 12-digit PRAN.
+        'senders' => ['nps-statements@mailer.proteantech.in', 'kcra@kfintech.com'],
+        'sender_filters' => ['kcra@kfintech.com' => 'subject:"Statement"'],
         'implemented' => true, // NPS
     ],
+    // Statements read only for the account's closing balance (savings balance for net worth).
+    'balances' => [
+        'source' => 'balance_statements',
+        'data_type' => 'bank_accounts',
+        'senders' => ['statement@idfcfirst.bank.in'],
+        'implemented' => true,
+    ],
 ];
+
+/** Balance-only statement senders → bank enum. */
+const BALANCE_SENDER_BANK = ['statement@idfcfirst.bank.in' => 'idfc'];
 
 /** Senders for SBI's consolidated account-statement (CAS) email — a savings-account layout, not a CC statement. Same report, requested via netbanking or the YONO app. */
 const SBI_CAS_SENDERS = ['cbssbi.cas@alerts.sbi.bank.in', 'yonobysbi@alerts.sbi.bank.in'];
@@ -98,6 +132,8 @@ const CC_SENDER_BANK = [
 
 $startTime = time();
 $db = Database::getInstance();
+
+enqueueAutoSyncJobs($db);
 
 $jobs = $db->fetchAll(
     "SELECT id, user_id, params FROM sync_jobs
@@ -172,11 +208,12 @@ function processJob(Database $db, int $jobId, int $userId, $paramsRaw): void
             $sourceSummaries[] = $warning;
         }
 
-        foreach ($requestedTypes as $dataType) {
-            if (!isset(SOURCES[$dataType])) {
+        foreach ($requestedTypes as $sourceKey) {
+            if (!isset(SOURCES[$sourceKey])) {
                 continue;
             }
-            $cfg = SOURCES[$dataType];
+            $cfg = SOURCES[$sourceKey];
+            $dataType = $cfg['data_type'] ?? $sourceKey;
 
             if (time() - $startTime > WORKER_BUDGET_SECONDS) {
                 $budgetHit = true;
@@ -189,9 +226,7 @@ function processJob(Database $db, int $jobId, int $userId, $paramsRaw): void
                 continue;
             }
 
-            $fromQuery = implode(' OR ', array_map(fn($s) => "from:{$s}", $cfg['senders']));
-            $query = "({$fromQuery}) has:attachment {$afterClause}";
-            $messageIds = GmailFetcher::listMessageIds($client, trim($query), MAX_MESSAGES_PER_SOURCE);
+            $messageIds = GmailFetcher::listMessageIds($client, sourceQuery($cfg, $afterClause), (int)($cfg['max_messages'] ?? MAX_MESSAGES_PER_SOURCE));
 
             $srcSaved = 0;
             $srcProcessed = 0;
@@ -214,7 +249,7 @@ function processJob(Database $db, int $jobId, int $userId, $paramsRaw): void
                 }
 
                 try {
-                    $saved = dispatchMessage($db, $client, $statementController, $ai, $userId, $dataType, $messageId, $passwords);
+                    $saved = dispatchMessage($db, $client, $statementController, $ai, $userId, $sourceKey, $messageId, $passwords);
                     $srcSaved += $saved;
                     $totalSaved += $saved;
                     markSynced($db, $userId, $dataType, $cfg['source'], $syncId, ['saved' => $saved]);
@@ -293,35 +328,149 @@ function processJob(Database $db, int $jobId, int $userId, $paramsRaw): void
     }
 }
 
-/** Route a single email to the processor for its data type. Returns rows saved. */
+/** Gmail search for one source: its senders (each optionally narrowed), subject filter, attachment rule, date. */
+function sourceQuery(array $cfg, string $afterClause): string
+{
+    $filters = $cfg['sender_filters'] ?? [];
+    $from = implode(' OR ', array_map(
+        fn($s) => isset($filters[$s]) ? "(from:{$s} {$filters[$s]})" : "from:{$s}",
+        $cfg['senders']
+    ));
+    $parts = ["({$from})"];
+    if (!empty($cfg['subject'])) {
+        $parts[] = $cfg['subject'];
+    }
+    if ($cfg['attachments'] ?? true) {
+        $parts[] = 'has:attachment';
+    }
+    $parts[] = $afterClause;
+    return trim(implode(' ', $parts));
+}
+
+/** Route a single email to the processor for its source. Returns rows saved. */
 function dispatchMessage(
     Database $db,
     \Google\Client $client,
     StatementController $sc,
     AzureOpenAI $ai,
     int $userId,
-    string $dataType,
+    string $sourceKey,
     string $messageId,
     array $passwords
 ): int {
-    switch ($dataType) {
+    switch ($sourceKey) {
         case 'mutual_funds':
             return processMutualFundMessage($db, $client, $sc, $ai, $userId, $messageId, $passwords);
         case 'stocks':
             return processCdslMessage($db, $client, $sc, $ai, $userId, $messageId, $passwords);
         case 'long_term':
             return processNpsMessage($db, $client, $sc, $ai, $userId, $messageId, $passwords);
+        case 'bank_alerts':
+            return processBankAlertMessage($db, $client, $userId, $messageId);
+        case 'balances':
+            return processBalanceStatementMessage($db, $client, $sc, $ai, $userId, $messageId, $passwords);
         case 'transactions':
             $message = GmailFetcher::getMessage($client, $messageId);
             $from = GmailFetcher::getHeader($message, 'From');
             foreach (SBI_CAS_SENDERS as $sbiCasSender) {
                 if (stripos($from, $sbiCasSender) !== false) {
-                    return processSbiCasMessage($client, $sc, $userId, $messageId, $message, $passwords);
+                    return processSbiCasMessage($db, $client, $sc, $userId, $messageId, $message, $passwords);
                 }
             }
             return processCreditCardMessage($db, $client, $sc, $ai, $userId, $messageId, $message, $passwords);
         default:
             return 0;
+    }
+}
+
+/**
+ * HDFC / Pluxee alert email → balances + only-missing transactions (utils/bankAlertIngestor.php). Returns the
+ * number of transactions created plus balances updated.
+ */
+function processBankAlertMessage(Database $db, \Google\Client $client, int $userId, string $messageId): int
+{
+    static $ingestor = null;
+    $ingestor ??= new BankAlertIngestor($db);
+
+    $message = GmailFetcher::getMessage($client, $messageId);
+    // internalDate is when Gmail received the alert (ms since epoch) — the payment time to within seconds.
+    $receivedAt = date('Y-m-d H:i:s', (int)floor(((int)$message->getInternalDate()) / 1000));
+    $result = $ingestor->ingest(
+        $userId,
+        GmailFetcher::getHeader($message, 'From'),
+        GmailFetcher::getHeader($message, 'Subject'),
+        GmailFetcher::getReadableText($message),
+        $receivedAt,
+        $messageId
+    );
+    return $result['transactions'] + $result['balances'];
+}
+
+/** IDFC FIRST monthly statement → that savings account's closing balance. */
+function processBalanceStatementMessage(
+    Database $db,
+    \Google\Client $client,
+    StatementController $sc,
+    AzureOpenAI $ai,
+    int $userId,
+    string $messageId,
+    array $passwords
+): int {
+    $message = GmailFetcher::getMessage($client, $messageId);
+    $from = strtolower(GmailFetcher::getHeader($message, 'From'));
+    $bank = null;
+    foreach (BALANCE_SENDER_BANK as $addr => $enum) {
+        if (str_contains($from, $addr)) {
+            $bank = $enum;
+        }
+    }
+    if ($bank === null) {
+        throw new Exception('Unrecognized balance-statement sender: ' . $from);
+    }
+
+    $data = fetchDecryptedText($client, $sc, $messageId, $message, $passwords);
+    if (trim($data['text']) === '' || $data['text'] === $data['body']) {
+        throw new Exception('Could not open the statement PDF (locked and no saved password matched -- add it under Statement Passwords).');
+    }
+
+    $found = StatementBalanceExtractor::closingBalance($data['text'], $ai);
+    if ($found === null || $found['account_last4'] === null) {
+        throw new Exception('Statement opened but no closing balance / account number was found in it.');
+    }
+    $asOf = $found['as_of'] ?? date('Y-m-d', (int)floor(((int)$message->getInternalDate()) / 1000));
+    return AccountBalance::updateBankAccount($db, $userId, $bank, $found['account_last4'], $found['balance'], $asOf) ? 1 : 0;
+}
+
+/**
+ * Every AUTO_SYNC_EVERY_SECONDS, queue a recent-mail (3-day) sync for each user with Gmail connected, so alert
+ * emails (missing UPI payments, balances) and new statements arrive without anyone tapping Sync.
+ */
+function enqueueAutoSyncJobs(Database $db): void
+{
+    try {
+        $users = $db->fetchAll("SELECT id FROM users WHERE gmail_token IS NOT NULL AND gmail_token <> ''");
+        foreach ($users as $user) {
+            $userId = (int)$user['id'];
+            if (!SubscriptionService::isPremium($userId)) {
+                continue;
+            }
+            $busy = $db->fetchOne(
+                "SELECT id FROM sync_jobs WHERE user_id = ? AND type = 'gmail'
+                   AND (status IN ('pending', 'processing') OR created_at > ?)
+                 LIMIT 1",
+                [$userId, date('Y-m-d H:i:s', time() - AUTO_SYNC_EVERY_SECONDS)]
+            );
+            if ($busy) {
+                continue; // a sync is queued/running, or one (manual or auto) ran recently
+            }
+            $db->insert(
+                "INSERT INTO sync_jobs (user_id, type, status, progress, params, created_at) VALUES (?, 'gmail', 'pending', 0, ?, NOW())",
+                [$userId, json_encode(['range' => '3d', 'auto' => true])]
+            );
+            echo "[gmail-worker] queued auto sync for user {$userId}\n";
+        }
+    } catch (Throwable $e) {
+        error_log('[gmail-worker] auto-sync enqueue failed: ' . $e->getMessage());
     }
 }
 
@@ -462,7 +611,8 @@ function processNpsMessage(
         return 0;
     }
 
-    saveLongTermNps($db, $userId, $nps);
+    $from = strtolower(GmailFetcher::getHeader($message, 'From'));
+    saveLongTermNps($db, $userId, $nps, str_contains($from, 'kfintech') ? 'KFintech CRA' : 'Protean CRA');
     return 1;
 }
 
@@ -502,8 +652,9 @@ function processCreditCardMessage(
     return $saved;
 }
 
-/** SBI consolidated account-statement (CAS) email → savings-account transactions. */
+/** SBI consolidated account-statement (CAS) email → savings-account transactions + closing balance. */
 function processSbiCasMessage(
+    Database $db,
     \Google\Client $client,
     StatementController $sc,
     int $userId,
@@ -523,6 +674,9 @@ function processSbiCasMessage(
         try {
             $result = $sc->ingestSbiCasStatement($userId, $tmp, $att['filename'], $passwords);
             $saved += (int)($result['saved_transactions'] ?? 0);
+            foreach (($result['balances'] ?? []) as $last4 => $closing) {
+                AccountBalance::updateBankAccount($db, $userId, 'sbi', (string)$last4, (float)$closing['balance'], (string)$closing['date']);
+            }
         } finally {
             @unlink($tmp);
         }
@@ -622,38 +776,6 @@ function saveStockHolding(Database $db, int $userId, array $stock): void
     );
 }
 
-function saveLongTermNps(Database $db, int $userId, array $nps): void
-{
-    $pran = trim((string)($nps['pran'] ?? ''));
-    $name = trim((string)($nps['account_name'] ?? '')) ?: 'NPS Account';
-    $invested = (float)($nps['invested_amount'] ?? 0);
-    $current = (float)($nps['current_value'] ?? 0);
-    $interest = max(0.0, $current - $invested);
-
-    $existing = $db->fetchOne(
-        "SELECT id FROM long_term_funds
-         WHERE user_id = ? AND fund_type = 'nps' AND ((? <> '' AND pran_number = ?) OR account_name = ?)
-         LIMIT 1",
-        [$userId, $pran, $pran, $name]
-    );
-
-    if ($existing) {
-        $db->execute(
-            "UPDATE long_term_funds
-             SET account_name = ?, pran_number = ?, invested_amount = ?, current_value = ?, interest_earned = ?, last_updated = NOW()
-             WHERE id = ?",
-            [$name, $pran !== '' ? $pran : null, $invested, $current, $interest, $existing['id']]
-        );
-    } else {
-        $db->execute(
-            "INSERT INTO long_term_funds
-                (user_id, fund_type, account_name, pran_number, invested_amount, current_value, interest_earned, status, created_at, last_updated)
-             VALUES (?, 'nps', ?, ?, ?, ?, ?, 'active', NOW(), NOW())",
-            [$userId, $name, $pran !== '' ? $pran : null, $invested, $current, $interest]
-        );
-    }
-}
-
 function extractAmc(string $fundName): string
 {
     $map = [
@@ -703,7 +825,8 @@ function gatherCandidatePasswords(Database $db, int $userId, int &$undecryptable
 
 function gmailAfterClause(string $range): string
 {
-    $map = ['1m' => '-1 month', '2m' => '-2 months', '3m' => '-3 months', '6m' => '-6 months', '1y' => '-1 year'];
+    // '3d' is the automatic recent-mail sync (enqueueAutoSyncJobs); the app offers the month ranges.
+    $map = ['3d' => '-3 days', '1m' => '-1 month', '2m' => '-2 months', '3m' => '-3 months', '6m' => '-6 months', '1y' => '-1 year'];
     if ($range === 'all' || !isset($map[$range])) {
         return $range === 'all' ? '' : 'after:' . date('Y/m/d', strtotime('-6 months'));
     }
