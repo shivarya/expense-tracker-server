@@ -15,6 +15,36 @@ require_once __DIR__ . '/aiClient.php';
 class AzureOpenAI {
     private AIClient $client;
 
+    /** Canonical categories shared by every transaction-parsing prompt. */
+    private const CANONICAL_CATEGORIES = <<<'CATEGORIES'
+CANONICAL CATEGORY LIST — you MUST return one of these integer category_id values only:
+1  = Food & Dining       (restaurants, cafes, Swiggy, Zomato, food delivery)
+2  = Transportation      (Ola, Uber, Rapido, metro, bus, petrol, diesel)
+3  = Shopping            (Amazon, Flipkart, Myntra, retail, fashion, electronics)
+4  = Entertainment       (streaming, Tata Play, Netflix, Hotstar, movies, games, subscriptions)
+5  = Bills & Utilities   (electricity, water, internet, Airtel, Jio, ACT, recharge, BBPS)
+6  = Healthcare          (pharmacy, Apollo, Netmeds, 1mg, hospital, clinic, lab tests)
+7  = Education           (courses, fees, books, certifications)
+8  = Travel              (flights, hotels, MakeMyTrip, Indigo, Goibibo, Cleartrip)
+9  = Groceries           (BigBasket, Blinkit, Zepto, DMart, supermarket, kirana)
+10 = Insurance           (LIC, HDFC Ergo, premium payments, policy renewals)
+11 = Rent/EMI            (rent, EMI, loan installment, amortization)
+12 = Personal Care       (salon, grooming, spa, wellness)
+13 = Investments         (SIP, mutual fund, stocks, NPS, PPF, FD deposit)
+14 = Salary              (salary credit, payroll)
+15 = Refund              (refund, reversal, cashback credited)
+16 = Other Income        (any credit that is not salary/refund)
+17 = Transfer            (self transfer between own accounts; ALSO use for a payment TOWARDS your own credit card bill — e.g. "payment received towards your Credit Card", autopay/NACH/e-mandate debit for a card bill, "credit card bill payment" — this settles debt already counted when the card's own purchases were recorded, so it is NOT a fresh expense)
+18 = Uncategorized       (use ONLY if truly unclassifiable)
+51 = Miscellaneous       (person-to-person UPI, ATM withdrawal, fees, tax, genuinely unclear debits)
+52 = Household Help      (cook, maid, driver, domestic worker salary)
+53 = Kids Activities     (karate, dance, swimming, sports, hobby classes, extracurricular fees)
+54 = Software & Tools    (SaaS, GitHub, AWS, Azure, domains, hosting, Figma, Notion, developer tools)
+55 = Donation            (charity donations, NGO contributions, relief funds, donation drives)
+56 = Home Improvement    (home repairs, renovation, plumbing, electrician work, home decor, furnishings)
+57 = Gift                (gift items, gift cards/vouchers, presents for birthdays/weddings/festivals)
+CATEGORIES;
+
     public function __construct() {
         $this->client = new AIClient();
     }
@@ -46,7 +76,10 @@ class AzureOpenAI {
     private function parseSMSBatch(array $smsMessages): array {
         $smsTexts = [];
         foreach ($smsMessages as $idx => $msg) {
-            $smsDate = $msg['date'] ?? '';
+            // Hand the model local (IST) wall time: the inbox sync sends ISO UTC
+            // ("...Z"), and a model copying that clock time verbatim would store the
+            // transaction 5h30 early.
+            $smsDate = $this->normalizeSmsDate($msg['date'] ?? null) ?? ($msg['date'] ?? '');
             $smsTexts[] = ($idx + 1) . ". [sms_index:" . ($idx + 1) . "] From: {$msg['sender']}, Date: {$smsDate}, Body: {$msg['body']}";
         }
 
@@ -76,32 +109,7 @@ REQUIRED fields per transaction:
 - description: short human-friendly description (include action + merchant context)
 - reference_number: UPI ref, txn ID, chq number (or null)
 
-CANONICAL CATEGORY LIST — you MUST return one of these integer category_id values only:
-1  = Food & Dining       (restaurants, cafes, Swiggy, Zomato, food delivery)
-2  = Transportation      (Ola, Uber, Rapido, metro, bus, petrol, diesel)
-3  = Shopping            (Amazon, Flipkart, Myntra, retail, fashion, electronics)
-4  = Entertainment       (streaming, Tata Play, Netflix, Hotstar, movies, games, subscriptions)
-5  = Bills & Utilities   (electricity, water, internet, Airtel, Jio, ACT, recharge, BBPS)
-6  = Healthcare          (pharmacy, Apollo, Netmeds, 1mg, hospital, clinic, lab tests)
-7  = Education           (courses, fees, books, certifications)
-8  = Travel              (flights, hotels, MakeMyTrip, Indigo, Goibibo, Cleartrip)
-9  = Groceries           (BigBasket, Blinkit, Zepto, DMart, supermarket, kirana)
-10 = Insurance           (LIC, HDFC Ergo, premium payments, policy renewals)
-11 = Rent/EMI            (rent, EMI, loan installment, amortization)
-12 = Personal Care       (salon, grooming, spa, wellness)
-13 = Investments         (SIP, mutual fund, stocks, NPS, PPF, FD deposit)
-14 = Salary              (salary credit, payroll)
-15 = Refund              (refund, reversal, cashback credited)
-16 = Other Income        (any credit that is not salary/refund)
-17 = Transfer            (self transfer between own accounts; ALSO use for a payment TOWARDS your own credit card bill — e.g. "payment received towards your Credit Card", autopay/NACH/e-mandate debit for a card bill, "credit card bill payment" — this settles debt already counted when the card's own purchases were recorded, so it is NOT a fresh expense)
-18 = Uncategorized       (use ONLY if truly unclassifiable)
-51 = Miscellaneous       (person-to-person UPI, ATM withdrawal, fees, tax, genuinely unclear debits)
-52 = Household Help      (cook, maid, driver, domestic worker salary)
-53 = Kids Activities     (karate, dance, swimming, sports, hobby classes, extracurricular fees)
-54 = Software & Tools    (SaaS, GitHub, AWS, Azure, domains, hosting, Figma, Notion, developer tools)
-55 = Donation            (charity donations, NGO contributions, relief funds, donation drives)
-56 = Home Improvement    (home repairs, renovation, plumbing, electrician work, home decor, furnishings)
-57 = Gift                (gift items, gift cards/vouchers, presents for birthdays/weddings/festivals)
+{{CATEGORIES}}
 
 RULES:
 - Most SMS are INR; set "currency" to a foreign code only when the SMS clearly shows one.
@@ -127,6 +135,8 @@ RULES:
 
 Return ONLY a valid JSON object — no markdown, no explanation.
 PROMPT;
+
+        $systemPrompt = str_replace('{{CATEGORIES}}', self::CANONICAL_CATEGORIES, $systemPrompt);
 
         $userPrompt = "Parse these bank SMS messages and return a JSON object with a 'transactions' array.\n\n";
         $userPrompt .= "SMS Messages:\n" . implode("\n", $smsTexts) . "\n\n";
@@ -186,6 +196,13 @@ PROMPT;
                                 $transaction['sms_date'] = $normalizedSMSDate;
                             }
                         }
+                        if ($smsIndex > 0 && isset($batch[$smsIndex - 1])) {
+                            // Identifies this exact SMS so a re-send (the daily inbox sync
+                            // re-posts every real-time SMS) is recognised as a replay.
+                            $source = $batch[$smsIndex - 1];
+                            $transaction['source_sender'] = (string)($source['sender'] ?? '');
+                            $transaction['source_hash'] = hash('sha256', strtolower(trim((string)($source['sender'] ?? ''))) . "\n" . trim((string)($source['body'] ?? '')));
+                        }
 
                         $transaction = $this->applyCurrencyConversion($transaction);
 
@@ -198,6 +215,88 @@ PROMPT;
         }
 
         return $transactions;
+    }
+
+    /**
+     * Parse payment-app / bank-app notifications (PhonePe, Google Pay, Paytm, BHIM,
+     * Amazon Pay, CRED, bank apps). Each item: {index, app, kind, title, text, posted_at}.
+     * Returns the model's rows keyed back to items via "index"; the caller keeps only
+     * status=success and checks the amount against the text.
+     */
+    public function parsePaymentNotifications(array $items): array {
+        $systemPrompt = <<<'PROMPT'
+You read Android notifications from Indian payment apps and bank apps for an expense tracker.
+
+Return a JSON object {"transactions": [...]} with ONE entry per input notification (use its "index"), with:
+- index: integer, the input notification's index
+- status: exactly one of
+    "success"  — money actually moved: you paid/sent someone, someone paid you, money received/credited, an account/card debited, a bill or autopay paid successfully, a refund credited
+    "failed"   — payment failed, declined, reversed before completion
+    "pending"  — payment processing / pending / under review
+    "request"  — a collect request or payment request ("X requested ₹500", "Pay ₹500 to X?", "approve to pay") — no money has moved
+    "reminder" — upcoming due date, bill due, autopay/mandate "will be debited", balance low
+    "promo"    — offers, cashback/rewards/scratch cards won, coupons, ads, credit to an in-app wallet as a reward
+    "other"    — anything else (OTP, login alert, balance info, KYC, order/delivery updates)
+- transaction_type: "debit" (money left the user) or "credit" (money came to the user); null unless status is success
+- amount: number exactly as written in the notification (no symbols, no commas)
+- currency: ISO code, default "INR"
+- counterparty: who was paid or who paid the user — a clean person or business name; null if not stated
+- upi_id: the payee/payer VPA if shown (e.g. "ramesh@ybl"), else null
+- bank: hdfc|sbi|icici|idfc|rbl|axis|kotak|other — ONLY if the notification names the user's bank account or card; else null
+- account_last4: last 4 digits of the user's account/card if shown (e.g. "XX1234", "••1234"), else null
+- instrument: "upi" | "card" | "wallet" | "bill_payment" | "bank_transfer"
+    card = paid with a credit/debit card (including UPI on a RuPay credit card)
+    wallet = paid from an app balance (Paytm Wallet, Amazon Pay balance, PhonePe wallet)
+    bill_payment = paying a bill or a credit card bill (e.g. CRED card bill payments)
+- reference_number: UPI ref / UTR / RRN / transaction ID if shown, else null
+- category_id: integer from the canonical list below
+- description: short human-friendly description (action + counterparty), never just "payment"
+
+{{CATEGORIES}}
+
+RULES:
+- Only status "success" creates a transaction. When unsure whether money moved, do NOT say success.
+- "You paid ₹X to Y" / "₹X sent to Y" / "Payment of ₹X to Y successful" => debit
+- "Y paid you ₹X" / "Received ₹X from Y" / "₹X credited to your account" => credit
+- Paying your OWN credit card bill (CRED, bank app "card payment received") => debit, instrument bill_payment, category_id 17
+- Money moved between the user's own accounts => category_id 17
+- UPI to a person's name (not a business) => category_id 51
+- A refund credited => credit, category_id 15
+- The amount MUST be a number that literally appears in the notification text.
+- The app name is the channel, not the counterparty (never use "PhonePe"/"Google Pay"/"Paytm" as counterparty unless the user paid that company itself).
+
+Return ONLY valid JSON — no markdown, no explanation.
+PROMPT;
+        $systemPrompt = str_replace('{{CATEGORIES}}', self::CANONICAL_CATEGORIES, $systemPrompt);
+
+        $rows = [];
+        foreach (array_chunk($items, 10) as $batch) {
+            $lines = [];
+            foreach ($batch as $item) {
+                $lines[] = sprintf(
+                    '[index:%d] App: %s (%s) | Posted: %s | Title: %s | Text: %s',
+                    (int)$item['index'],
+                    $item['app'],
+                    $item['kind'],
+                    $item['posted_at'],
+                    str_replace(["\r", "\n"], ' ', (string)$item['title']),
+                    str_replace(["\r", "\n"], ' ', (string)$item['text'])
+                );
+            }
+
+            $userPrompt = "Classify and parse these notifications:\n\n" . implode("\n", $lines)
+                . "\n\nReturn JSON: {\"transactions\": [...]}";
+            $response = $this->callAI($systemPrompt, $userPrompt);
+            error_log('[NOTIF_PARSE] AI response: ' . json_encode($response));
+
+            foreach (($response['transactions'] ?? []) as $row) {
+                if (is_array($row)) {
+                    $rows[] = $this->applyCurrencyConversion($row);
+                }
+            }
+        }
+
+        return $rows;
     }
 
     public function parseEmailContent(string $emailBody, string $subject): ?array {

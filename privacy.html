@@ -23,7 +23,7 @@
 <body>
   <header>
     <h1>Privacy Policy</h1>
-    <p>Expense Tracker — Effective date: March 2, 2026</p>
+    <p>Expense Tracker — Effective date: October 2, 2026</p>
   </header>
   <main>
     <p>This Privacy Policy explains how the Expense Tracker app ("we", "our") collects, uses, and protects your information when you use our mobile application and related services.</p>
@@ -33,7 +33,8 @@
     <ul>
       <li><strong>Google Account data:</strong> Your name and email address obtained via Google Sign-In for authentication purposes.</li>
       <li><strong>SMS data:</strong> Bank transaction SMS messages read directly from your device to automatically parse and categorise expenses. This data is processed locally and transmitted securely to our server for categorisation only.</li>
-      <li><strong>Transaction data:</strong> Amounts, merchants, dates, and categories derived from SMS parsing, stored in your account on our server.</li>
+      <li><strong>Payment app notifications (optional):</strong> If you turn on "Payment app alerts", the title and text of payment notifications posted by supported payment and banking apps (such as PhonePe, Google Pay, Paytm, BHIM, Amazon Pay, CRED and bank apps), used to record payments that do not produce a bank SMS.</li>
+      <li><strong>Transaction data:</strong> Amounts, merchants, dates, and categories derived from SMS and payment-notification parsing, stored in your account on our server.</li>
     </ul>
 
     <h2>2. How We Use Your Information</h2>
@@ -55,36 +56,48 @@
       <li>Never shared with any third party.</li>
     </ul>
 
-    <h2>4. Data Storage and Security</h2>
+    <h2>4. Payment App Notifications (optional)</h2>
+    <p>The app can use Android's Notification access, only after you turn on "Payment app alerts" and grant access in Android Settings. With it on:</p>
+    <ul>
+      <li>Only notifications from the supported payment and banking apps listed in the app are read; notifications from every other app are ignored on your device.</li>
+      <li>The title and text of a payment notification are transmitted securely over HTTPS to our server, which uses an AI model to extract the amount, direction and payee, the same way bank SMS are processed.</li>
+      <li>The notification text is kept with the resulting transaction so the same payment reported by both the app and your bank's SMS is recorded once.</li>
+      <li>An optional on-device log of recent payment notifications can be turned on for troubleshooting; it stays on your device unless you choose to share it.</li>
+      <li>You can turn this off in the app or in Android Settings → Notifications → Device &amp; app notifications (Notification access) at any time.</li>
+    </ul>
+
+    <h2>5. Data Storage and Security</h2>
     <p>Your transaction data is stored on a secured server (<code>shivarya.dev</code>) with access protected by JWT authentication. All communication between the app and server uses HTTPS (TLS). Passwords are not stored — authentication is handled entirely via Google OAuth.</p>
 
-    <h2>5. Data Retention</h2>
+    <h2>6. Data Retention</h2>
     <p>Your data is retained as long as your account is active. You may contact us to request deletion of your account and associated data at any time.</p>
 
-    <h2>6. Third-Party Services</h2>
+    <h2>7. Third-Party Services</h2>
     <p>We use the following third-party services:</p>
     <ul>
       <li><strong>Google Sign-In (Google LLC):</strong> For authentication. Subject to <a href="https://policies.google.com/privacy" target="_blank" rel="noopener">Google's Privacy Policy</a>.</li>
+      <li><strong>AI model provider (currently Google Gemini):</strong> The text of bank SMS and payment notifications is sent from our server to the provider's API to extract transaction details. It is not used by us for any other purpose.</li>
       <li><strong>Expo (Expo Inc.):</strong> For app build and update infrastructure.</li>
     </ul>
     <p>We do not use analytics SDKs, ad networks, or tracking frameworks.</p>
 
-    <h2>7. Children's Privacy</h2>
+    <h2>8. Children's Privacy</h2>
     <p>Expense Tracker is not intended for users under the age of 13. We do not knowingly collect personal information from children.</p>
 
-    <h2>8. Your Rights</h2>
+    <h2>9. Your Rights</h2>
     <p>You have the right to:</p>
     <ul>
       <li>Access the data we hold about you.</li>
       <li>Request correction of inaccurate data.</li>
       <li>Request deletion of your account and data.</li>
       <li>Withdraw consent for SMS access at any time via Android app permissions settings.</li>
+      <li>Withdraw consent for payment-notification access at any time in the app or via Android's Notification access settings.</li>
     </ul>
 
-    <h2>9. Changes to This Policy</h2>
+    <h2>10. Changes to This Policy</h2>
     <p>We may update this Privacy Policy as the app evolves. Changes will be posted at this URL with an updated effective date. Continued use of the app constitutes acceptance of the updated policy.</p>
 
-    <h2>10. Contact</h2>
+    <h2>11. Contact</h2>
     <p>For questions or data requests, contact us at:<br />
       <a href="mailto:ash@shivarya.dev">ash@shivarya.dev</a><br />
       <a href="https://shivarya.dev">https://shivarya.dev</a>

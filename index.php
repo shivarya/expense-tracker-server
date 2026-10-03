@@ -215,6 +215,13 @@ try {
     exit;
   }
 
+  // Payment-app notification parsing (Android notification listener)
+  if ($requestUri === '/parse/notification' && $requestMethod === 'POST') {
+    require_once __DIR__ . '/controllers/smsParserController.php';
+    (new SMSParserController())->parseNotifications();
+    exit;
+  }
+
   // Duplicate detection endpoints
   if (strpos($requestUri, '/duplicates') === 0) {
     require_once __DIR__ . '/controllers/duplicateController.php';

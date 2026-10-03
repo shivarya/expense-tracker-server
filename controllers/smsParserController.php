@@ -7,6 +7,9 @@ require_once __DIR__ . '/../utils/transactionDuplicateDetector.php';
 require_once __DIR__ . '/../utils/categoryResolver.php';
 require_once __DIR__ . '/../utils/categoryLearning.php';
 require_once __DIR__ . '/../utils/merchantSubscriptionDetector.php';
+require_once __DIR__ . '/../utils/crossSourceMerger.php';
+require_once __DIR__ . '/../utils/paymentApps.php';
+require_once __DIR__ . '/../utils/upiRef.php';
 require_once __DIR__ . '/../config/database.php';
 
 class SMSParserController {
@@ -163,6 +166,254 @@ class SMSParserController {
         }
     }
 
+    /**
+     * POST /parse/notification
+     * Payment-app / bank-app notifications forwarded by the Android notification
+     * listener (PhonePe, Google Pay, Paytm, BHIM, Amazon Pay, CRED, bank apps).
+     * Body: { "notifications": [{ "package", "title", "text", "big_text"?, "sub_text"?,
+     *         "posted_at" (ISO 8601), "hash" }] }
+     * Responds in the /parse/sms shape (plus merged_cross_source), so the app raises
+     * its transaction alert from either endpoint with the same code. A notification
+     * for a payment whose bank SMS is already stored merges into that row and
+     * creates nothing (and so raises no second alert).
+     */
+    public function parseNotifications(): void
+    {
+        $tokenData = JWTHandler::requireAuth();
+        $userId = (int)$tokenData['userId'];
+
+        $input = getJsonInput();
+        if (!isset($input['notifications']) || !is_array($input['notifications'])) {
+            Response::error('Invalid input. Provide "notifications" array.', 400);
+            return;
+        }
+
+        $allowTest = filter_var(
+            getenv('ALLOW_DEV_LOGIN') ?: ($_ENV['ALLOW_DEV_LOGIN'] ?? 'false'),
+            FILTER_VALIDATE_BOOLEAN
+        );
+
+        $items = [];
+        $replayed = 0;
+        foreach (array_slice($input['notifications'], 0, 50) as $notification) {
+            if (!is_array($notification)) {
+                continue;
+            }
+            $package = trim((string)($notification['package'] ?? ''));
+            $app = PaymentApps::find($package, $allowTest);
+            $text = $this->notificationText($notification);
+            if ($app === null || $text === '') {
+                continue;
+            }
+
+            $title = mb_substr(trim((string)($notification['title'] ?? '')), 0, 300);
+            $postedAt = $this->normalizeDateTimeString($notification['posted_at'] ?? null) ?? date('Y-m-d H:i:s');
+            $hash = (string)($notification['hash'] ?? '');
+            if (!preg_match('/^[a-f0-9]{16,64}$/', $hash)) {
+                $hash = hash('sha256', $package . "\n" . $title . "\n" . $text . "\n" . substr($postedAt, 0, 16));
+            }
+
+            // Skip before spending an AI call: the app re-sends after a reinstall or a
+            // lost response, and an already-stored hash means it was handled.
+            if ($this->notificationAlreadyStored($userId, $hash, $postedAt)) {
+                $replayed++;
+                continue;
+            }
+
+            $items[] = [
+                'index' => count($items) + 1,
+                'package' => $package,
+                'app' => $app['label'],
+                'kind' => $app['kind'],
+                'meta' => $app,
+                'title' => $title,
+                'text' => $text,
+                'posted_at' => $postedAt,
+                'hash' => $hash,
+            ];
+        }
+
+        $transactions = [];
+        $ignored = 0;
+        if (!empty($items)) {
+            $byIndex = array_column($items, null, 'index');
+            foreach ($this->ai->parsePaymentNotifications($items) as $row) {
+                $index = (int)($row['index'] ?? 0);
+                $item = $byIndex[$index] ?? null;
+                unset($byIndex[$index]); // one transaction per notification
+                $txn = ($item !== null && strtolower((string)($row['status'] ?? '')) === 'success')
+                    ? $this->notificationToTransaction($row, $item)
+                    : null;
+                if ($txn === null) {
+                    $ignored++;
+                    continue;
+                }
+                $transactions[] = $txn;
+            }
+        }
+
+        $result = $this->persistParsedTransactions($userId, $transactions, [
+            'summary_tag' => 'NOTIF_PARSE',
+            'source' => 'app_notification',
+        ]);
+
+        if ($result['saved_transactions'] > 0) {
+            CategoryResolver::autoFix($this->db, $userId);
+        }
+
+        error_log('[NOTIF_PARSE] user_id=' . $userId . ' received=' . count($input['notifications'])
+            . ' parsed=' . count($items) . ' replayed=' . $replayed . ' ignored=' . $ignored
+            . ' saved=' . $result['saved_transactions'] . ' merged=' . $result['merged_cross_source']);
+
+        Response::success([
+            'message' => 'Notification parsing complete',
+            'total_notifications' => count($items),
+            'replayed_notifications' => $replayed,
+            'ignored_notifications' => $ignored,
+            'parsed_transactions' => $result['parsed_transactions'],
+            'saved_transactions' => $result['saved_transactions'],
+            'skipped_duplicates' => $result['skipped_duplicates'],
+            'merged_cross_source' => $result['merged_cross_source'],
+            'flagged_possible_duplicates' => $result['flagged_possible_duplicates'],
+            'saved_debit_count' => $result['saved_debit_count'],
+            'saved_credit_count' => $result['saved_credit_count'],
+            'saved_debit_amount' => round($result['saved_debit_amount'], 2),
+            'saved_credit_amount' => round($result['saved_credit_amount'], 2),
+            'transactions' => $result['transactions'],
+        ]);
+    }
+
+    /** Title-less body of a notification: the expanded text when the app provides one. */
+    private function notificationText(array $notification): string
+    {
+        $text = trim((string)($notification['text'] ?? ''));
+        $bigText = trim((string)($notification['big_text'] ?? ''));
+        if (mb_strlen($bigText) > mb_strlen($text)) {
+            $text = $bigText;
+        }
+        $subText = trim((string)($notification['sub_text'] ?? ''));
+        if ($subText !== '' && !str_contains($text, $subText)) {
+            $text = trim($text . ' ' . $subText);
+        }
+
+        return mb_substr(preg_replace('/\s+/u', ' ', $text) ?? $text, 0, 1000);
+    }
+
+    private function notificationAlreadyStored(int $userId, string $hash, string $postedAt): bool
+    {
+        $at = strtotime($this->toStoredTime($postedAt)) ?: time();
+        // Deleted rows count too: a notification the user deleted stays deleted.
+        $row = $this->db->fetchOne(
+            "SELECT id FROM transactions
+             WHERE user_id = ? AND transaction_date BETWEEN ? AND ? AND source_data LIKE ?
+             LIMIT 1",
+            [$userId, date('Y-m-d H:i:s', $at - 86400), date('Y-m-d H:i:s', $at + 86400), '%"' . $hash . '"%']
+        );
+
+        return !empty($row);
+    }
+
+    /**
+     * Map one AI-parsed notification to the transaction shape persistParsedTransactions
+     * consumes. Returns null when the parse can't be trusted (amount not in the text,
+     * no direction).
+     */
+    private function notificationToTransaction(array $row, array $item): ?array
+    {
+        $type = strtolower(trim((string)($row['transaction_type'] ?? '')));
+        if (!in_array($type, ['debit', 'credit'], true)) {
+            return null;
+        }
+
+        // original_amount is the figure as written when the model reported a foreign currency.
+        $statedAmount = (float)($row['original_amount'] ?? $row['amount'] ?? 0);
+        if ($statedAmount <= 0 || !$this->amountAppearsIn($statedAmount, $item['title'] . ' ' . $item['text'])) {
+            error_log('[NOTIF_PARSE] dropped: amount ' . $statedAmount . ' not in text of ' . $item['package']);
+            return null;
+        }
+
+        $meta = $item['meta'];
+        $instrument = strtolower(trim((string)($row['instrument'] ?? 'upi'))) ?: 'upi';
+        $aiBank = strtolower(trim((string)($row['bank'] ?? '')));
+        $bank = $meta['bank'] ?? (($aiBank !== '' && $aiBank !== 'other' && $aiBank !== 'null') ? $aiBank : null);
+        $last4Digits = preg_replace('/\D+/', '', (string)($row['account_last4'] ?? '')) ?? '';
+        $last4 = strlen($last4Digits) >= 4 ? substr($last4Digits, -4) : null;
+        if ($instrument === 'bill_payment') {
+            // "Paid ₹X towards HDFC card XX5678" names the card being paid, not the
+            // account the money left — leave the account for the bank SMS to supply.
+            $last4 = null;
+            $bank = $meta['bank'] ?? null;
+        }
+
+        $isCard = $instrument === 'card';
+        $accountType = null;
+        if ($isCard) {
+            // Notifications rarely say which kind of card; a debit card is a savings account.
+            $accountType = preg_match('/debit\s*card/i', $item['text']) ? 'savings' : 'credit_card';
+        }
+
+        if ($bank !== null && $last4 !== null) {
+            $accountMode = 'bank';
+        } elseif ($bank !== null) {
+            $accountMode = 'bank_guess';
+        } elseif ($instrument === 'wallet') {
+            $accountMode = 'wallet';
+        } else {
+            $accountMode = 'unlinked';
+        }
+
+        $counterparty = trim((string)($row['counterparty'] ?? ''));
+        if ($counterparty === '' || strcasecmp($counterparty, $item['app']) === 0) {
+            $counterparty = trim((string)($row['upi_id'] ?? ''));
+        }
+        $description = trim((string)($row['description'] ?? ''));
+
+        $paymentMethods = ['upi' => 'UPI', 'card' => 'Card', 'wallet' => $item['app'] . ' Wallet', 'bill_payment' => 'Bill payment', 'bank_transfer' => 'Bank transfer'];
+
+        return [
+            'bank' => $bank ?? 'other',
+            'account_number' => $last4,
+            'card_last_four' => $isCard ? $last4 : null,
+            'account_type' => $accountType,
+            'account_mode' => $accountMode,
+            'transaction_type' => $type,
+            'amount' => round((float)($row['amount'] ?? 0), 2),
+            'currency' => $row['currency'] ?? 'INR',
+            'original_amount' => $row['original_amount'] ?? null,
+            'original_currency' => $row['original_currency'] ?? null,
+            'date' => $item['posted_at'],
+            'sms_date' => $item['posted_at'],
+            'category_id' => $row['category_id'] ?? null,
+            'merchant' => $counterparty,
+            'description' => $item['app'] . ': ' . ($description !== '' ? $description : ($item['title'] !== '' ? $item['title'] : mb_substr($item['text'], 0, 120))),
+            'reference_number' => trim((string)($row['reference_number'] ?? '')) ?: null,
+            'payment_method' => $paymentMethods[$instrument] ?? 'UPI',
+            'instrument' => $instrument,
+            'source_package' => $item['package'],
+            'source_app' => $item['app'],
+            'source_app_key' => $meta['key'],
+            'source_hash' => $item['hash'],
+            'source_title' => $item['title'],
+            'source_text' => $item['text'],
+        ];
+    }
+
+    /** Hallucination guard: the parsed amount must literally appear in the notification. */
+    private function amountAppearsIn(float $amount, string $text): bool
+    {
+        $plain = preg_replace('/(?<=\d),(?=\d)/', '', $text) ?? $text;
+        if (!preg_match_all('/\d+(?:\.\d+)?/', $plain, $matches)) {
+            return false;
+        }
+        foreach ($matches[0] as $number) {
+            if (abs((float)$number - $amount) < 0.005) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     public function processBankMessagesForUser(int $userId, array $bankSMS, array $options = []): array
     {
         error_log("Processing " . count($bankSMS) . " bank SMS messages");
@@ -199,11 +450,13 @@ class SMSParserController {
         $sleepMs = max(0, (int)($options['sleep_ms'] ?? 0));
         $jobId = isset($options['job_id']) ? (int)$options['job_id'] : null;
         $useAiDedupe = (bool)($options['use_ai_dedupe'] ?? true);
+        $source = (string)($options['source'] ?? 'sms');
 
         $totalTransactions = count($transactions);
 
         $savedCount = 0;
         $skippedCount = 0;
+        $mergedCount = 0;
         $updatedDuplicateTimeCount = 0;
         $flaggedPossibleCount = 0;
         $aiCheckedCount = 0;
@@ -236,13 +489,27 @@ class SMSParserController {
 
         foreach (array_chunk($transactions, $chunkSize) as $chunkIndex => $chunk) {
             foreach ($chunk as $transaction) {
-                $transaction['date'] = $this->resolveTransactionDateTime($transaction);
+                $transaction['date'] = $this->toStoredTime($this->resolveTransactionDateTime($transaction));
                 $transaction['transaction_type'] = $this->normalizeTransactionTypeValue(
                     (string)($transaction['transaction_type'] ?? ''),
                     (string)($transaction['description'] ?? '')
                 );
                 $transaction['merchant'] = $this->normalizeMerchantName((string)($transaction['merchant'] ?? ''));
                 $transaction['description'] = $this->resolveTransactionDescription($transaction);
+                $transaction['upi_ref'] = UpiRef::extract($transaction['reference_number'] ?? null, $transaction['source_text'] ?? null);
+
+                // Another source already reported this payment (the payment app's
+                // notification vs the bank SMS), or this exact report was stored before.
+                $incoming = $this->buildMergeIncoming($transaction, $source);
+                $twin = $this->findCrossSourceTwin($userId, $incoming);
+                if ($twin !== null && ($twin['action'] === 'replay' || $this->mergeIntoTwin($userId, $twin['row'], $incoming, $transaction))) {
+                    if ($twin['action'] === 'merge') {
+                        $mergedCount++;
+                    }
+                    $skippedCount++;
+                    $processedCount++;
+                    continue;
+                }
 
                 $duplicateCheck = $this->evaluateDuplicateTransactionSafely($userId, $transaction, null, $useAiDedupe);
 
@@ -270,7 +537,7 @@ class SMSParserController {
                     $flaggedPossibleCount++;
                 }
 
-                $accountId = $this->getOrCreateBankAccount($userId, $transaction);
+                $accountId = $this->resolveAccountId($userId, $transaction);
                 $categoryId = $this->resolveCategoryId($userId, $transaction);
 
                 // amount is INR (home currency); original_* set by the parser for foreign spend.
@@ -280,8 +547,9 @@ class SMSParserController {
                     INSERT INTO transactions (
                         user_id, account_id, category_id, transaction_type,
                         amount, currency, original_amount, original_currency,
-                        merchant, description, transaction_date, reference_number, payment_method, source, duplicate_score
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'sms', ?)
+                        merchant, description, transaction_date, reference_number, upi_ref, payment_method,
+                        source, source_data, duplicate_score
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ";
 
                 try {
@@ -298,7 +566,10 @@ class SMSParserController {
                         $transaction['description'] ?? 'SMS Transaction',
                         $transaction['date'] ?? date('Y-m-d H:i:s'),
                         $transaction['reference_number'] ?? null,
+                        $transaction['upi_ref'],
                         $transaction['payment_method'] ?? null,
+                        $source,
+                        CrossSourceMerger::initialSourceData($incoming),
                         (int)($duplicateCheck['confidence'] ?? 0),
                     ]);
 
@@ -375,6 +646,7 @@ class SMSParserController {
             . ' duplicates_found=' . $duplicatesFound
             . ' duplicates_skipped=' . $skippedCount
             . ' possible_duplicates=' . $flaggedPossibleCount
+            . ' merged_cross_source=' . $mergedCount
             . ' synced=' . $savedCount
             . ' failed_saves=' . $failedSaveCount);
 
@@ -403,6 +675,7 @@ class SMSParserController {
             'parsed_transactions' => $totalTransactions,
             'saved_transactions' => $savedCount,
             'skipped_duplicates' => $skippedCount,
+            'merged_cross_source' => $mergedCount,
             'updated_duplicate_timestamps' => $updatedDuplicateTimeCount,
             'flagged_possible_duplicates' => $flaggedPossibleCount,
             'ai_checked_transactions' => $aiCheckedCount,
@@ -598,7 +871,27 @@ class SMSParserController {
 
         // Save transaction
         $transaction = $transactions[0];
-        $transaction['date'] = $this->resolveTransactionDateTime($transaction, $date);
+        $transaction['date'] = $this->toStoredTime($this->resolveTransactionDateTime($transaction, $date));
+        $transaction['upi_ref'] = UpiRef::extract($transaction['reference_number'] ?? null);
+
+        $incoming = $this->buildMergeIncoming($transaction, 'sms_webhook');
+        $twin = $this->findCrossSourceTwin($userId, $incoming);
+        if ($twin !== null && ($twin['action'] === 'replay' || $this->mergeIntoTwin($userId, $twin['row'], $incoming, $transaction))) {
+            Response::success([
+                'message' => 'Already recorded from another source',
+                'processed' => true,
+                'saved' => false,
+                'duplicate' => true,
+                'merged_into' => (int)$twin['row']['id'],
+                'saved_transactions' => 0,
+                'saved_debit_count' => 0,
+                'saved_credit_count' => 0,
+                'saved_debit_amount' => 0,
+                'saved_credit_amount' => 0,
+                'transaction' => $transaction
+            ]);
+            return;
+        }
 
         $duplicateCheck = $this->evaluateDuplicateTransactionSafely($userId, $transaction, null, true);
         if (!empty($duplicateCheck['should_skip'])) {
@@ -636,8 +929,9 @@ class SMSParserController {
             INSERT INTO transactions (
                 user_id, account_id, category_id, transaction_type,
                 amount, currency, original_amount, original_currency,
-                merchant, description, transaction_date, reference_number, payment_method, source, duplicate_score
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'sms_webhook', ?)
+                merchant, description, transaction_date, reference_number, upi_ref, payment_method,
+                source, source_data, duplicate_score
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'sms_webhook', ?, ?)
         ";
 
         $newId = $this->db->insert($insertQuery, [
@@ -653,7 +947,9 @@ class SMSParserController {
             $transaction['merchant'] ?? 'SMS Transaction',
             $transaction['date'] ?? $date,
             $transaction['reference_number'] ?? null,
+            $transaction['upi_ref'],
             $transaction['payment_method'] ?? null,
+            CrossSourceMerger::initialSourceData($incoming),
             (int)($duplicateCheck['confidence'] ?? 0),
         ]);
 
@@ -678,6 +974,156 @@ class SMSParserController {
             'saved_credit_amount' => $savedCreditCount === 1 ? $txnAmount : 0,
             'transaction' => $transaction
         ]);
+    }
+
+    /** The incoming report in the shape CrossSourceMerger matches on. */
+    private function buildMergeIncoming(array $transaction, string $source): array
+    {
+        $package = $source === 'app_notification' ? (string)($transaction['source_package'] ?? '') : '';
+        $family = CrossSourceMerger::familyOf($source, $package);
+        // Match on the device-side time (SMS receipt / notification post), not the
+        // model's reading of it — in the stored (UTC) convention, like transaction_date.
+        $deviceAt = $this->normalizeDateTimeString($transaction['sms_date'] ?? null);
+        $eventAt = $deviceAt !== null ? $this->toStoredTime($deviceAt) : (string)$transaction['date'];
+        $hash = (string)($transaction['source_hash'] ?? '');
+
+        $evidence = ['family' => $family, 'source' => $source, 'at' => $eventAt];
+        if ($hash !== '') {
+            $evidence['hash'] = $hash;
+        }
+        if ($source === 'app_notification') {
+            $evidence += [
+                'package' => $package,
+                'app' => (string)($transaction['source_app'] ?? ''),
+                'instrument' => (string)($transaction['instrument'] ?? ''),
+                'title' => (string)($transaction['source_title'] ?? ''),
+                'text' => (string)($transaction['source_text'] ?? ''),
+            ];
+        } elseif (!empty($transaction['source_sender'])) {
+            $evidence['sender'] = (string)$transaction['source_sender'];
+        }
+
+        return [
+            'family' => $family,
+            'source' => $source,
+            'package' => $package,
+            'transaction_type' => strtolower((string)($transaction['transaction_type'] ?? 'debit')),
+            'amount' => round((float)($transaction['amount'] ?? 0), 2),
+            'at' => $eventAt,
+            'upi_ref' => $transaction['upi_ref'] ?? null,
+            'hash' => $hash,
+            'instrument' => (string)($transaction['instrument'] ?? ''),
+            'account_type' => $source === 'app_notification'
+                ? ($transaction['account_type'] ?? null)
+                : $this->inferAccountType($transaction),
+            'merchant' => (string)($transaction['merchant'] ?? ''),
+            'reference_number' => (string)($transaction['reference_number'] ?? ''),
+            'payment_method' => (string)($transaction['payment_method'] ?? ''),
+            'evidence' => $evidence,
+        ];
+    }
+
+    private function findCrossSourceTwin(int $userId, array $incoming): ?array
+    {
+        try {
+            return CrossSourceMerger::findTwin($this->db->getConnection(), $userId, $incoming);
+        } catch (Throwable $e) {
+            // Never lose a transaction to the merge step: fall back to the normal path.
+            error_log('[CROSS_SOURCE] twin lookup failed: ' . $e->getMessage());
+            return null;
+        }
+    }
+
+    /** Returns false (and the caller inserts normally) if the merge could not be applied. */
+    private function mergeIntoTwin(int $userId, array $row, array $incoming, array $transaction): bool
+    {
+        try {
+            $accountId = null;
+            if (CrossSourceMerger::isSyntheticAccount($row)) {
+                $mode = $transaction['account_mode'] ?? 'bank';
+                if ($mode === 'bank') {
+                    $accountId = $this->getOrCreateBankAccount($userId, $transaction);
+                } elseif ($mode === 'bank_guess') {
+                    $accountId = $this->findSoleBankAccount($userId, $transaction);
+                }
+            }
+            $categoryId = (int)$row['category_id'] === 18 ? $this->resolveCategoryId($userId, $transaction) : null;
+
+            CrossSourceMerger::merge($this->db->getConnection(), $userId, $row, $incoming, $accountId, $categoryId);
+            error_log('[CROSS_SOURCE] user_id=' . $userId . ' merged ' . $incoming['family']
+                . ' into txn ' . $row['id'] . ' (' . $row['source'] . ', ' . $incoming['amount'] . ')');
+            return true;
+        } catch (Throwable $e) {
+            error_log('[CROSS_SOURCE] merge into txn ' . ($row['id'] ?? '?') . ' failed: ' . $e->getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * Account for a new row. Bank SMS (and notifications naming bank + last 4) use the
+     * real account; a payment-app notification that doesn't say which account paid
+     * goes on a per-user "UPI (unlinked)" account until the bank SMS merges in and
+     * moves it — or on "<App> Wallet" when it was paid from an app balance.
+     */
+    private function resolveAccountId(int $userId, array $transaction): int
+    {
+        switch ($transaction['account_mode'] ?? 'bank') {
+            case 'wallet':
+                return $this->getOrCreateSyntheticAccount(
+                    $userId,
+                    'WALLET-' . ($transaction['source_app_key'] ?? 'APP'),
+                    ($transaction['source_app'] ?? 'App') . ' Wallet'
+                );
+            case 'bank_guess':
+                return $this->findSoleBankAccount($userId, $transaction)
+                    ?? $this->getOrCreateSyntheticAccount($userId, 'UPI', 'UPI (unlinked)');
+            case 'unlinked':
+                return $this->getOrCreateSyntheticAccount($userId, 'UPI', 'UPI (unlinked)');
+            default:
+                return $this->getOrCreateBankAccount($userId, $transaction);
+        }
+    }
+
+    /** The user's only active account at this bank of the right kind, if there is exactly one. */
+    private function findSoleBankAccount(int $userId, array $transaction): ?int
+    {
+        $bank = strtolower((string)($transaction['bank'] ?? ''));
+        if ($bank === '' || $bank === 'other') {
+            return null;
+        }
+        $types = $this->inferAccountType($transaction) === 'credit_card' ? ['credit_card'] : ['savings', 'current'];
+        $rows = $this->db->fetchAll(
+            "SELECT id FROM bank_accounts
+             WHERE user_id = ? AND bank = ? AND account_type IN (" . implode(',', array_fill(0, count($types), '?')) . ")
+               AND (status IS NULL OR status = 'active')",
+            array_merge([$userId, $bank], $types)
+        );
+
+        return count($rows) === 1 ? (int)$rows[0]['id'] : null;
+    }
+
+    private function getOrCreateSyntheticAccount(int $userId, string $accountNumber, string $name): int
+    {
+        $sql = "SELECT id FROM bank_accounts WHERE user_id = ? AND bank = 'other' AND account_number = ? LIMIT 1";
+        $existing = $this->db->fetchOne($sql, [$userId, $accountNumber]);
+        if ($existing) {
+            return (int)$existing['id'];
+        }
+
+        try {
+            return (int)$this->db->insert(
+                "INSERT INTO bank_accounts (user_id, bank, account_number, account_type, account_name, balance)
+                 VALUES (?, 'other', ?, 'savings', ?, 0)",
+                [$userId, $accountNumber, $name]
+            );
+        } catch (Exception $e) {
+            // Created concurrently by another request (unique user+bank+number).
+            $existing = $this->db->fetchOne($sql, [$userId, $accountNumber]);
+            if ($existing) {
+                return (int)$existing['id'];
+            }
+            throw $e;
+        }
     }
 
     private function evaluateDuplicateTransaction(int $userId, array $transaction, ?int $accountId = null, bool $useAi = true): array
@@ -713,6 +1159,27 @@ class SMSParserController {
     {
         $normalized = strtolower($message);
         return str_contains($normalized, 'server has gone away') || str_contains($normalized, 'lost connection');
+    }
+
+    /**
+     * Convert a parsed (IST wall-clock) timestamp to what transactions.transaction_date stores.
+     *
+     * The column holds UTC without an offset — GET /transactions labels it "Z" and both clients add +05:30 —
+     * because the RN app sent SMS dates as ISO UTC and the model copied that clock time. This pipeline works
+     * in IST (normalizeDateTimeString/normalizeSmsDate format in Asia/Kolkata), so a precise time must be
+     * shifted here or it displays 5h30 late; that is exactly what the native app's local-time real-time SMS
+     * did. Date-only values (midnight) stay as they are, like every statement row.
+     */
+    private function toStoredTime(string $istDateTime): string
+    {
+        if ($this->hasMidnightTime($istDateTime)) {
+            return $istDateTime;
+        }
+        $dt = DateTime::createFromFormat('Y-m-d H:i:s', $istDateTime, new DateTimeZone('Asia/Kolkata'));
+        if (!$dt instanceof DateTime) {
+            return $istDateTime;
+        }
+        return $dt->setTimezone(new DateTimeZone('UTC'))->format('Y-m-d H:i:s');
     }
 
     private function resolveTransactionDateTime(array $transaction, ?string $fallbackSmsDate = null): string
