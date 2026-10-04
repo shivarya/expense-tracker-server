@@ -227,6 +227,11 @@ function processJob(Database $db, int $jobId, int $userId, $paramsRaw): void
             }
 
             $messageIds = GmailFetcher::listMessageIds($client, sourceQuery($cfg, $afterClause), (int)($cfg['max_messages'] ?? MAX_MESSAGES_PER_SOURCE));
+            // Gmail lists newest first. Holdings statements are snapshots that overwrite each other, so apply them
+            // oldest first and the newest one lands last (it used to leave the oldest statement's values behind).
+            if (in_array($sourceKey, ['mutual_funds', 'stocks', 'long_term'], true)) {
+                $messageIds = array_reverse($messageIds);
+            }
 
             $srcSaved = 0;
             $srcProcessed = 0;
@@ -616,8 +621,8 @@ function processNpsMessage(
     }
 
     $from = strtolower(GmailFetcher::getHeader($message, 'From'));
-    saveLongTermNps($db, $userId, $nps, str_contains($from, 'kfintech') ? 'KFintech CRA' : 'Protean CRA');
-    return 1;
+    $emailDate = date('Y-m-d', (int)floor(((int)$message->getInternalDate()) / 1000));
+    return saveLongTermNps($db, $userId, $nps, str_contains($from, 'kfintech') ? 'KFintech CRA' : 'Protean CRA', $emailDate) ? 1 : 0;
 }
 
 /** Credit-card statement email → transactions (reuses the upload pipeline). */

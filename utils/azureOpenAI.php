@@ -362,19 +362,20 @@ PROMPT;
 You extract the NPS (National Pension System) account summary from an Indian NPS statement PDF.
 
 Return ONLY a JSON object:
-{"pran": "", "account_name": "", "invested_amount": 0, "current_value": 0}
+{"pran": "", "account_name": "", "invested_amount": 0, "current_value": 0, "as_of_date": "YYYY-MM-DD"}
 
 Rules:
 - pran = the 12-digit PRAN if present.
 - account_name = subscriber name.
 - invested_amount = total contributions; current_value = current total valuation (Tier I + Tier II if both shown).
+- as_of_date = the date the valuation is stated for (e.g. "Investment Details as on 10-09-2026" -> "2026-09-10"; else the statement date), or null.
 - Numbers must be plain numerics (no currency symbols, no commas).
 - Return ONLY valid JSON, no markdown.
 PROMPT;
 
         $userPrompt = "Extract the NPS summary from this statement text:\n\n"
             . mb_substr($statementText, 0, 18000)
-            . "\n\nReturn JSON: {\"pran\": \"\", \"account_name\": \"\", \"invested_amount\": 0, \"current_value\": 0}";
+            . "\n\nReturn JSON: {\"pran\": \"\", \"account_name\": \"\", \"invested_amount\": 0, \"current_value\": 0, \"as_of_date\": \"YYYY-MM-DD\"}";
 
         $result = $this->chatCompletion([
             ['role' => 'system', 'content' => $systemPrompt],

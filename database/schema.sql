@@ -177,6 +177,7 @@ CREATE TABLE IF NOT EXISTS long_term_funds (
     uan_number VARCHAR(50) COMMENT 'For PF/UAN',
     invested_amount DECIMAL(15, 2) NOT NULL DEFAULT 0,
     current_value DECIMAL(15, 2) NOT NULL DEFAULT 0,
+    valuation_date DATE NULL COMMENT 'As-of date of current_value (statement valuation date)',
     employer_contribution DECIMAL(15, 2) DEFAULT 0 COMMENT 'For PF',
     interest_earned DECIMAL(15, 2) DEFAULT 0,
     maturity_date DATE COMMENT 'Expected maturity date',
