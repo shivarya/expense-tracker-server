@@ -200,7 +200,9 @@ function computeNetWorthProgress($db, $userId, $goal)
   return $result;
 }
 
-function computeSpendCapProgress($db, $userId, $goal)
+// $includeDaily adds `daily_spend` (net spend per day of the month so far) for
+// the home-screen widget's pace chart; GET /goals leaves it off.
+function computeSpendCapProgress($db, $userId, $goal, bool $includeDaily = false)
 {
   if ($goal['linked_category_ids']) {
     $categoryIds = $goal['linked_category_ids'];
@@ -229,9 +231,11 @@ function computeSpendCapProgress($db, $userId, $goal)
   // split transaction (e.g. a 5000 cash withdrawal split 3000 Household Help /
   // 2000 Miscellaneous) into its per-line categories instead of leaving the
   // whole amount attributed to the transaction's own single category_id.
+  // Grouped per day as well, then folded below, so the widget's day-by-day
+  // line always adds up to exactly current_amount.
   $rows = $db->fetchAll(
     "SELECT ed.category_id, c.name AS category_name, c.color AS category_color, c.icon AS category_icon,
-            SUM(ed.amount) as total
+            DAY(ed.transaction_date) AS d, SUM(ed.amount) as total
      FROM v_effective_debit_lines ed
      JOIN categories c ON c.id = ed.category_id
      WHERE ed.user_id = ?
@@ -240,19 +244,29 @@ function computeSpendCapProgress($db, $userId, $goal)
        AND YEAR(ed.transaction_date) = YEAR(CURDATE())
        AND MONTH(ed.transaction_date) = MONTH(CURDATE())
        AND ed.category_id IN ($placeholders)
-     GROUP BY ed.category_id, c.name, c.color, c.icon",
+     GROUP BY ed.category_id, c.name, c.color, c.icon, DAY(ed.transaction_date)",
     array_merge([$userId], $categoryIds)
   );
 
   $categoryTotals = [];
+  $dayTotals = []; // day of month => net amount
   foreach ($rows as $row) {
-    $categoryTotals[(int)$row['category_id']] = [
-      'category_name' => $row['category_name'],
-      'category_color' => $row['category_color'],
-      'category_icon' => $row['category_icon'],
-      'amount' => round((float)$row['total'], 2),
-    ];
+    $categoryId = (int)$row['category_id'];
+    if (!isset($categoryTotals[$categoryId])) {
+      $categoryTotals[$categoryId] = [
+        'category_name' => $row['category_name'],
+        'category_color' => $row['category_color'],
+        'category_icon' => $row['category_icon'],
+        'amount' => 0.0,
+      ];
+    }
+    $categoryTotals[$categoryId]['amount'] += (float)$row['total'];
+    $dayTotals[(int)$row['d']] = ($dayTotals[(int)$row['d']] ?? 0.0) + (float)$row['total'];
   }
+  foreach ($categoryTotals as &$total) {
+    $total['amount'] = round($total['amount'], 2);
+  }
+  unset($total);
 
   // Net out allocated refunds/reimbursements (e.g. a spouse paying back part of
   // an expense) -- without this, an allocation is purely a display label
@@ -263,7 +277,7 @@ function computeSpendCapProgress($db, $userId, $goal)
   // accepted in the Expense Summary screen (expenseAnalyticsController.php).
   $refundRows = $db->fetchAll(
     "SELECT e.category_id, c.name AS category_name, c.color AS category_color, c.icon AS category_icon,
-            SUM(a.amount) as allocated
+            DAY(e.transaction_date) AS d, SUM(a.amount) as allocated
      FROM transaction_refund_allocations a
      JOIN transactions e ON e.id = a.expense_transaction_id
      JOIN categories c ON c.id = e.category_id
@@ -275,10 +289,11 @@ function computeSpendCapProgress($db, $userId, $goal)
        AND YEAR(e.transaction_date) = YEAR(CURDATE())
        AND MONTH(e.transaction_date) = MONTH(CURDATE())
        AND e.category_id IN ($placeholders)
-     GROUP BY e.category_id, c.name, c.color, c.icon",
+     GROUP BY e.category_id, c.name, c.color, c.icon, DAY(e.transaction_date)",
     array_merge([$userId], $categoryIds)
   );
 
+  $allocatedByCategory = [];
   foreach ($refundRows as $row) {
     $categoryId = (int)$row['category_id'];
     if (!isset($categoryTotals[$categoryId])) {
@@ -289,7 +304,11 @@ function computeSpendCapProgress($db, $userId, $goal)
         'amount' => 0.0,
       ];
     }
-    $categoryTotals[$categoryId]['amount'] = round($categoryTotals[$categoryId]['amount'] - (float)$row['allocated'], 2);
+    $allocatedByCategory[$categoryId] = ($allocatedByCategory[$categoryId] ?? 0.0) + (float)$row['allocated'];
+    $dayTotals[(int)$row['d']] = ($dayTotals[(int)$row['d']] ?? 0.0) - (float)$row['allocated'];
+  }
+  foreach ($allocatedByCategory as $categoryId => $allocated) {
+    $categoryTotals[$categoryId]['amount'] = round($categoryTotals[$categoryId]['amount'] - $allocated, 2);
   }
 
   $categoryBreakdown = [];
@@ -320,7 +339,7 @@ function computeSpendCapProgress($db, $userId, $goal)
   $cap = (float)$goal['target_amount'];
   $runRate = $daysElapsed > 0 ? $current / $daysElapsed * $daysInMonth : $current;
 
-  return [
+  $result = [
     'progress_percent' => $cap > 0 ? $current / $cap : 0, // intentionally NOT clamped -- >1 means over cap
     'current_amount' => $current,
     'target_amount' => $cap,
@@ -334,6 +353,19 @@ function computeSpendCapProgress($db, $userId, $goal)
     'is_projected_to_exceed' => $runRate > $cap,
     'is_achieved' => false, // ongoing/recurring; never "achieved", just in/out of cap each month
   ];
+
+  if ($includeDaily) {
+    // Index 0 = day 1, up to today. Anything dated later this month still
+    // counts toward current_amount, so it lands on today rather than vanishing.
+    $daily = array_fill(0, max(1, $daysElapsed), 0.0);
+    foreach ($dayTotals as $day => $amount) {
+      $index = min(max($day, 1), count($daily)) - 1;
+      $daily[$index] += $amount;
+    }
+    $result['daily_spend'] = array_map(static fn($v) => round($v, 2), $daily);
+  }
+
+  return $result;
 }
 
 // ============================================

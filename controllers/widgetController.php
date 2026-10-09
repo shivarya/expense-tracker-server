@@ -1,4 +1,5 @@
 <?php
+require_once __DIR__ . '/goalController.php';
 
 function handleWidgetRoutes($uri, $method)
 {
@@ -198,12 +199,63 @@ function getWidgetSummary($userId)
       'top_category' => $topCategories[0] ?? null,
       'top_categories' => $topCategories,
       'monthly_spend_series' => $monthlySpendSeries,
+      'spend_cap' => widgetSpendCap($userId),
       'updated_at' => (new DateTime('now', new DateTimeZone('UTC')))->format(DateTime::ATOM),
       'currency' => 'INR',
     ], 'Widget summary retrieved successfully');
   } catch (Exception $e) {
     error_log('Widget summary error: ' . $e->getMessage());
     Response::error('Failed to fetch widget summary: ' . $e->getMessage(), 500);
+  }
+}
+
+// The monthly spend cap the widget draws as a ring + pace chart: the newest
+// active spend_cap goal, the same one GET /goals lists first and the app's
+// over-cap alert fires for. null when there is none -- the widget then keeps
+// its cashflow layout. Never throws: a goal problem must not break the summary.
+function widgetSpendCap($userId)
+{
+  try {
+    $db = getDB();
+    $goal = $db->fetchOne(
+      "SELECT * FROM goals WHERE user_id = ? AND goal_type = 'spend_cap' AND status = 'active' ORDER BY created_at DESC LIMIT 1",
+      [$userId]
+    );
+    if (!$goal || (float)$goal['target_amount'] <= 0) {
+      return null;
+    }
+    $goal['linked_category_ids'] = $goal['linked_category_ids'] ? json_decode($goal['linked_category_ids'], true) : null;
+    $goal['excluded_category_ids'] = $goal['excluded_category_ids'] ? json_decode($goal['excluded_category_ids'], true) : null;
+
+    $progress = computeSpendCapProgress($db, (int)$userId, $goal, true);
+    $topCategories = [];
+    foreach ($progress['category_breakdown'] as $category) {
+      if ($category['amount'] <= 0) continue;
+      $topCategories[] = [
+        'category_id' => (int)$category['category_id'],
+        'name' => $category['category_name'],
+        'amount' => $category['amount'],
+      ];
+      if (count($topCategories) === 3) break;
+    }
+
+    return [
+      'goal_id' => (int)$goal['id'],
+      'name' => $goal['name'],
+      'cap' => round($progress['target_amount'], 2),
+      'spent' => round($progress['current_amount'], 2),
+      'days_in_month' => $progress['days_in_month'],
+      'days_elapsed' => $progress['days_elapsed'],
+      'days_remaining' => $progress['days_remaining'],
+      'run_rate_projection' => $progress['run_rate_projection'],
+      'is_over_cap' => $progress['is_over_cap'],
+      'is_projected_to_exceed' => $progress['is_projected_to_exceed'],
+      'top_categories' => $topCategories,
+      'daily_spend' => $progress['daily_spend'],
+    ];
+  } catch (Throwable $e) {
+    error_log('Widget spend cap error: ' . $e->getMessage());
+    return null;
   }
 }
 
