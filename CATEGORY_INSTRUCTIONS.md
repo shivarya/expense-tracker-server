@@ -1,7 +1,7 @@
 # Transaction Category Assignment Instructions
 
-> **Version**: 3.5  
-> **Last Updated**: 2026-08-30  
+> **Version**: 3.6  
+> **Last Updated**: 2026-10-18  
 > **For**: GPT-4 / Azure OpenAI SMS parser, Claude, and other AI models in expense-tracker pipeline  
 > **Status**: AI returns canonical `category_id` and server now applies user feedback learning from manual recategorization
 
@@ -23,7 +23,7 @@ This is the **single source of truth** for assigning `category_id` to transactio
 |---|---|---|---|---|
 | 1 | Food & Dining | `restaurant-outline` | `#FF4757` | Restaurants, cafes, food delivery, dining out |
 | 2 | Transportation | `car-outline` | `#FFA502` | Cabs, bus, metro, fuel, commute |
-| 3 | Shopping | `bag-handle-outline` | `#2B7BE5` | E-commerce, retail, fashion, electronics |
+| 3 | Shopping | `bag-handle-outline` | `#2B7BE5` | E-commerce, retail, electronics (clothes/footwear → 58) |
 | 4 | Entertainment | `tv-outline` | `#9C27B0` | Streaming, movies, games, subscriptions, Tata Play |
 | 5 | Bills & Utilities | `flash-outline` | `#FF6B6B` | Electricity, water, internet, telecom, bill pay, recharge |
 | 6 | Healthcare | `medical-outline` | `#00C48C` | Pharmacy, hospital, diagnostics, clinics |
@@ -41,6 +41,7 @@ This is the **single source of truth** for assigning `category_id` to transactio
 | 55 | Donation | `heart-outline` | `#E74C3C` | Charity, NGO contributions, religious/place donations, relief fund support |
 | 56 | Home Improvement | `hammer-outline` | `#8D6E63` | House repairs, renovation, carpentry, plumbing/electrical work, home decor/furnishing |
 | 57 | Gift | `gift-outline` | `#EC407A` | Gift items, gift cards/vouchers, presents for birthdays/weddings/festivals |
+| 58 | Clothing | `shirt-outline` | `#7E57C2` | Clothes, footwear, ethnic wear, fashion stores/apps, school uniforms, tailoring/alterations, laundry/dry cleaning |
 
 ### Income
 
@@ -94,6 +95,7 @@ These old names are now merged and should **not** be reused as separate categori
 - `Kids class`, `Activity class`, `Sports class`, `hobby class` → **Kids Activities (53)**
 - `Donation`, `Charity`, `Charitable`, `NGO donation`, `Relief fund` → **Donation (55)**
 - `Home Services`, `House Repair`, `Home Repair`, `Renovation`, `Home Decor`, `Home Furnishing`, `Interior Work`, `Carpenter`, `Plumber`, `Electrician`, `Paint Work` → **Home Improvement (56)**
+- `Clothes`, `Apparel`, `Garments`, `Fashion`, `Footwear`, `Shoes`, `Ethnic Wear`, `Saree`, `Uniform`, `Tailoring`, `Alteration`, `Laundry`, `Dry Cleaning` → **Clothing (58)**
 
 ---
 
@@ -113,8 +115,9 @@ Use for: delivery apps, restaurants, cafes, dessert outlets.
 
 ### Shopping (ID 3)
 
-- Known: `AMAZON`, `FLIPKART`, `MYNTRA`, `AJIO`, `RELIANCE RETAIL`
-- Keywords: `STORE`, `RETAIL`, `FASHION`, `BOUTIQUE`
+- Known: `AMAZON`, `FLIPKART`, `RELIANCE RETAIL`
+- Keywords: `STORE`, `RETAIL`
+- Clothes and footwear go to **Clothing (58)**, even when bought on Amazon/Flipkart, if the description makes that clear.
 - Include religious shopping purchases like `pooja material` under Shopping unless intent clearly indicates donation.
 
 ### Travel (ID 8)
@@ -175,6 +178,12 @@ Use for: delivery apps, restaurants, cafes, dessert outlets.
 - Known contexts: home repair services, civil/renovation contracts, interior work, painting, carpentry, electrical/plumbing jobs, home decor and furnishing purchases
 - Keywords: `HOME REPAIR`, `HOUSE REPAIR`, `RENOVATION`, `HOME MAINTENANCE`, `CARPENTER`, `PLUMBER`, `ELECTRICIAN`, `PAINTING`, `INTERIOR`, `HOME DECOR`, `HOME FURNISHING`
 - Use when spend is clearly tied to improving/repairing/home setup; do not use for regular rent/EMI (11)
+
+### Clothing (ID 58)
+
+- Known: `MYNTRA`, `AJIO`, `ZUDIO`, `WESTSIDE`, `PANTALOONS`, `MAX FASHION`, `LIFESTYLE`, `SHOPPERS STOP`, `RELIANCE TRENDS`, `H&M`, `ZARA`, `UNIQLO`, `FABINDIA`, `MANYAVAR`, `BIBA`, `W`, `RAYMOND`, `PETER ENGLAND`, `ALLEN SOLLY`, `VAN HEUSEN`, `LOUIS PHILIPPE`, `BATA`, `METRO SHOES`, `SNITCH`, `BEWAKOOF`
+- Keywords: `CLOTHING`, `APPAREL`, `GARMENTS`, `FASHION`, `BOUTIQUE`, `FOOTWEAR`, `SHOES`, `SAREE`, `ETHNIC`, `KIDSWEAR`, `UNIFORM`, `TAILOR`, `ALTERATION`, `LAUNDRY`, `DRY CLEAN`
+- Includes clothes care (tailoring, alterations, laundry, dry cleaning) as well as purchases; clothes bought as a present are **Gift (57)**
 
 ### Miscellaneous (ID 51)
 

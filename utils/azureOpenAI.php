@@ -20,7 +20,7 @@ class AzureOpenAI {
 CANONICAL CATEGORY LIST — you MUST return one of these integer category_id values only:
 1  = Food & Dining       (restaurants, cafes, Swiggy, Zomato, food delivery)
 2  = Transportation      (Ola, Uber, Rapido, metro, bus, petrol, diesel)
-3  = Shopping            (Amazon, Flipkart, Myntra, retail, fashion, electronics)
+3  = Shopping            (Amazon, Flipkart, retail, electronics, home goods — clothes/footwear go to 58)
 4  = Entertainment       (streaming, Tata Play, Netflix, Hotstar, movies, games, subscriptions)
 5  = Bills & Utilities   (electricity, water, internet, Airtel, Jio, ACT, recharge, BBPS)
 6  = Healthcare          (pharmacy, Apollo, Netmeds, 1mg, hospital, clinic, lab tests)
@@ -43,6 +43,7 @@ CANONICAL CATEGORY LIST — you MUST return one of these integer category_id val
 55 = Donation            (charity donations, NGO contributions, relief funds, donation drives)
 56 = Home Improvement    (home repairs, renovation, plumbing, electrician work, home decor, furnishings)
 57 = Gift                (gift items, gift cards/vouchers, presents for birthdays/weddings/festivals)
+58 = Clothing            (clothes, footwear, ethnic wear, Myntra, AJIO, Zudio, Westside, Pantaloons, Max, H&M, Zara, Bata, school uniforms, tailoring/alterations, laundry/dry cleaning)
 CATEGORIES;
 
     public function __construct() {

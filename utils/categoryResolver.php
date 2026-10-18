@@ -38,6 +38,7 @@ class CategoryResolver
         55 => ['name' => 'Donation',          'icon' => 'heart-outline',                           'color' => '#E74C3C', 'type' => 'expense'],
         56 => ['name' => 'Home Improvement',  'icon' => 'hammer-outline',                          'color' => '#8D6E63', 'type' => 'expense'],
         57 => ['name' => 'Gift',              'icon' => 'gift-outline',                            'color' => '#EC407A', 'type' => 'expense'],
+        58 => ['name' => 'Clothing',          'icon' => 'shirt-outline',                           'color' => '#7E57C2', 'type' => 'expense'],
     ];
 
     /**
@@ -191,6 +192,24 @@ class CategoryResolver
         'present'                    => 57, 'gift card'            => 57,
         'gift voucher'               => 57, 'birthday gift'        => 57,
         'wedding gift'               => 57, 'festival gift'        => 57,
+
+        // ── Clothing (58) ────────────────────────────────────────────
+        // No bare 'dress'/'wear'/'shoe': resolveByName() also matches substrings,
+        // and those would catch 'address', 'hardware', etc.
+        'clothing'                   => 58, 'clothes'              => 58,
+        'apparel'                    => 58, 'garments'             => 58,
+        'garment'                    => 58, 'fashion'              => 58,
+        'footwear'                   => 58, 'shoes'                => 58,
+        'ethnic wear'                => 58, 'kids wear'            => 58,
+        'kidswear'                   => 58, 'menswear'             => 58,
+        'womenswear'                 => 58, 'innerwear'            => 58,
+        'dresses'                    => 58, 'saree'                => 58,
+        'sarees'                     => 58, 'textiles'             => 58,
+        'school uniform'             => 58, 'uniform'              => 58,
+        'tailor'                     => 58, 'tailoring'            => 58,
+        'alteration'                 => 58, 'stitching'            => 58,
+        'dry cleaning'               => 58, 'laundry'              => 58,
+        'myntra'                     => 58, 'ajio'                 => 58,
 
         // ── Investments (13) ────────────────────────────────────────────
         'investments'                => 13, 'investment'           => 13,
