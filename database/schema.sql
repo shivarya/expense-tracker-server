@@ -752,25 +752,36 @@ GROUP BY u.id;
 -- ============================================
 -- INSERT DEFAULT CATEGORIES
 -- ============================================
-INSERT INTO categories (user_id, name, icon, color, type, is_system, display_order) VALUES
-(NULL, 'Food & Dining', 'restaurant-outline', '#FF5722', 'expense', TRUE, 1),
-(NULL, 'Transportation', 'car-outline', '#2196F3', 'expense', TRUE, 2),
-(NULL, 'Shopping', 'cart-outline', '#E91E63', 'expense', TRUE, 3),
-(NULL, 'Entertainment', 'film-outline', '#9C27B0', 'expense', TRUE, 4),
-(NULL, 'Bills & Utilities', 'receipt-outline', '#FF9800', 'expense', TRUE, 5),
-(NULL, 'Healthcare', 'medkit-outline', '#4CAF50', 'expense', TRUE, 6),
-(NULL, 'Education', 'school-outline', '#00BCD4', 'expense', TRUE, 7),
-(NULL, 'Travel', 'airplane-outline', '#3F51B5', 'expense', TRUE, 8),
-(NULL, 'Groceries', 'basket-outline', '#8BC34A', 'expense', TRUE, 9),
-(NULL, 'Insurance', 'shield-checkmark-outline', '#795548', 'expense', TRUE, 10),
-(NULL, 'Rent/EMI', 'home-outline', '#607D8B', 'expense', TRUE, 11),
-(NULL, 'Personal Care', 'sparkles-outline', '#F06292', 'expense', TRUE, 12),
-(NULL, 'Investments', 'trending-up-outline', '#4CAF50', 'investment', TRUE, 13),
-(NULL, 'Salary', 'cash-outline', '#4CAF50', 'income', TRUE, 14),
-(NULL, 'Refund', 'arrow-undo-outline', '#00BCD4', 'income', TRUE, 15),
-(NULL, 'Other Income', 'wallet-outline', '#8BC34A', 'income', TRUE, 16),
-(NULL, 'Transfer', 'swap-horizontal-outline', '#9E9E9E', 'transfer', TRUE, 17),
-(NULL, 'Uncategorized', 'help-circle-outline', '#9E9E9E', 'expense', TRUE, 18);
+-- Must match CategoryResolver::CANONICAL (utils/categoryResolver.php): explicit ids,
+-- because the resolver and the AI prompts assign these ids directly (51 = debit fallback).
+-- All are shared system rows; per-user budgets go to category_budgets.
+INSERT INTO categories (id, user_id, name, icon, color, type, is_system, display_order) VALUES
+(1, NULL, 'Food & Dining', 'restaurant-outline', '#FF4757', 'expense', TRUE, 1),
+(2, NULL, 'Transportation', 'car-outline', '#FFA502', 'expense', TRUE, 2),
+(3, NULL, 'Shopping', 'bag-handle-outline', '#2B7BE5', 'expense', TRUE, 3),
+(4, NULL, 'Entertainment', 'tv-outline', '#9C27B0', 'expense', TRUE, 4),
+(5, NULL, 'Bills & Utilities', 'flash-outline', '#FF6B6B', 'expense', TRUE, 5),
+(6, NULL, 'Healthcare', 'medical-outline', '#00C48C', 'expense', TRUE, 6),
+(7, NULL, 'Education', 'school-outline', '#3F51B5', 'expense', TRUE, 7),
+(8, NULL, 'Travel', 'airplane-outline', '#FF9800', 'expense', TRUE, 8),
+(9, NULL, 'Groceries', 'cart-outline', '#4CAF50', 'expense', TRUE, 9),
+(10, NULL, 'Insurance', 'shield-checkmark-outline', '#607D8B', 'expense', TRUE, 10),
+(11, NULL, 'Rent/EMI', 'home-outline', '#795548', 'expense', TRUE, 11),
+(12, NULL, 'Personal Care', 'person-outline', '#E91E63', 'expense', TRUE, 12),
+(13, NULL, 'Investments', 'trending-up-outline', '#00BCD4', 'investment', TRUE, 13),
+(14, NULL, 'Salary', 'cash-outline', '#4CAF50', 'income', TRUE, 14),
+(15, NULL, 'Refund', 'return-down-back-outline', '#8BC34A', 'income', TRUE, 15),
+(16, NULL, 'Other Income', 'wallet-outline', '#CDDC39', 'income', TRUE, 16),
+(17, NULL, 'Transfer', 'swap-horizontal-outline', '#9E9E9E', 'transfer', TRUE, 17),
+(18, NULL, 'Uncategorized', 'help-circle-outline', '#BDBDBD', 'expense', TRUE, 18),
+(51, NULL, 'Miscellaneous', 'ellipsis-horizontal-circle-outline', '#FF5722', 'expense', TRUE, 0),
+(52, NULL, 'Household Help', 'people-outline', '#8D6E63', 'expense', TRUE, 52),
+(53, NULL, 'Kids Activities', 'trophy-outline', '#FF7043', 'expense', TRUE, 53),
+(54, NULL, 'Software & Tools', 'laptop-outline', '#5C6BC0', 'expense', TRUE, 54),
+(55, NULL, 'Donation', 'heart-outline', '#E74C3C', 'expense', TRUE, 55),
+(56, NULL, 'Home Improvement', 'hammer-outline', '#8D6E63', 'expense', TRUE, 56),
+(57, NULL, 'Gift', 'gift-outline', '#EC407A', 'expense', TRUE, 57),
+(58, NULL, 'Clothing', 'shirt-outline', '#7E57C2', 'expense', TRUE, 58);
 
 -- ============================================
 -- STORED PROCEDURES
