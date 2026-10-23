@@ -16,19 +16,22 @@ require_once __DIR__ . '/paymentApps.php';
  * the payee differently, so it flags the pair but still inserts both.
  *
  * Each row records who reported it in source_data.evidence[] — one entry per
- * report with a "family" ('bank' for SMS/email, 'app:<package>' for a notification)
- * and the report's hash. That gives:
+ * report with a "family" ('bank' for SMS/email, 'app:<package>' for a notification,
+ * 'intent:<package>' for a Scan & Pay payment the app started itself) and the
+ * report's hash. That gives:
  *  - replay detection: the same SMS/notification sent again (the daily inbox sync
  *    re-sends every real-time SMS) is recognised by its hash, even on a deleted row;
  *  - merging: a report from a family the row hasn't heard from yet joins it when the
  *    UPI reference matches, or else same type, same amount, within WINDOW_SECONDS
  *    (the closest such row wins, so two same-amount payments pair up in order).
- * Bank-vs-bank pairs are left to TransactionDuplicateDetector as before.
+ * Bank-vs-bank pairs are left to TransactionDuplicateDetector as before, and two
+ * Scan & Pay records never merge: each is a payment the app started.
  *
  * Incoming shape (built by the caller):
  *   family, source, package, transaction_type, amount, at ('Y-m-d H:i:s', the
  *   device-side event time), upi_ref, hash, instrument, account_type,
- *   merchant, reference_number, payment_method, evidence (the entry to append)
+ *   merchant, reference_number, payment_method, notes, category_strong (the
+ *   category comes from the payee's MCC), evidence (the entry to append)
  */
 class CrossSourceMerger
 {
@@ -38,15 +41,26 @@ class CrossSourceMerger
 
     public static function familyOf(string $source, ?string $package = null): string
     {
+        $package = ($package !== null && $package !== '') ? $package : '?';
         if ($source === 'app_notification') {
-            return 'app:' . (($package !== null && $package !== '') ? $package : '?');
+            return 'app:' . $package;
+        }
+        if ($source === 'upi_intent') {
+            // Not 'app:' — PhonePe's own notification must still merge into a PhonePe Scan & Pay row.
+            return 'intent:' . $package;
         }
         return self::BANK_FAMILY;
     }
 
+    /** The "not a bank" side: a payment app's notification or a Scan & Pay record. */
     public static function isAppFamily(string $family): bool
     {
-        return str_starts_with($family, 'app:');
+        return str_starts_with($family, 'app:') || self::isIntentFamily($family);
+    }
+
+    public static function isIntentFamily(string $family): bool
+    {
+        return str_starts_with($family, 'intent:');
     }
 
     /**
@@ -64,12 +78,12 @@ class CrossSourceMerger
 
         $hash = (string)($in['hash'] ?? '');
         $sql = "SELECT t.id, t.source, t.transaction_type, t.amount, t.transaction_date, t.upi_ref,
-                       t.reference_number, t.merchant, t.category_id, t.account_id, t.payment_method,
+                       t.reference_number, t.merchant, t.category_id, t.account_id, t.payment_method, t.notes,
                        t.source_data, t.deleted_at, ba.account_type, ba.bank, ba.account_number
                 FROM transactions t
                 JOIN bank_accounts ba ON ba.id = t.account_id
                 WHERE t.user_id = ?
-                  AND t.source IN ('sms', 'sms_webhook', 'email', 'app_notification')
+                  AND t.source IN ('sms', 'sms_webhook', 'email', 'app_notification', 'upi_intent')
                   AND t.transaction_date BETWEEN ? AND ?
                   AND (
                         (t.deleted_at IS NULL AND ABS(t.amount - ?) <= 0.01)
@@ -124,6 +138,9 @@ class CrossSourceMerger
             if (in_array($in['family'], $families, true)) {
                 continue; // this source already reported this row: a different payment
             }
+            if (self::isIntentFamily($in['family']) && array_filter($families, [self::class, 'isIntentFamily'])) {
+                continue; // two Scan & Pay records are two payments, whichever apps paid them
+            }
             $rowHasApp = (bool)array_filter($families, [self::class, 'isAppFamily']);
             if (!self::isAppFamily($in['family']) && !$rowHasApp) {
                 continue; // bank vs bank — TransactionDuplicateDetector's job
@@ -154,15 +171,16 @@ class CrossSourceMerger
 
     /**
      * Fold the incoming report into the kept row: link the real bank account if the
-     * row is still on a synthetic UPI/wallet account, fill missing references, take
-     * the clearer payee name and the earliest precise time, and record the evidence.
+     * row's account is still provisional, fill missing references and notes, take the
+     * clearer payee name and category and the earliest precise time, and record the
+     * evidence.
      */
     public static function merge(PDO $pdo, int $userId, array $row, array $in, ?int $incomingAccountId = null, ?int $incomingCategoryId = null): void
     {
         $sets = [];
         $params = [];
 
-        if ($incomingAccountId !== null && $incomingAccountId !== (int)$row['account_id'] && self::isSyntheticAccount($row)) {
+        if ($incomingAccountId !== null && $incomingAccountId !== (int)$row['account_id'] && self::accountIsProvisional($row)) {
             $sets[] = 'account_id = ?';
             $params[] = $incomingAccountId;
         }
@@ -173,9 +191,15 @@ class CrossSourceMerger
             $params[] = mb_substr($inMerchant, 0, 500);
         }
 
-        if ((int)$row['category_id'] === 18 && $incomingCategoryId !== null && $incomingCategoryId !== 18) {
+        if (self::categoryReplaceable($row, $in) && $incomingCategoryId !== null && !in_array($incomingCategoryId, [18, (int)$row['category_id']], true)) {
             $sets[] = 'category_id = ?';
             $params[] = $incomingCategoryId;
+        }
+
+        $inNotes = trim((string)($in['notes'] ?? ''));
+        if ($inNotes !== '' && trim((string)($row['notes'] ?? '')) === '') {
+            $sets[] = 'notes = ?';
+            $params[] = $inNotes;
         }
 
         foreach (['reference_number', 'upi_ref', 'payment_method'] as $field) {
@@ -223,6 +247,40 @@ class CrossSourceMerger
     {
         $number = (string)($row['account_number'] ?? '');
         return ($row['bank'] ?? '') === 'other' && ($number === 'UPI' || str_starts_with($number, 'WALLET-'));
+    }
+
+    /**
+     * The row's account is a placeholder a later report may replace: a synthetic
+     * account, or the account a Scan & Pay record took from the user's per-app
+     * default while no bank report has confirmed it yet (the user may have switched
+     * to another account inside the UPI app).
+     */
+    public static function accountIsProvisional(array $row): bool
+    {
+        if (self::isSyntheticAccount($row)) {
+            return true;
+        }
+        $fromDefault = false;
+        foreach (self::evidenceList($row) as $entry) {
+            $family = (string)($entry['family'] ?? '');
+            if ($family === self::BANK_FAMILY) {
+                return false;
+            }
+            if (self::isIntentFamily($family) && ($entry['account'] ?? '') === 'default') {
+                $fromDefault = true;
+            }
+        }
+        return $fromDefault;
+    }
+
+    /**
+     * Uncategorized (18) is always replaced; Miscellaneous (51, the fallback for a
+     * person-to-person UPI payment) only by a category from the payee's MCC.
+     */
+    public static function categoryReplaceable(array $row, array $in): bool
+    {
+        $category = (int)($row['category_id'] ?? 0);
+        return $category === 18 || ($category === 51 && !empty($in['category_strong']));
     }
 
     /** Empty, a bare VPA, or only generic tokens ("UPI", "UPI transfer", "IMPS"...). */

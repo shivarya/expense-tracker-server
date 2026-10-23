@@ -283,7 +283,7 @@ CREATE TABLE IF NOT EXISTS transactions (
     transaction_date DATETIME NOT NULL,
     reference_number VARCHAR(100),
     upi_ref VARCHAR(20) NULL COMMENT 'Normalized 12-digit UPI RRN/UTR, any source',
-    source ENUM('sms', 'email', 'web_scrape', 'manual', 'sms_webhook', 'statement_pdf', 'app_notification') NOT NULL,
+    source ENUM('sms', 'email', 'web_scrape', 'manual', 'sms_webhook', 'statement_pdf', 'app_notification', 'upi_intent') NOT NULL,
     payment_method VARCHAR(100) COMMENT 'Payment method used (e.g., ICICI Card *7003, RBL Card *5607)',
     source_data JSON COMMENT 'Original SMS/email content',
     duplicate_score INT DEFAULT 0 COMMENT 'AI-detected duplicate probability (0-100): 0-20=Not duplicate, 21-50=Unlikely, 51-75=Possible, 76-100=Highly likely',

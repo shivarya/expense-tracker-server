@@ -222,6 +222,13 @@ try {
     exit;
   }
 
+  // Scan & Pay: a UPI payment the app started with a upi://pay intent
+  if ($requestUri === '/parse/upi-intent' && $requestMethod === 'POST') {
+    require_once __DIR__ . '/controllers/smsParserController.php';
+    (new SMSParserController())->recordUpiIntent();
+    exit;
+  }
+
   // Duplicate detection endpoints
   if (strpos($requestUri, '/duplicates') === 0) {
     require_once __DIR__ . '/controllers/duplicateController.php';

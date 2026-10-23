@@ -313,7 +313,7 @@ class TransactionDuplicateDetector
                 continue;
             }
             $sameAccount = ($accountId !== null && (int)$row['account_id'] === $accountId);
-            $candIsSms = in_array(strtolower((string)($row['source'] ?? '')), ['sms', 'sms_webhook', 'app_notification'], true);
+            $candIsSms = in_array(strtolower((string)($row['source'] ?? '')), ['sms', 'sms_webhook', 'app_notification', 'upi_intent'], true);
             // Same card is normally left to deterministic/AI scoring, EXCEPT a statement
             // line re-importing a transaction already captured from SMS on the same card.
             if ($sameAccount && !($incomingIsStatement && $candIsSms)) {
@@ -535,7 +535,7 @@ class TransactionDuplicateDetector
             $score = 0;
             $reasons = [];
             $candidateSource = strtolower(trim((string)($candidate['source'] ?? '')));
-            $isSmsCandidate = in_array($candidateSource, ['sms', 'sms_webhook', 'app_notification'], true);
+            $isSmsCandidate = in_array($candidateSource, ['sms', 'sms_webhook', 'app_notification', 'upi_intent'], true);
 
             $amountDiff = abs((float)$candidate['amount'] - (float)$normalized['amount']);
             if ($amountDiff <= 0.01) {

@@ -10,6 +10,8 @@ require_once __DIR__ . '/../utils/merchantSubscriptionDetector.php';
 require_once __DIR__ . '/../utils/crossSourceMerger.php';
 require_once __DIR__ . '/../utils/paymentApps.php';
 require_once __DIR__ . '/../utils/upiRef.php';
+require_once __DIR__ . '/../utils/mccCategories.php';
+require_once __DIR__ . '/../utils/upiIntentPayload.php';
 require_once __DIR__ . '/../config/database.php';
 
 class SMSParserController {
@@ -415,6 +417,207 @@ class SMSParserController {
     }
 
     /**
+     * POST /parse/upi-intent
+     * A Scan & Pay payment: the app scanned a UPI QR, opened a UPI app with a upi://pay
+     * intent and posts what came back. Body (see utils/upiIntentPayload.php):
+     *   { client_ref, package, app_label?, vpa, payee_name?, amount, note?, mcc?, tr?,
+     *     status: success|submitted|confirmed|unconfirmed, txn_id?, approval_ref?,
+     *     response_code?, completed_at (ISO 8601), account_id?, mode?: record|merge_only }
+     * Responds { action: created|merged|replay|no_match, transaction: {...}|null }.
+     * A bank SMS or app notification already stored for the payment absorbs this report
+     * (merged); a resend of the same client_ref is a replay; merge_only (a payment still
+     * waiting for confirmation) stores nothing when no other report has arrived yet.
+     */
+    public function recordUpiIntent(): void
+    {
+        $tokenData = JWTHandler::requireAuth();
+        $userId = (int)$tokenData['userId'];
+
+        $payment = UpiIntentPayload::normalize(getJsonInput());
+        if (isset($payment['error'])) {
+            Response::error($payment['error'], 400);
+            return;
+        }
+
+        $account = null;
+        if ($payment['account_id'] !== null) {
+            $account = $this->db->fetchOne(
+                'SELECT id, bank, account_type, account_number FROM bank_accounts WHERE id = ? AND user_id = ?',
+                [$payment['account_id'], $userId]
+            );
+            if (!$account) {
+                Response::error('account_id is not one of your accounts', 400);
+                return;
+            }
+        }
+
+        $transaction = $this->upiIntentToTransaction($payment, $account ?: null);
+        $incoming = $this->buildMergeIncoming($transaction, 'upi_intent');
+
+        $transactionId = null;
+        $locked = $this->acquireCrossSourceLock($userId);
+        try {
+            $twin = $this->findCrossSourceTwin($userId, $incoming);
+            if ($twin !== null && $twin['action'] === 'replay') {
+                $action = 'replay';
+                $transactionId = (int)$twin['row']['id'];
+            } elseif ($twin !== null && $this->mergeIntoTwin($userId, $twin['row'], $incoming, $transaction)) {
+                $action = 'merged';
+                $transactionId = (int)$twin['row']['id'];
+            } elseif ($payment['mode'] === 'merge_only') {
+                $action = 'no_match';
+            } else {
+                $action = 'created';
+                $transactionId = $this->insertUpiIntent($userId, $transaction, $incoming);
+            }
+        } finally {
+            $this->releaseCrossSourceLock($userId, $locked);
+        }
+
+        error_log('[UPI_INTENT] user_id=' . $userId . ' ' . $action . ' txn=' . ($transactionId ?? '-')
+            . ' app=' . $payment['package'] . ' status=' . $payment['status'] . ' mode=' . $payment['mode']
+            . ' amount=' . $payment['amount']);
+
+        Response::success([
+            'action' => $action,
+            'transaction' => $transactionId !== null ? $this->upiIntentRowSummary($userId, $transactionId) : null,
+        ], $action === 'no_match' ? 'No matching bank report yet' : 'Payment recorded');
+    }
+
+    /** The Scan & Pay payment in the shape buildMergeIncoming / resolveCategoryId consume. */
+    private function upiIntentToTransaction(array $payment, ?array $account): array
+    {
+        $completedAt = $this->normalizeDateTimeString($payment['completed_at']) ?? date('Y-m-d H:i:s');
+        $mccCategory = MccCategories::categoryFor($payment['mcc']);
+        $payee = $this->normalizeMerchantName((string)($payment['payee_name'] ?? ''));
+        $isCard = ($account['account_type'] ?? '') === 'credit_card';
+
+        return [
+            'transaction_type' => 'debit',
+            'amount' => $payment['amount'],
+            'currency' => 'INR',
+            'date' => $this->toStoredTime($completedAt),
+            'merchant' => $payee !== '' ? $payee : $payment['vpa'],
+            'upi_id' => $payment['vpa'],
+            'description' => $payment['note'] ?? ('UPI to ' . $payment['vpa']),
+            'notes' => $payment['note'],
+            'reference_number' => $payment['txn_id'],
+            'upi_ref' => UpiIntentPayload::upiRef($payment),
+            'payment_method' => 'UPI',
+            // Seeds resolveCategoryId: learning rules and trusted contacts still win.
+            'category_id' => $mccCategory,
+            'category_strong' => $mccCategory !== null,
+            'account_mode' => 'given',
+            'account_id' => $account !== null ? (int)$account['id'] : null,
+            'account_type' => $account['account_type'] ?? null,
+            'instrument' => $isCard ? 'card' : 'upi',
+            'source_package' => $payment['package'],
+            'source_app' => $payment['app_label'],
+            'source_hash' => hash('sha256', "upi_intent\n" . $payment['client_ref']),
+            'upi_intent' => $payment,
+        ];
+    }
+
+    /** Insert a Scan & Pay row. The data is exact, so the duplicate detector is skipped. */
+    private function insertUpiIntent(int $userId, array $transaction, array $incoming): int
+    {
+        $accountId = $transaction['account_id'] ?? $this->getOrCreateSyntheticAccount($userId, 'UPI', 'UPI (unlinked)');
+        $categoryId = $this->resolveCategoryId($userId, $transaction);
+
+        $newId = (int)$this->db->insert(
+            "INSERT INTO transactions (
+                user_id, account_id, category_id, transaction_type, amount, currency,
+                merchant, description, transaction_date, reference_number, upi_ref, payment_method,
+                source, source_data, notes, duplicate_score
+            ) VALUES (?, ?, ?, 'debit', ?, 'INR', ?, ?, ?, ?, ?, 'UPI', 'upi_intent', ?, ?, 0)",
+            [
+                $userId,
+                $accountId,
+                $categoryId,
+                $transaction['amount'],
+                mb_substr((string)$transaction['merchant'], 0, 500),
+                $transaction['description'],
+                $transaction['date'],
+                $transaction['reference_number'],
+                $transaction['upi_ref'],
+                CrossSourceMerger::initialSourceData($incoming),
+                $transaction['notes'],
+            ]
+        );
+
+        MerchantSubscriptionDetector::evaluateTransaction($this->db, $userId, $newId);
+
+        return $newId;
+    }
+
+    /** What the Scan & Pay screen shows after saving: the row as it now stands. */
+    private function upiIntentRowSummary(int $userId, int $transactionId): ?array
+    {
+        $row = $this->db->fetchOne(
+            "SELECT t.id, t.category_id, c.name AS category_name, t.merchant, t.amount,
+                    ba.account_name, ba.bank, ba.account_type, ba.account_number
+             FROM transactions t
+             LEFT JOIN categories c ON c.id = t.category_id
+             LEFT JOIN bank_accounts ba ON ba.id = t.account_id
+             WHERE t.id = ? AND t.user_id = ?",
+            [$transactionId, $userId]
+        );
+        if (!$row) {
+            return null;
+        }
+
+        $accountName = trim((string)($row['account_name'] ?? ''));
+        if ($accountName === '' && !empty($row['bank'])) {
+            $last4 = substr(preg_replace('/\D+/', '', (string)$row['account_number']) ?? '', -4);
+            $accountName = strtoupper((string)$row['bank'])
+                . ($row['account_type'] === 'credit_card' ? ' Card' : '')
+                . ($last4 !== '' ? ' ••' . $last4 : '');
+        }
+
+        return [
+            'id' => (int)$row['id'],
+            'category_id' => (int)$row['category_id'],
+            'category_name' => $row['category_name'],
+            'merchant' => $row['merchant'],
+            'amount' => round((float)$row['amount'], 2),
+            'account_name' => $accountName !== '' ? $accountName : null,
+        ];
+    }
+
+    /**
+     * Serialise the find-twin -> merge/insert step per user: a bank SMS and the Scan & Pay
+     * result (or a notification) for one payment often arrive in the same second, and
+     * without this both could miss each other and insert. Proceeds unlocked if the lock
+     * can't be had within 10 s — never lose a report to it.
+     */
+    private function acquireCrossSourceLock(int $userId): bool
+    {
+        try {
+            $stmt = $this->db->getConnection()->prepare('SELECT GET_LOCK(?, 10)');
+            $stmt->execute(['xsrc:' . $userId]);
+            if ((int)$stmt->fetchColumn() === 1) {
+                return true;
+            }
+            error_log('[CROSS_SOURCE] lock wait timed out for user ' . $userId);
+        } catch (Throwable $e) {
+            error_log('[CROSS_SOURCE] lock failed: ' . $e->getMessage());
+        }
+        return false;
+    }
+
+    private function releaseCrossSourceLock(int $userId, bool $locked): void
+    {
+        if (!$locked) {
+            return;
+        }
+        try {
+            $this->db->getConnection()->prepare('SELECT RELEASE_LOCK(?)')->execute(['xsrc:' . $userId]);
+        } catch (Throwable $e) {
+            error_log('[CROSS_SOURCE] lock release failed: ' . $e->getMessage());
+        }
+    }
+
+    /**
      * Transactions parsed deterministically from bank/wallet alert emails (utils/bankAlertIngestor.php). Same
      * merge + dedupe + insert path as SMS; no AI involved, so none for duplicate scoring either.
      */
@@ -511,124 +714,130 @@ class SMSParserController {
                 $transaction['description'] = $this->resolveTransactionDescription($transaction);
                 $transaction['upi_ref'] = UpiRef::extract($transaction['reference_number'] ?? null, $transaction['source_text'] ?? null);
 
-                // Another source already reported this payment (the payment app's
-                // notification vs the bank SMS), or this exact report was stored before.
-                $incoming = $this->buildMergeIncoming($transaction, $source);
-                $twin = $this->findCrossSourceTwin($userId, $incoming);
-                if ($twin !== null && ($twin['action'] === 'replay' || $this->mergeIntoTwin($userId, $twin['row'], $incoming, $transaction))) {
-                    if ($twin['action'] === 'merge') {
-                        $mergedCount++;
-                    }
-                    $skippedCount++;
-                    $processedCount++;
-                    continue;
-                }
-
-                // A source that is the only record of its payments (a meal-card alert: no SMS, no notification)
-                // has nothing to be a duplicate of — the detector would only mistake a same-amount same-day order
-                // paid by card for it. Exact replays are already caught above.
-                $duplicateCheck = !empty($transaction['skip_duplicate_detector'])
-                    ? ['should_skip' => false, 'possible_duplicate' => false, 'confidence' => 0]
-                    : $this->evaluateDuplicateTransactionSafely($userId, $transaction, null, $useAiDedupe);
-
-                if (!empty($duplicateCheck['ai_used'])) {
-                    $aiCheckedCount++;
-                }
-                if (!empty($duplicateCheck['fallback_used'])) {
-                    $fallbackUsedCount++;
-                }
-
-                if (!empty($duplicateCheck['should_skip'])) {
-                    if ($this->updateMatchedDuplicateTimestamp(
-                        $userId,
-                        isset($duplicateCheck['matched_transaction_id']) ? (int)$duplicateCheck['matched_transaction_id'] : null,
-                        $transaction['date']
-                    )) {
-                        $updatedDuplicateTimeCount++;
-                    }
-                    $skippedCount++;
-                    $processedCount++;
-                    continue;
-                }
-
-                if (!empty($duplicateCheck['possible_duplicate'])) {
-                    $flaggedPossibleCount++;
-                }
-
-                $accountId = $this->resolveAccountId($userId, $transaction);
-                $categoryId = $this->resolveCategoryId($userId, $transaction);
-
-                // amount is INR (home currency); original_* set by the parser for foreign spend.
-                [$txnCurrency, $txnOrigAmount, $txnOrigCurrency] = $this->resolveCurrencyFields($transaction);
-
-                $insertQuery = "
-                    INSERT INTO transactions (
-                        user_id, account_id, category_id, transaction_type,
-                        amount, currency, original_amount, original_currency,
-                        merchant, description, transaction_date, reference_number, upi_ref, payment_method,
-                        source, source_data, duplicate_score
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ";
-
+                // One report at a time per user from the twin lookup to the insert (see acquireCrossSourceLock).
+                $locked = $this->acquireCrossSourceLock($userId);
                 try {
-                    $newId = $this->db->insert($insertQuery, [
-                        $userId,
-                        $accountId,
-                        $categoryId,
-                        $transaction['transaction_type'],
-                        $transaction['amount'],
-                        $txnCurrency,
-                        $txnOrigAmount,
-                        $txnOrigCurrency,
-                        $transaction['merchant'] ?? null,
-                        $transaction['description'] ?? 'SMS Transaction',
-                        $transaction['date'] ?? date('Y-m-d H:i:s'),
-                        $transaction['reference_number'] ?? null,
-                        $transaction['upi_ref'],
-                        $transaction['payment_method'] ?? null,
-                        $source,
-                        CrossSourceMerger::initialSourceData($incoming),
-                        (int)($duplicateCheck['confidence'] ?? 0),
-                    ]);
-
-                    MerchantSubscriptionDetector::evaluateTransaction($this->db, $userId, (int)$newId);
-
-                    $savedCount++;
-
-                    $txnType = strtolower((string)($transaction['transaction_type'] ?? 'debit'));
-                    $txnAmount = (float)($transaction['amount'] ?? 0);
-                    if ($txnType === 'credit') {
-                        $savedCreditCount++;
-                        $savedCreditAmount += $txnAmount;
-                    } else {
-                        $savedDebitCount++;
-                        $savedDebitAmount += $txnAmount;
+                    // Another source already reported this payment (the payment app's
+                    // notification vs the bank SMS), or this exact report was stored before.
+                    $incoming = $this->buildMergeIncoming($transaction, $source);
+                    $twin = $this->findCrossSourceTwin($userId, $incoming);
+                    if ($twin !== null && ($twin['action'] === 'replay' || $this->mergeIntoTwin($userId, $twin['row'], $incoming, $transaction))) {
+                        if ($twin['action'] === 'merge') {
+                            $mergedCount++;
+                        }
+                        $skippedCount++;
+                        $processedCount++;
+                        continue;
                     }
 
-                    if ($categoryId !== null && !array_key_exists((int)$categoryId, $categoryNameCache)) {
-                        $categoryRow = $this->db->fetchOne(
-                            'SELECT name FROM categories WHERE id = ?',
-                            [(int)$categoryId]
-                        );
-                        $categoryNameCache[(int)$categoryId] = $categoryRow['name'] ?? null;
+                    // A source that is the only record of its payments (a meal-card alert: no SMS, no notification)
+                    // has nothing to be a duplicate of — the detector would only mistake a same-amount same-day order
+                    // paid by card for it. Exact replays are already caught above.
+                    $duplicateCheck = !empty($transaction['skip_duplicate_detector'])
+                        ? ['should_skip' => false, 'possible_duplicate' => false, 'confidence' => 0]
+                        : $this->evaluateDuplicateTransactionSafely($userId, $transaction, null, $useAiDedupe);
+
+                    if (!empty($duplicateCheck['ai_used'])) {
+                        $aiCheckedCount++;
+                    }
+                    if (!empty($duplicateCheck['fallback_used'])) {
+                        $fallbackUsedCount++;
                     }
 
-                    $createdTransactions[] = [
-                        'id' => (int)$newId,
-                        'category_id' => $categoryId,
-                        'category_name' => $categoryId !== null ? ($categoryNameCache[(int)$categoryId] ?? null) : null,
-                        'merchant' => $transaction['merchant'] ?? null,
-                        'amount' => $txnAmount,
-                        'transaction_type' => $transaction['transaction_type'],
-                        'description' => $transaction['description'] ?? 'SMS Transaction',
-                        'transaction_date' => $transaction['date'] ?? date('Y-m-d H:i:s'),
-                    ];
-                } catch (Exception $e) {
-                    $failedSaveCount++;
-                    error_log("Failed to save transaction: " . $e->getMessage());
+                    if (!empty($duplicateCheck['should_skip'])) {
+                        if ($this->updateMatchedDuplicateTimestamp(
+                            $userId,
+                            isset($duplicateCheck['matched_transaction_id']) ? (int)$duplicateCheck['matched_transaction_id'] : null,
+                            $transaction['date']
+                        )) {
+                            $updatedDuplicateTimeCount++;
+                        }
+                        $skippedCount++;
+                        $processedCount++;
+                        continue;
+                    }
+
+                    if (!empty($duplicateCheck['possible_duplicate'])) {
+                        $flaggedPossibleCount++;
+                    }
+
+                    $accountId = $this->resolveAccountId($userId, $transaction);
+                    $categoryId = $this->resolveCategoryId($userId, $transaction);
+
+                    // amount is INR (home currency); original_* set by the parser for foreign spend.
+                    [$txnCurrency, $txnOrigAmount, $txnOrigCurrency] = $this->resolveCurrencyFields($transaction);
+
+                    $insertQuery = "
+                        INSERT INTO transactions (
+                            user_id, account_id, category_id, transaction_type,
+                            amount, currency, original_amount, original_currency,
+                            merchant, description, transaction_date, reference_number, upi_ref, payment_method,
+                            source, source_data, duplicate_score
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ";
+
+                    try {
+                        $newId = $this->db->insert($insertQuery, [
+                            $userId,
+                            $accountId,
+                            $categoryId,
+                            $transaction['transaction_type'],
+                            $transaction['amount'],
+                            $txnCurrency,
+                            $txnOrigAmount,
+                            $txnOrigCurrency,
+                            $transaction['merchant'] ?? null,
+                            $transaction['description'] ?? 'SMS Transaction',
+                            $transaction['date'] ?? date('Y-m-d H:i:s'),
+                            $transaction['reference_number'] ?? null,
+                            $transaction['upi_ref'],
+                            $transaction['payment_method'] ?? null,
+                            $source,
+                            CrossSourceMerger::initialSourceData($incoming),
+                            (int)($duplicateCheck['confidence'] ?? 0),
+                        ]);
+
+                        MerchantSubscriptionDetector::evaluateTransaction($this->db, $userId, (int)$newId);
+
+                        $savedCount++;
+
+                        $txnType = strtolower((string)($transaction['transaction_type'] ?? 'debit'));
+                        $txnAmount = (float)($transaction['amount'] ?? 0);
+                        if ($txnType === 'credit') {
+                            $savedCreditCount++;
+                            $savedCreditAmount += $txnAmount;
+                        } else {
+                            $savedDebitCount++;
+                            $savedDebitAmount += $txnAmount;
+                        }
+
+                        if ($categoryId !== null && !array_key_exists((int)$categoryId, $categoryNameCache)) {
+                            $categoryRow = $this->db->fetchOne(
+                                'SELECT name FROM categories WHERE id = ?',
+                                [(int)$categoryId]
+                            );
+                            $categoryNameCache[(int)$categoryId] = $categoryRow['name'] ?? null;
+                        }
+
+                        $createdTransactions[] = [
+                            'id' => (int)$newId,
+                            'category_id' => $categoryId,
+                            'category_name' => $categoryId !== null ? ($categoryNameCache[(int)$categoryId] ?? null) : null,
+                            'merchant' => $transaction['merchant'] ?? null,
+                            'amount' => $txnAmount,
+                            'transaction_type' => $transaction['transaction_type'],
+                            'description' => $transaction['description'] ?? 'SMS Transaction',
+                            'transaction_date' => $transaction['date'] ?? date('Y-m-d H:i:s'),
+                        ];
+                    } catch (Exception $e) {
+                        $failedSaveCount++;
+                        error_log("Failed to save transaction: " . $e->getMessage());
+                    }
+
+                    $processedCount++;
+                } finally {
+                    $this->releaseCrossSourceLock($userId, $locked);
                 }
-
-                $processedCount++;
             }
 
             if ($jobId !== null) {
@@ -997,7 +1206,8 @@ class SMSParserController {
     /** The incoming report in the shape CrossSourceMerger matches on. */
     private function buildMergeIncoming(array $transaction, string $source): array
     {
-        $package = $source === 'app_notification' ? (string)($transaction['source_package'] ?? '') : '';
+        $fromApp = in_array($source, ['app_notification', 'upi_intent'], true);
+        $package = $fromApp ? (string)($transaction['source_package'] ?? '') : '';
         $family = CrossSourceMerger::familyOf($source, $package);
         // Match on the device-side time (SMS receipt / notification post), not the
         // model's reading of it — in the stored (UTC) convention, like transaction_date.
@@ -1017,6 +1227,24 @@ class SMSParserController {
                 'title' => (string)($transaction['source_title'] ?? ''),
                 'text' => (string)($transaction['source_text'] ?? ''),
             ];
+        } elseif ($source === 'upi_intent') {
+            $intent = $transaction['upi_intent'];
+            $evidence += [
+                'package' => $package,
+                'app' => (string)($transaction['source_app'] ?? ''),
+                'instrument' => (string)($transaction['instrument'] ?? ''),
+                'vpa' => $intent['vpa'],
+                'payee' => $intent['payee_name'],
+                'mc' => $intent['mcc'],
+                'tr' => $intent['tr'],
+                'status' => $intent['status'],
+                'txn_id' => $intent['txn_id'],
+                'approval_ref' => $intent['approval_ref'],
+                'response_code' => $intent['response_code'],
+                'client_ref' => $intent['client_ref'],
+                // 'default': the account is the user's per-app default, which a bank report may correct.
+                'account' => $intent['account_id'] !== null ? 'default' : 'none',
+            ];
         } elseif (!empty($transaction['source_sender'])) {
             $evidence['sender'] = (string)$transaction['source_sender'];
         }
@@ -1031,12 +1259,14 @@ class SMSParserController {
             'upi_ref' => $transaction['upi_ref'] ?? null,
             'hash' => $hash,
             'instrument' => (string)($transaction['instrument'] ?? ''),
-            'account_type' => $source === 'app_notification'
+            'account_type' => $fromApp
                 ? ($transaction['account_type'] ?? null)
                 : $this->inferAccountType($transaction),
             'merchant' => (string)($transaction['merchant'] ?? ''),
             'reference_number' => (string)($transaction['reference_number'] ?? ''),
             'payment_method' => (string)($transaction['payment_method'] ?? ''),
+            'notes' => (string)($transaction['notes'] ?? ''),
+            'category_strong' => !empty($transaction['category_strong']),
             'evidence' => $evidence,
         ];
     }
@@ -1057,15 +1287,17 @@ class SMSParserController {
     {
         try {
             $accountId = null;
-            if (CrossSourceMerger::isSyntheticAccount($row)) {
+            if (CrossSourceMerger::accountIsProvisional($row)) {
                 $mode = $transaction['account_mode'] ?? 'bank';
                 if ($mode === 'bank') {
                     $accountId = $this->getOrCreateBankAccount($userId, $transaction);
                 } elseif ($mode === 'bank_guess') {
                     $accountId = $this->findSoleBankAccount($userId, $transaction);
+                } elseif ($mode === 'given') {
+                    $accountId = $transaction['account_id'] ?? null; // a Scan & Pay default, owner-checked
                 }
             }
-            $categoryId = (int)$row['category_id'] === 18 ? $this->resolveCategoryId($userId, $transaction) : null;
+            $categoryId = CrossSourceMerger::categoryReplaceable($row, $incoming) ? $this->resolveCategoryId($userId, $transaction) : null;
 
             CrossSourceMerger::merge($this->db->getConnection(), $userId, $row, $incoming, $accountId, $categoryId);
             error_log('[CROSS_SOURCE] user_id=' . $userId . ' merged ' . $incoming['family']
@@ -1421,7 +1653,9 @@ class SMSParserController {
 
         // Check trusted contacts first — self-transfers should always be Transfer (17)
         $merchant = strtolower(trim($transaction['merchant'] ?? ''));
-        if ($merchant !== '') {
+        // A Scan & Pay payment knows the payee's UPI ID exactly, even when merchant is the name.
+        $upiId = strtolower(trim((string)($transaction['upi_id'] ?? '')));
+        if ($merchant !== '' || $upiId !== '') {
             $contacts = $this->db->fetchAll(
                 "SELECT name, upi_id FROM trusted_contacts WHERE user_id = ?",
                 [$userId]
@@ -1430,10 +1664,10 @@ class SMSParserController {
                 $contactName  = strtolower(trim($contact['name'] ?? ''));
                 $contactUpiId = strtolower(trim($contact['upi_id'] ?? ''));
 
-                if ($contactName !== '' && str_contains($merchant, $contactName)) {
+                if ($contactName !== '' && $merchant !== '' && str_contains($merchant, $contactName)) {
                     return 17; // Transfer
                 }
-                if ($contactUpiId !== '' && str_contains($merchant, $contactUpiId)) {
+                if ($contactUpiId !== '' && (($merchant !== '' && str_contains($merchant, $contactUpiId)) || $upiId === $contactUpiId)) {
                     return 17; // Transfer
                 }
             }
