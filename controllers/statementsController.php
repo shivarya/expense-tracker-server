@@ -2537,14 +2537,11 @@ PY;
             $sums = $this->sumStatementRows($transactions);
 
             if ($off($sums) > 0.05) {
-                $alt = $this->applyIciciScrambledAmounts($lines, $transactions, $cardLastFour);
+                $alt = $this->applyIciciScrambledAmounts($lines, $transactions, $cardLastFour, $totals);
                 if ($alt !== null) {
-                    $altSums = $this->sumStatementRows($alt['transactions']);
-                    if ($off($altSums) <= 0.05) {
-                        $transactions = $alt['transactions'];
-                        $sums = $altSums;
-                        $notes[] = "statement's readable amounts did not add up; used its second amount layer for {$alt['changed']} line(s) so totals reconcile";
-                    }
+                    $transactions = $alt['transactions'];
+                    $sums = $this->sumStatementRows($transactions);
+                    $notes[] = "statement's readable amounts did not add up; used its second amount layer for {$alt['changed']} line(s) so totals reconcile";
                 }
             }
 
@@ -2654,35 +2651,134 @@ PY;
      * "26/08/2026 14051006786 UPI-...-Green fi eld parking IN 0 ZG.GG" (= 30.00). Rows are
      * matched by serial number; scrambled rows with no readable twin are added.
      *
+     * The layer is a letter shift cipher, and the shift is NOT the same in every statement
+     * (Aug/Sep 2026 used X..G for digits 1-9,0; Oct 2026 used H..Q), so it is not hardcoded:
+     * every shift is tried and the one whose rows add up to the statement's own totals wins.
+     * If none does, the layer is not used.
+     *
+     * @param array{debits: float, credits: float} $totals
      * @return array{transactions: array<int, array<string, mixed>>, changed: int}|null
      */
-    private function applyIciciScrambledAmounts(array $lines, array $transactions, string $cardLastFour): ?array
+    private function applyIciciScrambledAmounts(array $lines, array $transactions, string $cardLastFour, array $totals): ?array
     {
-        $scrambled = [];
-        foreach ($lines as $line) {
-            if (preg_match('/^(\d{2}\/\d{2}\/\d{4})\s+(\d{8,})\s+(.*?)\s([A-GX-Z,]+\.[A-GX-Z]{2})(\s+CR)?\s*$/', trim((string)$line), $m)) {
-                $scrambled[$m[2]] = [
-                    'date' => $m[1],
-                    'middle' => $m[3],
-                    'amount' => (float)str_replace(',', '', strtr($m[4], 'XYZABCDEFG', '1234567890')),
-                    'credit' => !empty($m[5]),
-                    'line' => trim((string)$line),
-                ];
-            }
-        }
-        if (empty($scrambled)) {
+        $rows = $this->collectIciciScrambledRows($lines);
+        if (empty($rows)) {
             return null;
         }
 
+        for ($shift = 0; $shift < 26; $shift++) {
+            $decoded = [];
+            foreach ($rows as $serial => $row) {
+                $amount = $this->decodeIciciScrambledAmount($row['token'], $shift);
+                if ($amount === null) {
+                    continue 2;
+                }
+                $decoded[$serial] = $row + ['amount' => $amount];
+            }
+
+            $merged = $this->mergeIciciScrambledRows($transactions, $decoded, $cardLastFour);
+            [$debits, $credits] = $this->sumStatementRows($merged['transactions']);
+            if (max(abs($debits - $totals['debits']), abs($credits - $totals['credits'])) <= 0.05) {
+                return $merged;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * One entry per serial for every statement row whose amount is letters, e.g. "HQ.QQ".
+     * Rows are grouped like the readable ones (a record runs to the next serial line), so a
+     * description that wrapped onto its own line does not lose the amount.
+     *
+     * @return array<string, array{date: string, middle: string, token: string, credit: bool, line: string}>
+     */
+    private function collectIciciScrambledRows(array $lines): array
+    {
+        $startPattern = '/^\d{2}\/\d{2}\/\d{4}\s+\d{8,}/';
+        $rowPattern = '/^(\d{2}\/\d{2}\/\d{4})\s+(\d{8,})\s+(.*?)\s([A-Z,]+\.[A-Z]{2})(\s+CR)?\s*$/';
+
+        $starts = [];
+        foreach ($lines as $i => $line) {
+            if (preg_match($startPattern, trim((string)$line))) {
+                $starts[] = $i;
+            }
+        }
+
+        $rows = [];
+        foreach ($starts as $k => $startIdx) {
+            $endIdx = $starts[$k + 1] ?? count($lines);
+            $parts = [];
+            for ($j = $startIdx; $j < $endIdx; $j++) {
+                $part = trim((string)$lines[$j]);
+                if ($part !== '') {
+                    $parts[] = $part;
+                }
+            }
+
+            $record = '';
+            $m = null;
+            foreach ($parts as $idx => $part) {
+                if ($idx > 3 || ($idx > 0 && $this->looksLikeIciciPageFurniture($part))) {
+                    break;
+                }
+                $record = $record === '' ? $part : $record . ' ' . $part;
+                if (preg_match($rowPattern, $record, $found)) {
+                    $m = $found;
+                    break;
+                }
+            }
+            if ($m === null) {
+                continue;
+            }
+
+            $rows[$m[2]] = [
+                'date' => $m[1],
+                'middle' => $m[3],
+                'token' => $m[4],
+                'credit' => !empty($m[5]),
+                'line' => $record,
+            ];
+        }
+
+        return $rows;
+    }
+
+    /** Letters -> amount for one shift: digit 1 is letter $shift, digit 9 is $shift+8, digit 0 is $shift+9 (A=0, wraps at Z). */
+    private function decodeIciciScrambledAmount(string $token, int $shift): ?float
+    {
+        $digits = '';
+        foreach (str_split(str_replace(',', '', $token)) as $ch) {
+            if ($ch === '.') {
+                $digits .= '.';
+                continue;
+            }
+            $d = (((ord($ch) - 65) - $shift) % 26 + 26) % 26 + 1;
+            if ($d > 10) {
+                return null;
+            }
+            $digits .= (string)($d % 10);
+        }
+
+        return is_numeric($digits) ? (float)$digits : null;
+    }
+
+    /**
+     * @param array<int, array<string, mixed>> $transactions
+     * @param array<string, array<string, mixed>> $decoded serial => scrambled row with its decoded amount
+     * @return array{transactions: array<int, array<string, mixed>>, changed: int}
+     */
+    private function mergeIciciScrambledRows(array $transactions, array $decoded, string $cardLastFour): array
+    {
         $changed = 0;
         $seen = [];
         foreach ($transactions as $idx => $t) {
             $serial = preg_replace('/^ICICI_/', '', (string)$t['reference_number']);
-            if (!isset($scrambled[$serial])) {
+            if (!isset($decoded[$serial])) {
                 continue;
             }
             $seen[$serial] = true;
-            $s = $scrambled[$serial];
+            $s = $decoded[$serial];
             $type = $s['credit'] ? 'credit' : 'debit';
             if (abs((float)$t['amount'] - $s['amount']) > 0.005 || $t['transaction_type'] !== $type) {
                 $transactions[$idx]['amount'] = round($s['amount'], 2);
@@ -2691,7 +2787,7 @@ PY;
             }
         }
 
-        foreach ($scrambled as $serial => $s) {
+        foreach ($decoded as $serial => $s) {
             if (isset($seen[$serial]) || $s['amount'] <= 0) {
                 continue;
             }
