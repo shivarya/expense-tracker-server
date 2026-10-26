@@ -12,12 +12,15 @@ require_once __DIR__ . '/../utils/paymentApps.php';
 require_once __DIR__ . '/../utils/upiRef.php';
 require_once __DIR__ . '/../utils/mccCategories.php';
 require_once __DIR__ . '/../utils/upiIntentPayload.php';
+require_once __DIR__ . '/../utils/selfTransfer.php';
 require_once __DIR__ . '/../config/database.php';
 
 class SMSParserController {
     private Database $db;
     private AzureOpenAI $ai;
     private TransactionDuplicateDetector $duplicateDetector;
+    /** The account holder's name per user id, read once per request (see ownerName()). */
+    private array $ownerNames = [];
 
     public function __construct() {
         $this->db = Database::getInstance();
@@ -1635,6 +1638,21 @@ class SMSParserController {
         return [$currency, $originalAmount, $originalCurrency];
     }
 
+    /** The user's own name (users.name), for spotting payments to themselves. */
+    private function ownerName(int $userId): string
+    {
+        if (!array_key_exists($userId, $this->ownerNames)) {
+            try {
+                $row = $this->db->fetchOne('SELECT name FROM users WHERE id = ?', [$userId]);
+                $this->ownerNames[$userId] = (string)($row['name'] ?? '');
+            } catch (Throwable $e) {
+                error_log('[SELF_TRANSFER] owner name lookup failed: ' . $e->getMessage());
+                $this->ownerNames[$userId] = '';
+            }
+        }
+        return $this->ownerNames[$userId];
+    }
+
     private function resolveCategoryId(int $userId, array $transaction): int
     {
         // Highest priority: user-provided learning from manual recategorization.
@@ -1648,6 +1666,11 @@ class SMSParserController {
         // expense would double-count that spend. Deterministic backstop independent
         // of whether the AI followed the equivalent prompt instruction.
         if ($this->looksLikeCreditCardBillPayment($transaction)) {
+            return 17; // Transfer
+        }
+
+        // Paying yourself (your own UPI ID or other account, shown under your own name).
+        if (SelfTransfer::isOwnName((string)($transaction['merchant'] ?? ''), $this->ownerName($userId))) {
             return 17; // Transfer
         }
 

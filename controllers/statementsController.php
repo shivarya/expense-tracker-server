@@ -822,6 +822,7 @@ class StatementController
                 $learnedCategoryId = CategoryLearning::resolveFromTransaction($this->db, $userId, [
                     'merchant' => $normalizedMerchant,
                     'description' => $normalizedDescription,
+                    'transaction_type' => $normalizedType,
                 ]);
                 $resolvedCategoryId = $learnedCategoryId !== null
                     ? $learnedCategoryId
@@ -1773,6 +1774,7 @@ class StatementController
                 $learnedCategoryId = CategoryLearning::resolveFromTransaction($this->db, $userId, [
                     'merchant' => $normalizedMerchant,
                     'description' => $normalizedDescription,
+                    'transaction_type' => $normalizedType,
                 ]);
                 $resolvedCategoryId = $learnedCategoryId !== null
                     ? $learnedCategoryId

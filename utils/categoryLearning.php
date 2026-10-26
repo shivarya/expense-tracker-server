@@ -108,7 +108,8 @@ class CategoryLearning
     }
 
     /**
-     * Resolve category from learned merchant patterns for this user.
+     * Resolve category from learned merchant patterns for this user. Pass the
+     * transaction's transaction_type so a rule is only used in a direction it fits.
      */
     public static function resolveFromTransaction(object $db, int $userId, array $transaction): ?int
     {
@@ -121,18 +122,22 @@ class CategoryLearning
             }
 
             $rules = $db->fetchAll(
-                "SELECT r.category_id, r.merchant_pattern, r.learned_count
+                "SELECT r.category_id, r.merchant_pattern, r.learned_count, c.type AS category_type
                  FROM " . self::TABLE_NAME . " r
                  JOIN categories c ON c.id = r.category_id
                  WHERE r.user_id = ? AND (c.user_id IS NULL OR c.user_id = ?)
                  ORDER BY r.learned_count DESC, CHAR_LENGTH(r.merchant_pattern) DESC",
                 [$userId, $userId]
             );
+            $direction = (string)($transaction['transaction_type'] ?? '');
 
             foreach ($candidates as $candidate) {
                 foreach ($rules as $rule) {
                     $pattern = (string)($rule['merchant_pattern'] ?? '');
                     if (strlen($pattern) < self::MIN_PATTERN_LENGTH) {
+                        continue;
+                    }
+                    if (!self::ruleFitsDirection((string)($rule['category_type'] ?? ''), $direction)) {
                         continue;
                     }
 
@@ -148,6 +153,17 @@ class CategoryLearning
             error_log('[CategoryLearning] resolveFromTransaction failed: ' . $e->getMessage());
             return null;
         }
+    }
+
+    /**
+     * Money going out is never income. Rules are keyed by payee text alone, so a rule
+     * learned from money received from someone ("ASHISH TRIPATHI" -> Other Income)
+     * would otherwise file a payment to them as income too. Credits keep every rule
+     * (a refund may be filed under the spend it reverses); an unknown direction does too.
+     */
+    public static function ruleFitsDirection(string $categoryType, string $transactionType): bool
+    {
+        return !(strtolower($transactionType) === 'debit' && strtolower($categoryType) === 'income');
     }
 
     private static function touchRule(object $db, int $userId, string $pattern): void
