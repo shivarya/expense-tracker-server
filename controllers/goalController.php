@@ -2,6 +2,7 @@
 require_once __DIR__ . '/../utils/loanMath.php';
 require_once __DIR__ . '/../utils/goalMath.php';
 require_once __DIR__ . '/../utils/portfolioMath.php';
+require_once __DIR__ . '/../utils/spendCapHistory.php';
 
 function handleGoalRoutes($uri, $method)
 {
@@ -18,6 +19,8 @@ function handleGoalRoutes($uri, $method)
     updateMonthlyPlanSettings($userId);
   } elseif (preg_match('#^/goals/(\d+)$#', $uri, $m) && $method === 'GET') {
     getGoal($userId, (int)$m[1]);
+  } elseif (preg_match('#^/goals/(\d+)/months$#', $uri, $m) && $method === 'GET') {
+    getSpendCapMonths($userId, (int)$m[1]);
   } elseif (preg_match('#^/goals/(\d+)$#', $uri, $m) && $method === 'PUT') {
     updateGoal($userId, (int)$m[1]);
   } elseif (preg_match('#^/goals/(\d+)$#', $uri, $m) && $method === 'DELETE') {
@@ -200,10 +203,36 @@ function computeNetWorthProgress($db, $userId, $goal)
   return $result;
 }
 
-// $includeDaily adds `daily_spend` (net spend per day of the month so far) for
-// the home-screen widget's pace chart; GET /goals leaves it off.
-function computeSpendCapProgress($db, $userId, $goal, bool $includeDaily = false)
+// $includeDaily adds `daily_spend` (net spend per day of the month) for the
+// home-screen widget's pace chart and the app's cap page; GET /goals leaves it
+// off. $monthsAgo picks an earlier calendar month (0 = this month). A past
+// month is complete: it is judged on its final total, against the cap that was
+// in force then (spend_cap_history), and its daily_spend covers every day.
+// $history is loadSpendCapHistory()'s rows, passed in when computing several
+// months of one goal.
+function computeSpendCapProgress($db, $userId, $goal, bool $includeDaily = false, int $monthsAgo = 0, ?array $history = null)
 {
+  // Use the same "now" the transaction filters below use (MySQL CURDATE()),
+  // not PHP's date() -- they can disagree by a day right around midnight IST
+  // if the DB server's timezone isn't Asia/Kolkata, which previously made
+  // days_elapsed/days_in_month describe a different month than current_amount
+  // actually summed, producing a nonsensical run-rate (e.g. a full month's
+  // spend divided by 1 "day elapsed" of the *new* month).
+  $monthsAgo = max(0, $monthsAgo);
+  $period = $db->fetchOne(
+    "SELECT DATE_FORMAT(m, '%Y-%m-01') AS start_date, LAST_DAY(m) AS end_date, LAST_DAY(m) + INTERVAL 1 DAY AS next_start,
+            DAY(LAST_DAY(m)) AS dim, DAY(CURDATE()) AS today
+     FROM (SELECT CURDATE() - INTERVAL " . $monthsAgo . " MONTH AS m) p"
+  );
+  $isCurrent = $monthsAgo === 0;
+  $month = substr($period['start_date'], 0, 7);
+
+  if (!$isCurrent) {
+    $terms = resolveSpendCapTerms($history ?? loadSpendCapHistory($db, (int)$goal['id']), $month, $goal);
+    $goal['target_amount'] = $terms['target_amount'];
+    $goal['excluded_category_ids'] = $terms['excluded_category_ids'];
+  }
+
   if ($goal['linked_category_ids']) {
     $categoryIds = $goal['linked_category_ids'];
   } else {
@@ -241,11 +270,10 @@ function computeSpendCapProgress($db, $userId, $goal, bool $includeDaily = false
      WHERE ed.user_id = ?
        AND ed.deleted_at IS NULL
        AND ed.exclude_from_cap = 0
-       AND YEAR(ed.transaction_date) = YEAR(CURDATE())
-       AND MONTH(ed.transaction_date) = MONTH(CURDATE())
+       AND ed.transaction_date >= ? AND ed.transaction_date < ?
        AND ed.category_id IN ($placeholders)
      GROUP BY ed.category_id, c.name, c.color, c.icon, DAY(ed.transaction_date)",
-    array_merge([$userId], $categoryIds)
+    array_merge([$userId, $period['start_date'], $period['next_start']], $categoryIds)
   );
 
   $categoryTotals = [];
@@ -286,11 +314,10 @@ function computeSpendCapProgress($db, $userId, $goal, bool $includeDaily = false
        AND e.deleted_at IS NULL
        AND e.transaction_type = 'debit'
        AND e.exclude_from_cap = 0
-       AND YEAR(e.transaction_date) = YEAR(CURDATE())
-       AND MONTH(e.transaction_date) = MONTH(CURDATE())
+       AND e.transaction_date >= ? AND e.transaction_date < ?
        AND e.category_id IN ($placeholders)
      GROUP BY e.category_id, c.name, c.color, c.icon, DAY(e.transaction_date)",
-    array_merge([$userId], $categoryIds)
+    array_merge([$userId, $period['start_date'], $period['next_start']], $categoryIds)
   );
 
   $allocatedByCategory = [];
@@ -325,15 +352,8 @@ function computeSpendCapProgress($db, $userId, $goal, bool $includeDaily = false
 
   $sum = ['total' => array_sum(array_column($categoryBreakdown, 'amount'))];
 
-  // Use the same "now" the transaction filter above used (MySQL CURDATE()),
-  // not PHP's date() -- they can disagree by a day right around midnight IST
-  // if the DB server's timezone isn't Asia/Kolkata, which previously made
-  // days_elapsed/days_in_month describe a different month than current_amount
-  // actually summed, producing a nonsensical run-rate (e.g. a full month's
-  // spend divided by 1 "day elapsed" of the *new* month).
-  $today = $db->fetchOne("SELECT DAY(CURDATE()) as d, DAY(LAST_DAY(CURDATE())) as dim");
-  $daysInMonth = (int)$today['dim'];
-  $daysElapsed = (int)$today['d'];
+  $daysInMonth = (int)$period['dim'];
+  $daysElapsed = $isCurrent ? (int)$period['today'] : $daysInMonth;
 
   $current = (float)$sum['total'];
   $cap = (float)$goal['target_amount'];
@@ -352,11 +372,17 @@ function computeSpendCapProgress($db, $userId, $goal, bool $includeDaily = false
     'is_over_cap' => $current > $cap,
     'is_projected_to_exceed' => $runRate > $cap,
     'is_achieved' => false, // ongoing/recurring; never "achieved", just in/out of cap each month
+    'month' => $month,
+    'month_label' => (new DateTime($period['start_date']))->format('F Y'),
+    'start_date' => $period['start_date'],
+    'end_date' => $period['end_date'],
+    'is_current' => $isCurrent,
   ];
 
   if ($includeDaily) {
-    // Index 0 = day 1, up to today. Anything dated later this month still
-    // counts toward current_amount, so it lands on today rather than vanishing.
+    // Index 0 = day 1, up to today (every day for a past month). Anything dated
+    // later this month still counts toward current_amount, so it lands on today
+    // rather than vanishing.
     $daily = array_fill(0, max(1, $daysElapsed), 0.0);
     foreach ($dayTotals as $day => $amount) {
       $index = min(max($day, 1), count($daily)) - 1;
@@ -412,6 +438,40 @@ function getGoal($userId, $goalId)
     Response::success($goal, 'Goal retrieved successfully');
   } catch (Exception $e) {
     Response::error('Failed to fetch goal: ' . $e->getMessage(), 500);
+  }
+}
+
+// GET /goals/{id}/months?count=6 -- a spend cap month by month, newest first
+// (index 0 = this month), each the full computeSpendCapProgress() result with
+// daily_spend: the app's cap page switches months and draws its six-month
+// overview from this one call.
+function getSpendCapMonths($userId, $goalId)
+{
+  try {
+    $db = getDB();
+    $goal = $db->fetchOne("SELECT * FROM goals WHERE id = ? AND user_id = ? AND goal_type = 'spend_cap'", [$goalId, $userId]);
+    if (!$goal) {
+      Response::error('Spend cap not found', 404);
+    }
+
+    $goal['linked_category_ids'] = $goal['linked_category_ids'] ? json_decode($goal['linked_category_ids'], true) : null;
+    $goal['excluded_category_ids'] = $goal['excluded_category_ids'] ? json_decode($goal['excluded_category_ids'], true) : null;
+
+    $count = max(1, min(SPEND_CAP_HISTORY_MONTHS, (int)($_GET['count'] ?? SPEND_CAP_HISTORY_MONTHS)));
+    $history = loadSpendCapHistory($db, (int)$goal['id']);
+    $months = [];
+    for ($n = 0; $n < $count; $n++) {
+      $months[] = computeSpendCapProgress($db, $userId, $goal, true, $n, $history);
+    }
+
+    Response::success([
+      'goal_id' => (int)$goal['id'],
+      'name' => $goal['name'],
+      'status' => $goal['status'],
+      'months' => $months,
+    ], 'Spend cap months retrieved successfully');
+  } catch (Exception $e) {
+    Response::error('Failed to fetch spend cap months: ' . $e->getMessage(), 500);
   }
 }
 
@@ -526,6 +586,14 @@ function createGoal($userId)
       ]
     );
 
+    recordSpendCapTerms($db, [
+      'id' => $id,
+      'user_id' => $userId,
+      'goal_type' => $goalType,
+      'target_amount' => $targetAmount,
+      'excluded_category_ids' => $excludedCategoryIds,
+    ]);
+
     Response::success(['id' => $id], 'Goal created successfully', 201);
   } catch (Exception $e) {
     Response::error('Failed to create goal: ' . $e->getMessage(), 500);
@@ -635,6 +703,10 @@ function updateGoal($userId, $goalId)
         $userId,
       ]
     );
+
+    if ($goal['goal_type'] === 'spend_cap') {
+      recordSpendCapTerms($db, $db->fetchOne("SELECT * FROM goals WHERE id = ? AND user_id = ?", [$goalId, $userId]) ?: $goal);
+    }
 
     Response::success(['id' => $goalId], 'Goal updated successfully');
   } catch (Exception $e) {

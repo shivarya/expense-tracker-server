@@ -637,6 +637,22 @@ CREATE TABLE IF NOT EXISTS goal_contributions (
     INDEX idx_goal_contributions_date (contributed_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- spend_cap only: the cap's terms from effective_month on, so a past month is
+-- judged against the cap in force then (migration 033, utils/spendCapHistory.php).
+CREATE TABLE IF NOT EXISTS spend_cap_history (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    goal_id INT NOT NULL,
+    user_id INT NOT NULL,
+    effective_month DATE NOT NULL COMMENT 'First day of the month these terms start applying',
+    target_amount DECIMAL(15, 2) NOT NULL,
+    excluded_category_ids JSON NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY unique_goal_month (goal_id, effective_month),
+    FOREIGN KEY (goal_id) REFERENCES goals(id) ON DELETE CASCADE,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 -- ============================================
 -- SCRAPE LOGS TABLE (Track scraping activities)
 -- ============================================

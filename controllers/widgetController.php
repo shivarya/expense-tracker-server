@@ -228,20 +228,11 @@ function widgetSpendCap($userId)
     $goal['excluded_category_ids'] = $goal['excluded_category_ids'] ? json_decode($goal['excluded_category_ids'], true) : null;
 
     $progress = computeSpendCapProgress($db, (int)$userId, $goal, true);
-    $topCategories = [];
-    foreach ($progress['category_breakdown'] as $category) {
-      if ($category['amount'] <= 0) continue;
-      $topCategories[] = [
-        'category_id' => (int)$category['category_id'],
-        'name' => $category['category_name'],
-        'amount' => $category['amount'],
-      ];
-      if (count($topCategories) === 3) break;
-    }
 
     return [
       'goal_id' => (int)$goal['id'],
       'name' => $goal['name'],
+      'month' => $progress['month'],
       'cap' => round($progress['target_amount'], 2),
       'spent' => round($progress['current_amount'], 2),
       'days_in_month' => $progress['days_in_month'],
@@ -250,13 +241,56 @@ function widgetSpendCap($userId)
       'run_rate_projection' => $progress['run_rate_projection'],
       'is_over_cap' => $progress['is_over_cap'],
       'is_projected_to_exceed' => $progress['is_projected_to_exceed'],
-      'top_categories' => $topCategories,
+      'top_categories' => widgetTopCapCategories($progress['category_breakdown']),
       'daily_spend' => $progress['daily_spend'],
+      'months' => widgetPastCapMonths($db, (int)$userId, $goal),
     ];
   } catch (Throwable $e) {
     error_log('Widget spend cap error: ' . $e->getMessage());
     return null;
   }
+}
+
+// The months before this one, newest first, that the widget's arrows step
+// back through. [] on any error: the current month alone still shows.
+function widgetPastCapMonths($db, int $userId, array $goal): array
+{
+  try {
+    $history = loadSpendCapHistory($db, (int)$goal['id']);
+    $months = [];
+    for ($n = 1; $n < SPEND_CAP_HISTORY_MONTHS; $n++) {
+      $past = computeSpendCapProgress($db, $userId, $goal, true, $n, $history);
+      $months[] = [
+        'month' => $past['month'],
+        'label' => (new DateTime($past['start_date']))->format('F'),
+        'cap' => round($past['target_amount'], 2),
+        'spent' => round($past['current_amount'], 2),
+        'days_in_month' => $past['days_in_month'],
+        'is_over_cap' => $past['is_over_cap'],
+        'top_categories' => widgetTopCapCategories($past['category_breakdown']),
+        'daily_spend' => $past['daily_spend'],
+      ];
+    }
+    return $months;
+  } catch (Throwable $e) {
+    error_log('Widget past spend cap months error: ' . $e->getMessage());
+    return [];
+  }
+}
+
+function widgetTopCapCategories(array $breakdown): array
+{
+  $topCategories = [];
+  foreach ($breakdown as $category) {
+    if ($category['amount'] <= 0) continue;
+    $topCategories[] = [
+      'category_id' => (int)$category['category_id'],
+      'name' => $category['category_name'],
+      'amount' => $category['amount'],
+    ];
+    if (count($topCategories) === 3) break;
+  }
+  return $topCategories;
 }
 
 // NOTE: `SHOW COLUMNS ... LIKE :column` with a bound parameter throws a
